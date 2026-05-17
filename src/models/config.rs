@@ -3,9 +3,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RouteMode {
-    Rule,
     #[default]
+    Tunnel,
     Global,
+    Rule,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]

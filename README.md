@@ -44,7 +44,7 @@ sudo ./miao
 ```yaml
 port: 6161  # Web 面板端口，默认 6161
 socks_port: 2080  # 可选：覆盖本机 SOCKS5 端口，默认监听 127.0.0.1:1080
-route_mode: rule  # 可选：`global` 为默认全局代理，`rule` 为国内直连/国外代理
+route_mode: rule  # 可选：`tunnel` 为默认全量代理，`global` 保留私网直连，`rule` 为国内直连/国外代理
 
 # 订阅链接（推荐，Clash.Meta 格式）
 subs:
@@ -59,4 +59,4 @@ nodes:
 
 miao 默认会开启一个仅本机可访问的 SOCKS5 入站，监听 `127.0.0.1:1080`。设置 `socks_port` 可以覆盖默认端口。
 
-`route_mode` 默认是 `global`：除私网地址外，公网流量全部走代理，适合 Google 登录这类容易被分流误伤的场景。设置为 `rule` 时恢复原先的国内直连、国外代理策略。
+`route_mode` 默认是 `tunnel`：公网流量和 DNS 默认都经代理转发，不做国内外分流；`127.0.0.1`、`localhost` 和其他私网地址仍保持直连。设置为 `global` 时保留私网直连和本地 DNS 兼容性；设置为 `rule` 时恢复原先的国内直连、国外代理策略。

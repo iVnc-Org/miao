@@ -407,16 +407,47 @@ fn get_config_template(route_mode: &RouteMode) -> serde_json::Value {
     let mut route_rules = vec![
         serde_json::json!({"action": "sniff"}),
         serde_json::json!({"protocol": "dns", "action": "hijack-dns"}),
-        serde_json::json!({"ip_is_private": true, "action": "route", "outbound": "direct"}),
     ];
 
-    if matches!(route_mode, RouteMode::Rule) {
-        route_rules.push(serde_json::json!({
-            "rule_set": ["chinaip", "chinasite"],
-            "action": "route",
-            "outbound": "direct"
-        }));
-    }
+    let (dns_rules, default_domain_resolver) = match route_mode {
+        RouteMode::Tunnel => {
+            route_rules.push(
+                serde_json::json!({"ip_is_private": true, "action": "route", "outbound": "direct"}),
+            );
+            (Vec::new(), "cfdns")
+        }
+        RouteMode::Global => {
+            route_rules.push(
+                serde_json::json!({"ip_is_private": true, "action": "route", "outbound": "direct"}),
+            );
+            (
+                vec![serde_json::json!({
+                    "rule_set": ["chinasite"],
+                    "action": "route",
+                    "server": "local"
+                })],
+                "local",
+            )
+        }
+        RouteMode::Rule => {
+            route_rules.push(
+                serde_json::json!({"ip_is_private": true, "action": "route", "outbound": "direct"}),
+            );
+            route_rules.push(serde_json::json!({
+                "rule_set": ["chinaip", "chinasite"],
+                "action": "route",
+                "outbound": "direct"
+            }));
+            (
+                vec![serde_json::json!({
+                    "rule_set": ["chinasite"],
+                    "action": "route",
+                    "server": "local"
+                })],
+                "local",
+            )
+        }
+    };
 
     serde_json::json!({
         "log": {"disabled": false, "timestamp": true, "level": "info"},
@@ -429,7 +460,7 @@ fn get_config_template(route_mode: &RouteMode) -> serde_json::Value {
                 {"type": "udp", "tag": "cfdns", "server": "1.1.1.1", "detour": "proxy"},
                 {"tag": "local", "type": "udp", "server": "223.5.5.5"}
             ],
-            "rules": [{"rule_set": ["chinasite"], "action": "route", "server": "local"}]
+            "rules": dns_rules
         },
         "inbounds": [
             {"type": "tun", "tag": "tun-in", "interface_name": "sing-tun", "address": ["172.18.0.1/30"], "mtu": 9000, "auto_route": true, "strict_route": true, "auto_redirect": true}
@@ -441,7 +472,7 @@ fn get_config_template(route_mode: &RouteMode) -> serde_json::Value {
         "route": {
             "final": "proxy",
             "auto_detect_interface": true,
-            "default_domain_resolver": "local",
+            "default_domain_resolver": default_domain_resolver,
             "rules": route_rules,
             "rule_set": [
                 {"type": "local", "tag": "chinasite", "format": "binary", "path": "./chinasite.srs"},
@@ -564,7 +595,7 @@ mod tests {
     }
 
     #[test]
-    fn build_sing_box_config_enables_default_local_socks_when_not_configured() {
+    fn build_sing_box_config_defaults_to_tunnel_mode_with_local_socks() {
         let config = Config {
             port: None,
             socks_port: None,
@@ -594,6 +625,44 @@ mod tests {
         assert_eq!(inbounds[1]["type"], "socks");
         assert_eq!(inbounds[1]["listen"], "127.0.0.1");
         assert_eq!(inbounds[1]["listen_port"], 1080);
+
+        let dns_rules = built["dns"]["rules"].as_array().unwrap();
+        assert!(dns_rules.is_empty());
+
+        let route_rules = built["route"]["rules"].as_array().unwrap();
+        assert_eq!(route_rules.len(), 3);
+        assert_eq!(route_rules[0]["action"], "sniff");
+        assert_eq!(route_rules[1]["action"], "hijack-dns");
+        assert_eq!(route_rules[2]["ip_is_private"], true);
+        assert_eq!(route_rules[2]["outbound"], "direct");
+        assert_eq!(built["route"]["default_domain_resolver"], "cfdns");
+    }
+
+    #[test]
+    fn build_sing_box_config_supports_global_mode_private_direct() {
+        let config = Config {
+            port: None,
+            socks_port: None,
+            route_mode: Some(RouteMode::Global),
+            subs: vec![],
+            nodes: vec![],
+            custom_rules: vec![],
+        };
+
+        let built = build_sing_box_config(
+            &config,
+            vec!["manual-a".to_string()],
+            vec![json!({
+                "type": "hysteria2",
+                "tag": "manual-a",
+                "server": "manual.example.com",
+                "server_port": 443,
+                "password": "secret"
+            })],
+            vec![],
+            vec![],
+        )
+        .unwrap();
 
         let dns_rules = built["dns"]["rules"].as_array().unwrap();
         assert_eq!(dns_rules.len(), 1);
@@ -767,7 +836,7 @@ mod tests {
         .unwrap();
 
         let rules = built["route"]["rules"].as_array().unwrap();
-        // Should have only the default 3 rules (sniff, hijack-dns, private ip)
+        // Tunnel mode defaults to sniff + hijack-dns + private direct
         assert_eq!(rules.len(), 3);
     }
 
@@ -804,7 +873,7 @@ mod tests {
         .unwrap();
 
         let rules = built["route"]["rules"].as_array().unwrap();
-        // Should have only the default 3 rules
+        // Tunnel mode defaults to sniff + hijack-dns + private direct
         assert_eq!(rules.len(), 3);
     }
 
@@ -855,7 +924,7 @@ mod tests {
         // 先创建旧配置
         tokio::fs::write(
             &config_path,
-            "port: 9999\nsocks_port: 1080\nroute_mode: global\nsubs: []\nnodes: []\ncustom_rules: []",
+            "port: 9999\nsocks_port: 1080\nroute_mode: tunnel\nsubs: []\nnodes: []\ncustom_rules: []",
         )
         .await
         .unwrap();
