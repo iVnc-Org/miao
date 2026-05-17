@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socks_port: Option<u16>,
     #[serde(default)]
     pub subs: Vec<String>,
     #[serde(default)]

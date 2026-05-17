@@ -33,6 +33,13 @@ body,
     height: 100%;
     overflow: hidden;
 }
+html[data-embed-mode='true'],
+html[data-embed-mode='true'] body,
+html[data-embed-mode='true'] #root {
+    height: auto;
+    min-height: 100%;
+    overflow: auto;
+}
 body {
     background: var(--bg);
     color: var(--text);
@@ -58,6 +65,11 @@ button {
     flex-direction: column;
     overflow: hidden;
     background: var(--bg);
+}
+html[data-embed-mode='true'] .shell {
+    height: auto;
+    min-height: 100%;
+    overflow: visible;
 }
 .topbar {
     display: flex;
@@ -158,6 +170,12 @@ button {
     width: 100%;
     margin: 0 auto;
 }
+html[data-embed-mode='true'] .workspace {
+    flex: none;
+    min-height: auto;
+    overflow: visible;
+    padding: 16px;
+}
 .status-card {
     flex-shrink: 0;
     margin-bottom: 20px;
@@ -248,6 +266,11 @@ button {
     grid-template-columns: minmax(0, 1fr) 400px;
     gap: 16px;
 }
+html[data-embed-mode='true'] .content-grid {
+    flex: none;
+    min-height: auto;
+    overflow: visible;
+}
 .left-column,
 .right-column {
     display: flex;
@@ -255,6 +278,11 @@ button {
     gap: 16px;
     overflow-y: auto;
     min-height: 0;
+}
+html[data-embed-mode='true'] .left-column,
+html[data-embed-mode='true'] .right-column {
+    overflow: visible;
+    min-height: auto;
 }
 .section-header {
     display: flex;
@@ -646,14 +674,17 @@ button {
     background: rgba(5, 8, 12, 0.68);
     backdrop-filter: blur(8px);
     z-index: 50;
+    overflow-y: auto;
 }
 .modal-card {
     width: min(100%, 480px);
+    max-height: min(calc(100vh - 32px), 720px);
     border-radius: 16px;
     background: #181c22;
     border: 1px solid var(--border);
     box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
     padding: 18px;
+    overflow-y: auto;
 }
 .modal-confirm {
     width: min(100%, 420px);
@@ -810,6 +841,32 @@ button {
         grid-template-columns: 1fr;
     }
 }
+@media (max-height: 900px) {
+    html,
+    body,
+    #root {
+        height: auto;
+        overflow: auto;
+    }
+    .shell {
+        height: auto;
+        min-height: 100svh;
+        overflow: visible;
+    }
+    .workspace {
+        flex: none;
+        overflow: visible;
+    }
+    .content-grid {
+        flex: none;
+        overflow: visible;
+        grid-template-columns: 1fr;
+    }
+    .left-column,
+    .right-column {
+        overflow: visible;
+    }
+}
 @media (max-width: 840px) {
     /* Switch from viewport-locked to natural page scroll */
     html, body, #root {
@@ -848,6 +905,23 @@ button {
     .proxy-grid {
         grid-template-columns: repeat(2, minmax(0, 1fr));
     }
+}
+html[data-embed-mode='true'] .content-grid {
+    grid-template-columns: 1fr;
+}
+html[data-embed-mode='true'] .proxy-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+html[data-embed-mode='true'] .proxy-grid-wrap {
+    max-height: none;
+    overflow: visible;
+}
+html[data-embed-mode='true'] .modal-overlay {
+    align-items: flex-start;
+}
+html[data-embed-mode='true'] .modal-card {
+    margin: auto 0;
+    max-height: none;
 }
 @media (max-width: 560px) {
     .topbar {

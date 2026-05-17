@@ -118,6 +118,7 @@ mod tests {
     async fn get_subs_returns_default_pending_status_when_status_missing() {
         let state = app_state(Config {
             port: None,
+            socks_port: None,
             subs: vec!["https://example.com/sub".to_string()],
             nodes: vec![],
             custom_rules: vec![],

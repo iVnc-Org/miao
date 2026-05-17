@@ -65,6 +65,7 @@ mod tests {
     fn app_state_new_creates_valid_instance() {
         let config = Config {
             port: Some(8080),
+            socks_port: Some(1080),
             subs: vec!["https://example.com/sub".to_string()],
             nodes: vec![],
             custom_rules: vec![],
@@ -89,6 +90,7 @@ mod tests {
     fn version_cache_starts_empty() {
         let config = Config {
             port: None,
+            socks_port: None,
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],

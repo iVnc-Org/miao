@@ -187,6 +187,7 @@ mod tests {
     async fn get_nodes_returns_parsed_manual_nodes() {
         let state = app_state(Config {
             port: None,
+            socks_port: None,
             subs: vec![],
             nodes: vec![
                 r#"{"type":"hysteria2","tag":"node-a","server":"a.example.com","server_port":443,"password":"secret","up_mbps":40,"down_mbps":350,"tls":{"enabled":true,"server_name":"sni.example.com","insecure":true}}"#.to_string(),
@@ -213,6 +214,7 @@ mod tests {
         // 测试：Hysteria2 节点不包含带宽默认值也能被正确解析
         let state = app_state(Config {
             port: None,
+            socks_port: None,
             subs: vec![],
             nodes: vec![
                 // 不包含 up_mbps/down_mbps 的 Hysteria2 节点
@@ -235,6 +237,7 @@ mod tests {
     async fn get_nodes_skips_invalid_nodes_and_returns_valid_ones() {
         let state = app_state(Config {
             port: None,
+            socks_port: None,
             subs: vec![],
             nodes: vec![
                 // Valid node
@@ -261,6 +264,7 @@ mod tests {
     async fn get_nodes_returns_empty_for_no_nodes() {
         let state = app_state(Config {
             port: None,
+            socks_port: None,
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
@@ -278,6 +282,7 @@ mod tests {
     async fn get_nodes_handles_all_invalid_nodes() {
         let state = app_state(Config {
             port: None,
+            socks_port: None,
             subs: vec![],
             nodes: vec![
                 "not-json".to_string(),
@@ -298,6 +303,7 @@ mod tests {
     async fn get_nodes_handles_mixed_node_types() {
         let state = app_state(Config {
             port: None,
+            socks_port: None,
             subs: vec![],
             nodes: vec![
                 r#"{"type":"hysteria2","tag":"hy2-node","server":"hy2.example.com","server_port":443,"password":"secret"}"#.to_string(),
@@ -323,6 +329,7 @@ mod tests {
     async fn get_nodes_preserves_node_order() {
         let state = app_state(Config {
             port: None,
+            socks_port: None,
             subs: vec![],
             nodes: vec![
                 r#"{"type":"hysteria2","tag":"first","server":"first.example.com","server_port":443,"password":"secret"}"#.to_string(),
@@ -346,6 +353,7 @@ mod tests {
     async fn get_nodes_handles_ipv6_addresses() {
         let state = app_state(Config {
             port: None,
+            socks_port: None,
             subs: vec![],
             nodes: vec![
                 r#"{"type":"hysteria2","tag":"ipv6-node","server":"2001:db8::1","server_port":443,"password":"secret"}"#.to_string(),
@@ -367,6 +375,7 @@ mod tests {
     async fn get_nodes_handles_unicode_tags() {
         let state = app_state(Config {
             port: None,
+            socks_port: None,
             subs: vec![],
             nodes: vec![
                 r#"{"type":"hysteria2","tag":"香港节点","server":"hk.example.com","server_port":443,"password":"secret"}"#.to_string(),

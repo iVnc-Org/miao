@@ -63,6 +63,27 @@ export default function App() {
     clearConnectivity
   } = useConnectivity()
 
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const embedParam = params.get('embed')
+    let embedded = false
+    try {
+      embedded = window.self !== window.top
+    } catch {
+      embedded = true
+    }
+    const embedMode = embedParam === '1' || embedParam === 'true' || embedded
+    const root = document.documentElement
+    if (embedMode) {
+      root.setAttribute('data-embed-mode', 'true')
+    } else {
+      root.removeAttribute('data-embed-mode')
+    }
+    return () => {
+      root.removeAttribute('data-embed-mode')
+    }
+  }, [])
+
   const clashApiBase = useMemo(() => `http://${window.location.hostname}:6262`, [])
 
   const nodeMetaMap = useMemo(() => {

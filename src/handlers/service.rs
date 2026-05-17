@@ -123,6 +123,7 @@ mod tests {
     async fn get_status_reports_stopped_when_no_process_exists() {
         let state = app_state(Config {
             port: None,
+            socks_port: None,
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],

@@ -359,6 +359,23 @@ fn build_sing_box_config(
     }
 
     let mut sing_box_config = get_config_template();
+    if let Some(socks_port) = config.socks_port {
+        if socks_port == 0 {
+            return Err(AppError::message(
+                "Invalid socks_port: must be between 1 and 65535",
+            ));
+        }
+
+        if let Some(inbounds) = sing_box_config["inbounds"].as_array_mut() {
+            inbounds.push(serde_json::json!({
+                "type": "socks",
+                "tag": "socks-in",
+                "listen": "127.0.0.1",
+                "listen_port": socks_port
+            }));
+        }
+    }
+
     if let Some(outbounds) = sing_box_config["outbounds"][0].get_mut("outbounds") {
         if let Some(arr) = outbounds.as_array_mut() {
             arr.extend(
@@ -434,6 +451,7 @@ mod tests {
     fn collect_manual_outbounds_ignores_invalid_json_nodes() {
         let config = Config {
             port: None,
+            socks_port: None,
             subs: vec![],
             nodes: vec![
                 r#"{"type":"hysteria2","tag":"manual-a","server":"a.example.com","server_port":443,"password":"p","up_mbps":40,"down_mbps":350,"tls":{"enabled":true,"insecure":true}}"#.to_string(),
@@ -454,6 +472,7 @@ mod tests {
         // 测试：Hysteria2 节点不强制包含带宽默认值
         let config = Config {
             port: None,
+            socks_port: None,
             subs: vec![],
             nodes: vec![
                 // 不包含 up_mbps/down_mbps 的节点
@@ -475,6 +494,7 @@ mod tests {
     fn build_sing_box_config_merges_nodes_and_valid_custom_rules() {
         let config = Config {
             port: None,
+            socks_port: Some(1080),
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![
@@ -514,6 +534,12 @@ mod tests {
         assert_eq!(selector[0], "manual-a");
         assert_eq!(selector[1], "sub-a");
 
+        let inbounds = built["inbounds"].as_array().unwrap();
+        assert_eq!(inbounds.len(), 2);
+        assert_eq!(inbounds[1]["type"], "socks");
+        assert_eq!(inbounds[1]["listen"], "127.0.0.1");
+        assert_eq!(inbounds[1]["listen_port"], 1080);
+
         let all_outbounds = built["outbounds"].as_array().unwrap();
         assert_eq!(all_outbounds.len(), 4);
         assert_eq!(all_outbounds[2]["tag"], "manual-a");
@@ -528,6 +554,7 @@ mod tests {
     fn build_sing_box_config_errors_when_no_nodes_available() {
         let config = Config {
             port: None,
+            socks_port: None,
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
@@ -544,6 +571,7 @@ mod tests {
     fn collect_manual_outbounds_handles_empty_nodes() {
         let config = Config {
             port: None,
+            socks_port: None,
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
@@ -559,6 +587,7 @@ mod tests {
     fn collect_manual_outbounds_handles_all_invalid_nodes() {
         let config = Config {
             port: None,
+            socks_port: None,
             subs: vec![],
             nodes: vec![
                 "not-json".to_string(),
@@ -579,6 +608,7 @@ mod tests {
     fn build_sing_box_config_preserves_node_order() {
         let config = Config {
             port: None,
+            socks_port: None,
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
@@ -614,6 +644,7 @@ mod tests {
     fn build_sing_box_config_handles_no_custom_rules() {
         let config = Config {
             port: None,
+            socks_port: None,
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
@@ -645,6 +676,7 @@ mod tests {
     fn build_sing_box_config_ignores_all_invalid_custom_rules() {
         let config = Config {
             port: None,
+            socks_port: None,
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![
@@ -683,6 +715,7 @@ mod tests {
 
         let config = Config {
             port: Some(8080),
+            socks_port: Some(1080),
             subs: vec!["https://example.com/sub".to_string()],
             nodes: vec![],
             custom_rules: vec![],
@@ -702,6 +735,7 @@ mod tests {
         let content = tokio::fs::read_to_string(&config_path).await.unwrap();
         let parsed: Config = serde_yaml::from_str(&content).unwrap();
         assert_eq!(parsed.port, Some(8080));
+        assert_eq!(parsed.socks_port, Some(1080));
         assert_eq!(parsed.subs.len(), 1);
 
         // 清理
@@ -719,7 +753,7 @@ mod tests {
         // 先创建旧配置
         tokio::fs::write(
             &config_path,
-            "port: 9999\nsubs: []\nnodes: []\ncustom_rules: []",
+            "port: 9999\nsocks_port: 1080\nsubs: []\nnodes: []\ncustom_rules: []",
         )
         .await
         .unwrap();
@@ -727,6 +761,7 @@ mod tests {
         // 使用原子写入保存新配置
         let config = Config {
             port: Some(7777),
+            socks_port: Some(2080),
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
@@ -742,6 +777,7 @@ mod tests {
         let content = tokio::fs::read_to_string(&config_path).await.unwrap();
         let parsed: Config = serde_yaml::from_str(&content).unwrap();
         assert_eq!(parsed.port, Some(7777));
+        assert_eq!(parsed.socks_port, Some(2080));
 
         // 清理
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;
