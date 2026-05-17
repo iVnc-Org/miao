@@ -404,20 +404,6 @@ fn build_sing_box_config(
 }
 
 fn get_config_template(route_mode: &RouteMode) -> serde_json::Value {
-    let default_domain_resolver = match route_mode {
-        RouteMode::Rule => "local",
-        RouteMode::Global => "cfdns",
-    };
-
-    let dns_rules = match route_mode {
-        RouteMode::Rule => vec![serde_json::json!({
-            "rule_set": ["chinasite"],
-            "action": "route",
-            "server": "local"
-        })],
-        RouteMode::Global => Vec::new(),
-    };
-
     let mut route_rules = vec![
         serde_json::json!({"action": "sniff"}),
         serde_json::json!({"protocol": "dns", "action": "hijack-dns"}),
@@ -443,7 +429,7 @@ fn get_config_template(route_mode: &RouteMode) -> serde_json::Value {
                 {"type": "udp", "tag": "cfdns", "server": "1.1.1.1", "detour": "proxy"},
                 {"tag": "local", "type": "udp", "server": "223.5.5.5"}
             ],
-            "rules": dns_rules
+            "rules": [{"rule_set": ["chinasite"], "action": "route", "server": "local"}]
         },
         "inbounds": [
             {"type": "tun", "tag": "tun-in", "interface_name": "sing-tun", "address": ["172.18.0.1/30"], "mtu": 9000, "auto_route": true, "strict_route": true, "auto_redirect": true}
@@ -455,7 +441,7 @@ fn get_config_template(route_mode: &RouteMode) -> serde_json::Value {
         "route": {
             "final": "proxy",
             "auto_detect_interface": true,
-            "default_domain_resolver": default_domain_resolver,
+            "default_domain_resolver": "local",
             "rules": route_rules,
             "rule_set": [
                 {"type": "local", "tag": "chinasite", "format": "binary", "path": "./chinasite.srs"},
@@ -610,13 +596,14 @@ mod tests {
         assert_eq!(inbounds[1]["listen_port"], 1080);
 
         let dns_rules = built["dns"]["rules"].as_array().unwrap();
-        assert!(dns_rules.is_empty());
+        assert_eq!(dns_rules.len(), 1);
+        assert_eq!(dns_rules[0]["server"], "local");
 
         let route_rules = built["route"]["rules"].as_array().unwrap();
         assert_eq!(route_rules.len(), 3);
         assert_eq!(route_rules[2]["ip_is_private"], true);
         assert_eq!(route_rules[2]["outbound"], "direct");
-        assert_eq!(built["route"]["default_domain_resolver"], "cfdns");
+        assert_eq!(built["route"]["default_domain_resolver"], "local");
     }
 
     #[test]
