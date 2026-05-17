@@ -4,7 +4,7 @@ use tokio::time::Duration;
 use tracing::{error, info, warn};
 
 use crate::error::{AppError, AppResult};
-use crate::models::{Config, SubStatus};
+use crate::models::{Config, SubStatus, DEFAULT_SOCKS_PORT};
 use crate::services::{
     proxy::restore_last_proxy,
     singbox::{
@@ -359,21 +359,20 @@ fn build_sing_box_config(
     }
 
     let mut sing_box_config = get_config_template();
-    if let Some(socks_port) = config.socks_port {
-        if socks_port == 0 {
-            return Err(AppError::message(
-                "Invalid socks_port: must be between 1 and 65535",
-            ));
-        }
+    let socks_port = config.socks_port.unwrap_or(DEFAULT_SOCKS_PORT);
+    if socks_port == 0 {
+        return Err(AppError::message(
+            "Invalid socks_port: must be between 1 and 65535",
+        ));
+    }
 
-        if let Some(inbounds) = sing_box_config["inbounds"].as_array_mut() {
-            inbounds.push(serde_json::json!({
-                "type": "socks",
-                "tag": "socks-in",
-                "listen": "127.0.0.1",
-                "listen_port": socks_port
-            }));
-        }
+    if let Some(inbounds) = sing_box_config["inbounds"].as_array_mut() {
+        inbounds.push(serde_json::json!({
+            "type": "socks",
+            "tag": "socks-in",
+            "listen": "127.0.0.1",
+            "listen_port": socks_port
+        }));
     }
 
     if let Some(outbounds) = sing_box_config["outbounds"][0].get_mut("outbounds") {
@@ -548,6 +547,38 @@ mod tests {
         let rules = built["route"]["rules"].as_array().unwrap();
         assert_eq!(rules.len(), 4);
         assert_eq!(rules[3]["domain_suffix"][0], "example.com");
+    }
+
+    #[test]
+    fn build_sing_box_config_enables_default_local_socks_when_not_configured() {
+        let config = Config {
+            port: None,
+            socks_port: None,
+            subs: vec![],
+            nodes: vec![],
+            custom_rules: vec![],
+        };
+
+        let built = build_sing_box_config(
+            &config,
+            vec!["manual-a".to_string()],
+            vec![json!({
+                "type": "hysteria2",
+                "tag": "manual-a",
+                "server": "manual.example.com",
+                "server_port": 443,
+                "password": "secret"
+            })],
+            vec![],
+            vec![],
+        )
+        .unwrap();
+
+        let inbounds = built["inbounds"].as_array().unwrap();
+        assert_eq!(inbounds.len(), 2);
+        assert_eq!(inbounds[1]["type"], "socks");
+        assert_eq!(inbounds[1]["listen"], "127.0.0.1");
+        assert_eq!(inbounds[1]["listen_port"], 1080);
     }
 
     #[test]

@@ -43,7 +43,7 @@ sudo ./miao
 
 ```yaml
 port: 6161  # Web 面板端口，默认 6161
-socks_port: 1080  # 可选：开启本机 SOCKS5，监听 127.0.0.1:1080
+socks_port: 2080  # 可选：覆盖本机 SOCKS5 端口，默认监听 127.0.0.1:1080
 
 # 订阅链接（推荐，Clash.Meta 格式）
 subs:
@@ -56,4 +56,4 @@ nodes:
   - '{"type":"shadowsocks","tag":"SS","server":"example.com","server_port":443,"method":"2022-blake3-aes-128-gcm","password":"xxx"}'
 ```
 
-设置 `socks_port` 后，miao 会额外开启一个仅本机可访问的 SOCKS5 入站，监听 `127.0.0.1:<socks_port>`。
+miao 默认会开启一个仅本机可访问的 SOCKS5 入站，监听 `127.0.0.1:1080`。设置 `socks_port` 可以覆盖默认端口。
