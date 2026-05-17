@@ -4,7 +4,7 @@ version = "0.18.4"
 edition = "2021"
 
 [dependencies]
-axum = { version = "0.8", features = ["macros"] }
+axum = { version = "0.8", features = ["macros", "ws"] }
 tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
@@ -24,3 +24,4 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 arc-swap = "1.7"
 bytes = "1.0"
+tokio-tungstenite = "0.28"

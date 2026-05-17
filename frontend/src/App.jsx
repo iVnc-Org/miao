@@ -84,7 +84,7 @@ export default function App() {
     }
   }, [])
 
-  const clashApiBase = useMemo(() => `http://${window.location.hostname}:6262`, [])
+  const clashApiBase = useMemo(() => '/api/clash', [])
 
   const nodeMetaMap = useMemo(() => {
     const map = new Map()
