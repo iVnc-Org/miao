@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock};
 
-use crate::models::{Config, GitHubRelease, SubStatus};
+use crate::models::{Config, GitHubRelease, RouteMode, SubStatus};
 
 /// 应用状态容器 - 包含所有运行时状态
 /// 通过依赖注入传递，避免全局静态变量
@@ -66,6 +66,7 @@ mod tests {
         let config = Config {
             port: Some(8080),
             socks_port: Some(1080),
+            route_mode: Some(RouteMode::Rule),
             subs: vec!["https://example.com/sub".to_string()],
             nodes: vec![],
             custom_rules: vec![],
@@ -91,6 +92,7 @@ mod tests {
         let config = Config {
             port: None,
             socks_port: None,
+            route_mode: None,
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],

@@ -188,6 +188,7 @@ mod tests {
         let state = app_state(Config {
             port: None,
             socks_port: None,
+            route_mode: None,
             subs: vec![],
             nodes: vec![
                 r#"{"type":"hysteria2","tag":"node-a","server":"a.example.com","server_port":443,"password":"secret","up_mbps":40,"down_mbps":350,"tls":{"enabled":true,"server_name":"sni.example.com","insecure":true}}"#.to_string(),
@@ -215,6 +216,7 @@ mod tests {
         let state = app_state(Config {
             port: None,
             socks_port: None,
+            route_mode: None,
             subs: vec![],
             nodes: vec![
                 // 不包含 up_mbps/down_mbps 的 Hysteria2 节点
@@ -238,6 +240,7 @@ mod tests {
         let state = app_state(Config {
             port: None,
             socks_port: None,
+            route_mode: None,
             subs: vec![],
             nodes: vec![
                 // Valid node
@@ -265,6 +268,7 @@ mod tests {
         let state = app_state(Config {
             port: None,
             socks_port: None,
+            route_mode: None,
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
@@ -283,6 +287,7 @@ mod tests {
         let state = app_state(Config {
             port: None,
             socks_port: None,
+            route_mode: None,
             subs: vec![],
             nodes: vec![
                 "not-json".to_string(),
@@ -304,6 +309,7 @@ mod tests {
         let state = app_state(Config {
             port: None,
             socks_port: None,
+            route_mode: None,
             subs: vec![],
             nodes: vec![
                 r#"{"type":"hysteria2","tag":"hy2-node","server":"hy2.example.com","server_port":443,"password":"secret"}"#.to_string(),
@@ -330,6 +336,7 @@ mod tests {
         let state = app_state(Config {
             port: None,
             socks_port: None,
+            route_mode: None,
             subs: vec![],
             nodes: vec![
                 r#"{"type":"hysteria2","tag":"first","server":"first.example.com","server_port":443,"password":"secret"}"#.to_string(),
@@ -354,6 +361,7 @@ mod tests {
         let state = app_state(Config {
             port: None,
             socks_port: None,
+            route_mode: None,
             subs: vec![],
             nodes: vec![
                 r#"{"type":"hysteria2","tag":"ipv6-node","server":"2001:db8::1","server_port":443,"password":"secret"}"#.to_string(),
@@ -376,6 +384,7 @@ mod tests {
         let state = app_state(Config {
             port: None,
             socks_port: None,
+            route_mode: None,
             subs: vec![],
             nodes: vec![
                 r#"{"type":"hysteria2","tag":"香港节点","server":"hk.example.com","server_port":443,"password":"secret"}"#.to_string(),

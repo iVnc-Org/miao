@@ -124,6 +124,7 @@ mod tests {
         let state = app_state(Config {
             port: None,
             socks_port: None,
+            route_mode: None,
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],

@@ -57,6 +57,7 @@ mod tests {
         let app = test_app(Config {
             port: None,
             socks_port: None,
+            route_mode: None,
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
@@ -75,6 +76,7 @@ mod tests {
         let app = test_app(Config {
             port: None,
             socks_port: None,
+            route_mode: None,
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
@@ -100,6 +102,7 @@ mod tests {
         let app = test_app(Config {
             port: None,
             socks_port: None,
+            route_mode: None,
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
@@ -123,6 +126,7 @@ mod tests {
         let app = test_app(Config {
             port: None,
             socks_port: None,
+            route_mode: None,
             subs: vec![],
             nodes: vec![
                 r#"{"type":"hysteria2","tag":"router-node","server":"node.example.com","server_port":443,"password":"secret","up_mbps":40,"down_mbps":350,"tls":{"enabled":true,"server_name":"sni.example.com","insecure":true}}"#.to_string(),
@@ -150,6 +154,7 @@ mod tests {
         let app = test_app(Config {
             port: None,
             socks_port: None,
+            route_mode: None,
             subs: vec!["https://example.com/subscription".to_string()],
             nodes: vec![],
             custom_rules: vec![],
@@ -174,6 +179,7 @@ mod tests {
         let app = test_app(Config {
             port: None,
             socks_port: None,
+            route_mode: None,
             subs: vec!["https://example.com/subscription".to_string()],
             nodes: vec![],
             custom_rules: vec![],
@@ -200,6 +206,7 @@ mod tests {
         let app = test_app(Config {
             port: None,
             socks_port: None,
+            route_mode: None,
             subs: vec!["https://example.com/subscription".to_string()],
             nodes: vec![],
             custom_rules: vec![],
@@ -226,6 +233,7 @@ mod tests {
         let app = test_app(Config {
             port: None,
             socks_port: None,
+            route_mode: None,
             subs: vec![],
             nodes: vec![
                 r#"{"type":"hysteria2","tag":"router-node","server":"node.example.com","server_port":443,"password":"password123","up_mbps":40,"down_mbps":350,"tls":{"enabled":true,"insecure":true}}"#.to_string(),
@@ -259,6 +267,7 @@ mod tests {
         let app = test_app(Config {
             port: None,
             socks_port: None,
+            route_mode: None,
             subs: vec![],
             nodes: vec![
                 r#"{"type":"hysteria2","tag":"router-node","server":"node.example.com","server_port":443,"password":"secret","up_mbps":40,"down_mbps":350,"tls":{"enabled":true,"insecure":true}}"#.to_string(),
