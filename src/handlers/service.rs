@@ -4,7 +4,7 @@ use std::{sync::Arc, time::Instant};
 use tokio::time::Duration;
 
 use crate::error::AppError;
-use crate::models::{ApiResponse, ConnectivityResult, StatusData};
+use crate::models::{ApiResponse, ConnectivityResult, StatusData, DEFAULT_SOCKS_PORT};
 use crate::responses::{status_error, success, success_no_data, HandlerResult};
 use crate::services::{
     proxy::restore_last_proxy,
@@ -89,18 +89,34 @@ pub async fn test_connectivity(
     Json(req): Json<ConnectivityRequest>,
 ) -> Json<ApiResponse<ConnectivityResult>> {
     let start = Instant::now();
-    let result = match state
-        .http_client
-        .head(&req.url)
-        .timeout(Duration::from_secs(5))
-        .send()
+    let socks_port = state
+        .config
+        .read()
         .await
-    {
-        Ok(_) => ConnectivityResult {
-            name: String::new(),
-            url: req.url,
-            latency_ms: Some(start.elapsed().as_millis() as u64),
-            success: true,
+        .socks_port
+        .unwrap_or(DEFAULT_SOCKS_PORT);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .proxy(
+            reqwest::Proxy::all(format!("socks5h://127.0.0.1:{socks_port}"))
+                .expect("valid local socks proxy URL"),
+        )
+        .build();
+
+    let result = match client {
+        Ok(client) => match client.head(&req.url).send().await {
+            Ok(_) => ConnectivityResult {
+                name: String::new(),
+                url: req.url,
+                latency_ms: Some(start.elapsed().as_millis() as u64),
+                success: true,
+            },
+            Err(_) => ConnectivityResult {
+                name: String::new(),
+                url: req.url,
+                latency_ms: None,
+                success: false,
+            },
         },
         Err(_) => ConnectivityResult {
             name: String::new(),

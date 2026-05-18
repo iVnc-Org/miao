@@ -49,6 +49,13 @@ fn config_cache_fingerprint(config: &Config) -> AppResult<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
+fn normalize_cached_sing_box_config(mut config: serde_json::Value) -> serde_json::Value {
+    if config["route"]["default_domain_resolver"] == "cfdns" {
+        config["route"]["default_domain_resolver"] = serde_json::Value::String("local".to_string());
+    }
+    config
+}
+
 /// 原子写入文件：先写入临时文件，再重命名为目标文件
 async fn write_file_atomic(path: &std::path::Path, content: &str) -> AppResult<()> {
     let temp_path = path.with_extension("tmp");
@@ -124,13 +131,24 @@ pub async fn restore_config_from_cache(config: &Config) -> AppResult<()> {
         ));
     }
 
+    let cached_config = tokio::fs::read_to_string(&cache)
+        .await
+        .map_err(|e| AppError::context("Failed to read cached config", e))?;
+    let cached_config: serde_json::Value = serde_json::from_str(&cached_config)
+        .map_err(|e| AppError::context("Failed to parse cached config", e))?;
+    let cached_config = normalize_cached_sing_box_config(cached_config);
+    let cached_config = serde_json::to_string(&cached_config)?;
+
     let config_path = get_sing_box_home().join("config.json");
-    tokio::fs::copy(&cache, &config_path)
+    write_file_atomic(&config_path, &cached_config)
         .await
         .map_err(|e| AppError::context("Failed to restore config from cache", e))?;
     validate_sing_box_config()
         .await
         .map_err(|e| AppError::context("Cached config validation failed", e))?;
+    write_file_atomic(&cache, &cached_config)
+        .await
+        .map_err(|e| AppError::context("Failed to update normalized config cache", e))?;
     info!(cache = ?cache, "Restored config from cache");
     Ok(())
 }
@@ -485,7 +503,7 @@ fn get_config_template(route_mode: &RouteMode) -> serde_json::Value {
             route_rules.push(
                 serde_json::json!({"ip_is_private": true, "action": "route", "outbound": "direct"}),
             );
-            (Vec::new(), "cfdns")
+            (Vec::new(), "local")
         }
         RouteMode::Global => {
             route_rules.push(
@@ -555,7 +573,10 @@ fn get_config_template(route_mode: &RouteMode) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_sing_box_config, collect_manual_outbounds, config_cache_fingerprint};
+    use super::{
+        build_sing_box_config, collect_manual_outbounds, config_cache_fingerprint,
+        normalize_cached_sing_box_config,
+    };
     use crate::models::{Config, RouteMode};
     use serde_json::json;
 
@@ -706,7 +727,7 @@ mod tests {
         assert_eq!(route_rules[1]["action"], "hijack-dns");
         assert_eq!(route_rules[2]["ip_is_private"], true);
         assert_eq!(route_rules[2]["outbound"], "direct");
-        assert_eq!(built["route"]["default_domain_resolver"], "cfdns");
+        assert_eq!(built["route"]["default_domain_resolver"], "local");
     }
 
     #[test]
@@ -807,6 +828,19 @@ mod tests {
             config_cache_fingerprint(&first).unwrap(),
             config_cache_fingerprint(&second).unwrap()
         );
+    }
+
+    #[test]
+    fn normalize_cached_sing_box_config_repairs_proxy_dns_bootstrap() {
+        let config = json!({
+            "route": {
+                "default_domain_resolver": "cfdns"
+            }
+        });
+
+        let normalized = normalize_cached_sing_box_config(config);
+
+        assert_eq!(normalized["route"]["default_domain_resolver"], "local");
     }
 
     #[test]
