@@ -6,26 +6,40 @@ use tracing::{error, info, warn};
 
 use crate::error::AppResult;
 use crate::models::LastProxy;
+use crate::services::config::get_config_cache_path;
 use crate::services::singbox::get_sing_box_home;
 use crate::state::AppState;
 
 fn get_last_proxy_path() -> PathBuf {
+    get_config_cache_path()
+        .parent()
+        .map(|dir| dir.join("last_proxy.json"))
+        .unwrap_or_else(|| PathBuf::from("data/cache/last_proxy.json"))
+}
+
+fn get_legacy_last_proxy_path() -> PathBuf {
     get_sing_box_home().join(".last_proxy")
 }
 
 pub async fn save_last_proxy(proxy: &LastProxy) -> AppResult<()> {
     let json = serde_json::to_string(proxy)?;
-    tokio::fs::write(get_last_proxy_path(), json).await?;
+    let path = get_last_proxy_path();
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::write(path, json).await?;
     Ok(())
 }
 
 async fn load_last_proxy() -> Option<LastProxy> {
-    let path = get_last_proxy_path();
-    if let Ok(content) = tokio::fs::read_to_string(&path).await {
-        serde_json::from_str(&content).ok()
-    } else {
-        None
+    for path in [get_last_proxy_path(), get_legacy_last_proxy_path()] {
+        if let Ok(content) = tokio::fs::read_to_string(&path).await {
+            if let Ok(proxy) = serde_json::from_str(&content) {
+                return Some(proxy);
+            }
+        }
     }
+    None
 }
 
 pub async fn restore_last_proxy(state: &Arc<AppState>) {
@@ -90,5 +104,18 @@ pub async fn restore_last_proxy(state: &Arc<AppState>) {
         Err(e) => {
             error!("Failed to restore last proxy: {}", e);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::get_last_proxy_path;
+
+    #[test]
+    fn last_proxy_path_uses_persistent_cache_dir() {
+        assert_eq!(
+            get_last_proxy_path(),
+            std::path::PathBuf::from("data/cache/last_proxy.json")
+        );
     }
 }

@@ -12,7 +12,10 @@ use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 use tokio_tungstenite::{connect_async, tungstenite::Message as TungsteniteMessage};
+use tracing::warn;
 
+use crate::models::LastProxy;
+use crate::services::proxy::save_last_proxy;
 use crate::state::AppState;
 
 const CLASH_API_BASE: &str = "http://127.0.0.1:6262";
@@ -83,8 +86,27 @@ pub async fn switch_proxy(
     Path(group): Path<String>,
     axum::extract::Json(body): axum::extract::Json<serde_json::Value>,
 ) -> Response<Body> {
+    let selected_name = selected_proxy_name(&body).map(str::to_string);
     let path = format!("/proxies/{}", urlencoding::encode(&group));
-    clash_request(state, Method::PUT, &path, Some(body)).await
+    let response = clash_request(state, Method::PUT, &path, Some(body)).await;
+
+    if response.status().is_success() {
+        if let Some(name) = selected_name {
+            let proxy = LastProxy {
+                group: group.clone(),
+                name,
+            };
+            if let Err(err) = save_last_proxy(&proxy).await {
+                warn!("failed to save selected proxy: {}", err);
+            }
+        }
+    }
+
+    response
+}
+
+fn selected_proxy_name(body: &serde_json::Value) -> Option<&str> {
+    body.get("name").and_then(|name| name.as_str())
 }
 
 pub async fn test_proxy_delay(
@@ -103,6 +125,25 @@ pub async fn test_proxy_delay(
         urlencoding::encode(&url)
     );
     clash_request(state, Method::GET, &path, None).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::selected_proxy_name;
+    use serde_json::json;
+
+    #[test]
+    fn selected_proxy_name_reads_name_from_switch_body() {
+        let body = json!({"name": "node-a"});
+
+        assert_eq!(selected_proxy_name(&body), Some("node-a"));
+    }
+
+    #[test]
+    fn selected_proxy_name_ignores_missing_or_non_string_name() {
+        assert_eq!(selected_proxy_name(&json!({})), None);
+        assert_eq!(selected_proxy_name(&json!({"name": 123})), None);
+    }
 }
 
 pub async fn traffic_ws(ws: WebSocketUpgrade) -> impl IntoResponse {
