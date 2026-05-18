@@ -69,6 +69,7 @@ pub fn extract_sing_box() -> AppResult<PathBuf> {
 
 /// 在停止运行中的实例前验证 sing-box 配置，避免不必要的服务中断
 pub async fn validate_sing_box_config() -> AppResult<()> {
+    let _ = extract_sing_box()?;
     let sing_box_home = get_sing_box_home();
     let sing_box_path = sing_box_home.join("sing-box");
     let config_path = sing_box_home.join("config.json");
@@ -94,6 +95,8 @@ pub async fn validate_sing_box_config() -> AppResult<()> {
 }
 
 pub async fn start_sing_internal(state: &Arc<AppState>) -> AppResult<()> {
+    let _ = extract_sing_box()?;
+
     let mut lock = state.sing_process.lock().await;
     if let Some(ref mut proc) = *lock {
         if proc

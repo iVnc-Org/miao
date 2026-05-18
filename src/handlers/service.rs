@@ -7,8 +7,9 @@ use crate::error::AppError;
 use crate::models::{ApiResponse, ConnectivityResult, StatusData, DEFAULT_SOCKS_PORT};
 use crate::responses::{status_error, success, success_no_data, HandlerResult};
 use crate::services::{
+    config::{gen_config, restore_config_from_cache, save_config_cache},
     proxy::restore_last_proxy,
-    singbox::{start_sing_internal, stop_sing_internal},
+    singbox::{get_sing_box_home, start_sing_internal, stop_sing_internal},
 };
 use crate::state::AppState;
 
@@ -55,6 +56,39 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> Json<ApiResponse<
 }
 
 pub async fn start_service(State(state): State<Arc<AppState>>) -> HandlerResult {
+    let config_path = get_sing_box_home().join("config.json");
+    if !config_path.exists() {
+        let config = state.config.read().await.clone();
+        match restore_config_from_cache(&config).await {
+            Ok(_) => {
+                *state.config_source.lock().await = Some("cache".to_string());
+                *state.config_warning.lock().await =
+                    Some("当前使用上次成功生成的缓存配置，订阅未在启动时自动刷新".to_string());
+            }
+            Err(cache_err) => match gen_config(&config, &state).await {
+                Ok(has_sub_nodes) => {
+                    *state.config_source.lock().await = Some("generated".to_string());
+                    if has_sub_nodes || config.subs.is_empty() {
+                        save_config_cache(&config).await;
+                        *state.config_warning.lock().await = None;
+                    } else if !config.subs.is_empty() {
+                        *state.config_warning.lock().await =
+                            Some("所有订阅获取失败，请检查当前订阅".to_string());
+                    }
+                }
+                Err(generate_err) => {
+                    return Err(status_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!(
+                            "Failed to prepare sing-box config: cache restore failed: {}; regenerate failed: {}",
+                            cache_err, generate_err
+                        ),
+                    ));
+                }
+            },
+        }
+    }
+
     match start_sing_internal(&state).await {
         Ok(_) => {
             let state_for_proxy = state.clone();
