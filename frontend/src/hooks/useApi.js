@@ -36,7 +36,7 @@ export function useApi(loadingState) {
 }
 
 export function useStatus() {
-  const [status, setStatus] = useState({ running: false, pid: null, uptime_secs: null, initializing: false })
+  const [status, setStatus] = useState({ running: false, pid: null, uptime_secs: null, initializing: false, config_source: null, warning: null })
 
   const fetchStatus = useCallback(async () => {
     try {

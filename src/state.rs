@@ -15,6 +15,7 @@ pub struct AppState {
     pub sing_process: Mutex<Option<SingBoxProcess>>,
     pub sub_status: Mutex<HashMap<String, SubStatus>>,
     pub config_warning: Mutex<Option<String>>,
+    pub config_source: Mutex<Option<String>>,
     pub initializing: AtomicBool,
     pub http_client: reqwest::Client,
     pub version_cache: ArcSwap<VersionCache>, // 使用 ArcSwap 实现无锁读取
@@ -34,6 +35,7 @@ impl AppState {
             sing_process: Mutex::new(None),
             sub_status: Mutex::new(HashMap::new()),
             config_warning: Mutex::new(None),
+            config_source: Mutex::new(None),
             initializing: AtomicBool::new(true),
             http_client,
             version_cache: ArcSwap::new(Arc::new(VersionCache {

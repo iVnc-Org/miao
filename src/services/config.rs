@@ -1,4 +1,7 @@
 use futures::{stream, StreamExt};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::time::Duration;
 use tracing::{error, info, warn};
@@ -14,8 +17,37 @@ use crate::services::{
 };
 use crate::state::AppState;
 
-const CONFIG_CACHE_PATH: &str = "/tmp/miao-sing-box/config.json.cache";
+const CONFIG_CACHE_DIR: &str = "data/cache";
+const CONFIG_CACHE_FILE: &str = "config.json";
+const CONFIG_CACHE_META_FILE: &str = "config.meta.json";
 const MAX_CONCURRENT_SUBS: usize = 5;
+
+#[derive(Serialize, Deserialize)]
+struct ConfigCacheMeta {
+    fingerprint: String,
+}
+
+pub fn get_config_cache_path() -> PathBuf {
+    PathBuf::from(CONFIG_CACHE_DIR).join(CONFIG_CACHE_FILE)
+}
+
+fn get_config_cache_meta_path() -> PathBuf {
+    PathBuf::from(CONFIG_CACHE_DIR).join(CONFIG_CACHE_META_FILE)
+}
+
+fn config_cache_fingerprint(config: &Config) -> AppResult<String> {
+    let value = serde_json::json!({
+        "socks_port": config.socks_port,
+        "route_mode": &config.route_mode,
+        "subs": &config.subs,
+        "nodes": &config.nodes,
+        "custom_rules": &config.custom_rules,
+    });
+    let bytes = serde_json::to_vec(&value)?;
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    Ok(hex::encode(hasher.finalize()))
+}
 
 /// 原子写入文件：先写入临时文件，再重命名为目标文件
 async fn write_file_atomic(path: &std::path::Path, content: &str) -> AppResult<()> {
@@ -39,25 +71,67 @@ pub async fn save_config(config: &Config) -> AppResult<()> {
     write_file_atomic(std::path::Path::new("config.yaml"), &yaml).await
 }
 
-pub async fn save_config_cache() {
+pub async fn save_config_cache(config: &Config) {
     let config_path = get_sing_box_home().join("config.json");
-    if let Err(e) = tokio::fs::copy(&config_path, CONFIG_CACHE_PATH).await {
-        error!("Failed to save config cache: {}", e);
-    } else {
-        info!("Config cache saved to {}", CONFIG_CACHE_PATH);
+    let cache_path = get_config_cache_path();
+    let meta_path = get_config_cache_meta_path();
+
+    if let Err(e) = tokio::fs::create_dir_all(CONFIG_CACHE_DIR).await {
+        error!("Failed to create config cache directory: {}", e);
+        return;
     }
+
+    if let Err(e) = tokio::fs::copy(&config_path, &cache_path).await {
+        error!("Failed to save config cache: {}", e);
+        return;
+    }
+
+    let meta = match config_cache_fingerprint(config)
+        .map(|fingerprint| ConfigCacheMeta { fingerprint })
+        .and_then(|meta| serde_json::to_string(&meta).map_err(AppError::from))
+    {
+        Ok(meta) => meta,
+        Err(e) => {
+            error!("Failed to build config cache metadata: {}", e);
+            return;
+        }
+    };
+
+    if let Err(e) = write_file_atomic(&meta_path, &meta).await {
+        error!("Failed to save config cache metadata: {}", e);
+        return;
+    }
+
+    info!(cache = ?cache_path, "Config cache saved");
 }
 
-pub async fn restore_config_from_cache() -> AppResult<()> {
-    let cache = std::path::Path::new(CONFIG_CACHE_PATH);
+pub async fn restore_config_from_cache(config: &Config) -> AppResult<()> {
+    let cache = get_config_cache_path();
     if !cache.exists() {
         return Err(AppError::message("No cached config available"));
     }
+
+    let meta_path = get_config_cache_meta_path();
+    let meta_content = tokio::fs::read_to_string(&meta_path)
+        .await
+        .map_err(|e| AppError::context("No cache metadata available", e))?;
+    let meta: ConfigCacheMeta = serde_json::from_str(&meta_content)
+        .map_err(|e| AppError::context("Failed to parse cache metadata", e))?;
+    let current_fingerprint = config_cache_fingerprint(config)?;
+    if meta.fingerprint != current_fingerprint {
+        return Err(AppError::message(
+            "Cached config does not match current configuration",
+        ));
+    }
+
     let config_path = get_sing_box_home().join("config.json");
-    tokio::fs::copy(CONFIG_CACHE_PATH, &config_path)
+    tokio::fs::copy(&cache, &config_path)
         .await
         .map_err(|e| AppError::context("Failed to restore config from cache", e))?;
-    info!("Restored config from cache");
+    validate_sing_box_config()
+        .await
+        .map_err(|e| AppError::context("Cached config validation failed", e))?;
+    info!(cache = ?cache, "Restored config from cache");
     Ok(())
 }
 
@@ -78,8 +152,10 @@ pub async fn regenerate_and_restart(config: &Config, state: &Arc<AppState>) -> A
         .map_err(|e| AppError::context("Failed to restart sing-box", e))?;
     info!("sing-box restarted successfully");
 
-    if has_sub_nodes {
-        save_config_cache().await;
+    *state.config_source.lock().await = Some("generated".to_string());
+
+    if has_sub_nodes || config.subs.is_empty() {
+        save_config_cache(config).await;
         *state.config_warning.lock().await = None;
     } else if !config.subs.is_empty() {
         *state.config_warning.lock().await = Some("所有订阅获取失败，请检查当前订阅".to_string());
@@ -147,18 +223,13 @@ pub async fn apply_config_change(
                     info!("sing-box still running with previous config, skipping restart");
                 } else {
                     // 优先从 config.json 缓存恢复，避免重新拉取订阅
-                    let cache_path = std::path::Path::new(CONFIG_CACHE_PATH);
-                    let config_json_path = get_sing_box_home().join("config.json");
-                    if cache_path.exists() {
+                    if get_config_cache_path().exists() {
                         info!("Restoring config.json from cache for rollback");
-                        tokio::fs::copy(cache_path, &config_json_path)
-                            .await
-                            .map_err(|e| {
-                                AppError::context("Failed to restore config.json from cache", e)
-                            })?;
+                        restore_config_from_cache(old_config).await?;
                         start_sing_internal(state).await.map_err(|e| {
                             AppError::context("Failed to restart sing-box with cached config", e)
                         })?;
+                        *state.config_source.lock().await = Some("cache".to_string());
                         *state.config_warning.lock().await = None;
                         let state_for_proxy = state.clone();
                         tokio::spawn(async move {
@@ -484,7 +555,7 @@ fn get_config_template(route_mode: &RouteMode) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_sing_box_config, collect_manual_outbounds};
+    use super::{build_sing_box_config, collect_manual_outbounds, config_cache_fingerprint};
     use crate::models::{Config, RouteMode};
     use serde_json::json;
 
@@ -711,6 +782,31 @@ mod tests {
         assert_eq!(route_rules[3]["outbound"], "direct");
         assert_eq!(route_rules[3]["rule_set"][0], "chinaip");
         assert_eq!(built["route"]["default_domain_resolver"], "local");
+    }
+
+    #[test]
+    fn config_cache_fingerprint_ignores_web_port() {
+        let mut first = Config {
+            port: Some(6161),
+            socks_port: Some(1080),
+            route_mode: Some(RouteMode::Tunnel),
+            subs: vec!["https://example.com/sub".to_string()],
+            nodes: vec![],
+            custom_rules: vec![],
+        };
+        let mut second = first.clone();
+        second.port = Some(7777);
+
+        assert_eq!(
+            config_cache_fingerprint(&first).unwrap(),
+            config_cache_fingerprint(&second).unwrap()
+        );
+
+        first.subs.push("https://example.com/other".to_string());
+        assert_ne!(
+            config_cache_fingerprint(&first).unwrap(),
+            config_cache_fingerprint(&second).unwrap()
+        );
     }
 
     #[test]

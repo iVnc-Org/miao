@@ -181,27 +181,33 @@ async fn main() -> AppResult<()> {
             return;
         }
 
-        info!("Generating initial config...");
+        info!("Preparing initial sing-box config...");
+        let mut started_from_cache = false;
         let mut all_subs_failed = false;
-        match gen_config(&config, &state_for_init).await {
-            Ok(has_sub_nodes) => {
-                if has_sub_nodes {
-                    save_config_cache().await;
-                } else if !config.subs.is_empty() {
-                    all_subs_failed = true;
-                }
+
+        match restore_config_from_cache(&config).await {
+            Ok(_) => {
+                info!("Using cached config for initial startup");
+                started_from_cache = true;
+                *state_for_init.config_source.lock().await = Some("cache".to_string());
+                *state_for_init.config_warning.lock().await =
+                    Some("当前使用上次成功生成的缓存配置，订阅未在启动时自动刷新".to_string());
             }
-            Err(e) => {
-                error!(error = %e, "Failed to generate config");
-                match restore_config_from_cache().await {
-                    Ok(_) => {
-                        warn!("Using cached config as fallback");
-                        all_subs_failed = true;
+            Err(cache_err) => {
+                info!(error = %cache_err, "No matching config cache available, generating config");
+                match gen_config(&config, &state_for_init).await {
+                    Ok(has_sub_nodes) => {
+                        if has_sub_nodes || config.subs.is_empty() {
+                            save_config_cache(&config).await;
+                        } else if !config.subs.is_empty() {
+                            all_subs_failed = true;
+                        }
+                        *state_for_init.config_source.lock().await = Some("generated".to_string());
                     }
-                    Err(cache_err) => {
-                        error!(error = %cache_err, "No cached config available");
+                    Err(e) => {
+                        error!(error = %e, "Failed to generate config");
                         *state_for_init.config_warning.lock().await =
-                            Some("所有订阅获取失败且无可用缓存，请添加订阅或手动节点".to_string());
+                            Some("无法生成配置且无匹配缓存，请添加有效订阅或手动节点".to_string());
                         state_for_init
                             .initializing
                             .store(false, std::sync::atomic::Ordering::Relaxed);
@@ -223,6 +229,8 @@ async fn main() -> AppResult<()> {
                     warn!("所有订阅获取失败，请检查当前订阅");
                     *state_for_init.config_warning.lock().await =
                         Some("所有订阅获取失败，请检查当前订阅".to_string());
+                } else if !started_from_cache {
+                    *state_for_init.config_warning.lock().await = None;
                 }
                 let state_for_proxy = state_for_init.clone();
                 tokio::spawn(async move {

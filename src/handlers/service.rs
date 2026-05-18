@@ -39,6 +39,7 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> Json<ApiResponse<
         .initializing
         .load(std::sync::atomic::Ordering::Relaxed);
     let warning = state.config_warning.lock().await.clone();
+    let config_source = state.config_source.lock().await.clone();
 
     success(
         if running { "running" } else { "stopped" },
@@ -48,6 +49,7 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> Json<ApiResponse<
             pid,
             uptime_secs,
             warning,
+            config_source,
         },
     )
 }

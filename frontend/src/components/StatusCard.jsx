@@ -8,6 +8,13 @@ import { Button, SectionCard } from './ui.jsx'
 import { classNames, formatUptime, formatSpeed } from '../utils.js'
 
 export function StatusCard({ status, traffic, loadingAction, onToggleService }) {
+  const sourceText = status.config_source === 'cache'
+    ? '缓存配置'
+    : status.config_source === 'generated'
+      ? '最新配置'
+      : null
+  const runningText = `PID: ${status.pid ?? '--'} · 运行时长: ${formatUptime(status.uptime_secs)}${sourceText ? ` · ${sourceText}` : ''}`
+
   return (
     <SectionCard className="status-card" bodyClassName="status-card-body" header={null}>
       <div className="status-left-wrap">
@@ -18,9 +25,9 @@ export function StatusCard({ status, traffic, loadingAction, onToggleService }) 
           </div>
           <div className="status-subtitle">
             {status.running 
-              ? `PID: ${status.pid ?? '--'} · 运行时长: ${formatUptime(status.uptime_secs)}` 
+              ? runningText
               : status.initializing 
-                ? '正在获取订阅并启动服务…' 
+                ? '正在准备配置并启动服务…'
                 : '等待启动服务'}
           </div>
         </div>

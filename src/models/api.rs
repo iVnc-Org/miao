@@ -44,6 +44,8 @@ pub struct StatusData {
     pub uptime_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_source: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
