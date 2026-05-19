@@ -12,11 +12,11 @@ use tokio::io::AsyncWriteExt;
 use tokio::time::{sleep, Duration};
 use tracing::{error, info, warn};
 
+use crate::build_info::{current_version, git_commit_full, git_commit_short, git_commit_url};
 use crate::error::{AppError, AppResult};
 use crate::models::{GitHubAsset, GitHubRelease, VersionInfo};
 use crate::services::singbox::{get_sing_box_home, stop_sing_internal};
 use crate::state::{AppState, VersionCache};
-use crate::VERSION;
 
 const CACHE_TTL: Duration = Duration::from_secs(300);
 const DOWNLOAD_MAX_ATTEMPTS: u32 = 3;
@@ -259,14 +259,9 @@ async fn sing_box_is_running(state: &Arc<AppState>) -> bool {
 }
 
 pub async fn get_version_info(state: &Arc<AppState>) -> VersionInfo {
-    let current = current_version();
+    let base = current_version_info();
     if !sing_box_is_running(state).await {
-        return VersionInfo {
-            current,
-            latest: None,
-            has_update: false,
-            download_url: None,
-        };
+        return base;
     }
 
     let asset_name = current_arch_asset_name().unwrap_or("");
@@ -274,7 +269,7 @@ pub async fn get_version_info(state: &Arc<AppState>) -> VersionInfo {
     match fetch_latest_release(&state.http_client, state).await {
         Ok(release) => {
             let latest = release.tag_name.clone();
-            let has_update = release_is_newer_than_current(&current, &latest);
+            let has_update = release_is_newer_than_current(&base.current, &latest);
             let download_url = release
                 .assets
                 .iter()
@@ -282,21 +277,28 @@ pub async fn get_version_info(state: &Arc<AppState>) -> VersionInfo {
                 .map(|a| a.browser_download_url.clone());
 
             VersionInfo {
-                current,
                 latest: Some(latest),
                 has_update,
                 download_url,
+                ..base
             }
         }
         Err(e) => {
             warn!(error = %e, "Failed to fetch latest release from GitHub");
-            VersionInfo {
-                current,
-                latest: None,
-                has_update: false,
-                download_url: None,
-            }
+            base
         }
+    }
+}
+
+fn current_version_info() -> VersionInfo {
+    VersionInfo {
+        current: current_version(),
+        commit_short: git_commit_short(),
+        commit_full: git_commit_full(),
+        commit_url: git_commit_url(),
+        latest: None,
+        has_update: false,
+        download_url: None,
     }
 }
 
@@ -528,10 +530,6 @@ pub async fn upgrade_binary(state: &Arc<AppState>) -> AppResult<String> {
     });
 
     Ok(new_version)
-}
-
-fn current_version() -> String {
-    format!("v{}", VERSION)
 }
 
 fn current_arch_asset_name() -> Option<&'static str> {

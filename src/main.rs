@@ -1,3 +1,4 @@
+mod build_info;
 mod error;
 mod handlers;
 mod models;
@@ -9,6 +10,7 @@ mod state;
 mod test_support;
 mod validation;
 
+use crate::build_info::{git_commit_short, VERSION};
 use crate::error::{AppError, AppResult};
 use nix::unistd::Uid;
 use std::{fs, sync::Arc};
@@ -22,8 +24,6 @@ use services::{
     singbox::{extract_sing_box, start_sing_internal, stop_sing_internal},
 };
 use state::AppState;
-
-pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn browser_launch_env() -> Vec<(String, String)> {
     let mut envs = Vec::new();
@@ -111,7 +111,10 @@ async fn main() -> AppResult<()> {
         .init();
 
     if std::env::args().any(|a| a == "--version" || a == "-V") {
-        println!("miao v{}", VERSION);
+        match git_commit_short() {
+            Some(commit) => println!("miao v{} ({})", VERSION, commit),
+            None => println!("miao v{}", VERSION),
+        }
         return Ok(());
     }
 

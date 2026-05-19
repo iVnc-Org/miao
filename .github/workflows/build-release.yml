@@ -135,6 +135,10 @@ jobs:
           ls -lh embedded/*.srs
 
       - name: Build release for ${{ matrix.target }}
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SERVER_URL: ${{ github.server_url }}
         run: cargo zigbuild --release --target ${{ matrix.rust_target }}
 
       - name: Prepare release asset

@@ -122,6 +122,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn router_returns_version_build_info() {
+        let app = test_app(Config {
+            port: None,
+            socks_port: None,
+            route_mode: None,
+            subs: vec![],
+            nodes: vec![],
+            custom_rules: vec![],
+        })
+        .await;
+
+        let response = app
+            .oneshot(empty_request("GET", "/api/version"))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["success"], true);
+        assert!(json["data"]["current"].as_str().unwrap().starts_with('v'));
+        assert!(json["data"].get("commit_short").is_some());
+        assert!(json["data"].get("commit_full").is_some());
+        assert!(json["data"].get("commit_url").is_some());
+    }
+
+    #[tokio::test]
     async fn router_returns_node_list_payload() {
         let app = test_app(Config {
             port: None,

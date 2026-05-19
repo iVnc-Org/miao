@@ -828,6 +828,26 @@ html[data-embed-mode='true'] .right-column {
 .toast.info {
     border-left: 3px solid var(--accent);
 }
+.commit-badge {
+    position: fixed;
+    right: 14px;
+    bottom: 10px;
+    z-index: 40;
+    max-width: calc(100vw - 28px);
+    padding: 4px 8px;
+    border-radius: 4px;
+    color: var(--text-subtle);
+    background: rgba(26, 29, 34, 0.78);
+    border: 1px solid transparent;
+    font-size: 11px;
+    line-height: 1.2;
+    text-decoration: none;
+    white-space: nowrap;
+}
+a.commit-badge:hover {
+    color: var(--text-muted);
+    border-color: var(--border-soft);
+}
 .spin {
     animation: spin 1s linear infinite;
 }
@@ -948,6 +968,11 @@ html[data-embed-mode='true'] .modal-card {
     }
     .toast {
         min-width: 0;
+    }
+    .commit-badge {
+        right: 10px;
+        bottom: 8px;
+        max-width: calc(100vw - 20px);
     }
     .onboarding-card {
         margin: 0 16px;

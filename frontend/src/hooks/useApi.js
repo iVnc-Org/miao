@@ -148,7 +148,14 @@ export function useTraffic(status) {
 }
 
 export function useVersion() {
-  const [versionInfo, setVersionInfo] = useState({ current: '', latest: null, has_update: false })
+  const [versionInfo, setVersionInfo] = useState({
+    current: '',
+    commit_short: null,
+    commit_full: null,
+    commit_url: null,
+    latest: null,
+    has_update: false,
+  })
 
   const fetchVersion = useCallback(async () => {
     try {

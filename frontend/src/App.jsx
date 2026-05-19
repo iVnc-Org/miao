@@ -388,6 +388,7 @@ export default function App() {
           onOpenAddNode={() => setShowNodeModal(true)}
           showToast={showToast}
         />
+        <CommitBadge versionInfo={versionInfo} />
         <ToastStack toasts={toasts} />
         <NodeModal
           open={showNodeModal}
@@ -468,6 +469,7 @@ export default function App() {
         </div>
       </main>
 
+      <CommitBadge versionInfo={versionInfo} />
       <ToastStack toasts={toasts} />
 
       <NodeModal 
@@ -492,6 +494,31 @@ export default function App() {
           action?.()
         }}
       />
+    </div>
+  )
+}
+
+function CommitBadge({ versionInfo }) {
+  const commit = versionInfo.commit_short || 'unknown'
+  const label = `${versionInfo.current || 'v--'} · ${commit}`
+
+  if (versionInfo.commit_url) {
+    return (
+      <a
+        className="commit-badge"
+        href={versionInfo.commit_url}
+        target="_blank"
+        rel="noreferrer"
+        title={versionInfo.commit_full || commit}
+      >
+        {label}
+      </a>
+    )
+  }
+
+  return (
+    <div className="commit-badge" title={versionInfo.commit_full || commit}>
+      {label}
     </div>
   )
 }
