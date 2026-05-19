@@ -1,5 +1,6 @@
 use crate::error::{AppError, AppResult};
 use crate::services::node_parser::{parse_clash_proxies, parse_uri_subscription};
+use std::path::Path;
 
 /// 订阅获取结果，包含节点和解析错误信息
 pub struct FetchResult {
@@ -10,25 +11,75 @@ pub struct FetchResult {
 }
 
 pub async fn fetch_sub(link: &str, client: &reqwest::Client) -> AppResult<FetchResult> {
+    let text = read_subscription_text(link, client).await?;
+
+    if text.trim().is_empty() {
+        return Err(AppError::message(format!(
+            "Subscription response is empty from {}",
+            redact_subscription_link(link)
+        )));
+    }
+
+    parse_subscription_text(link, &text)
+}
+
+async fn read_subscription_text(link: &str, client: &reqwest::Client) -> AppResult<String> {
+    if let Some(path) = local_subscription_path(link) {
+        return tokio::fs::read_to_string(path).await.map_err(|e| {
+            AppError::context(
+                format!(
+                    "Failed to read subscription file {}",
+                    redact_subscription_link(link)
+                ),
+                e,
+            )
+        });
+    }
+
     let res = client
         .get(link)
         .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
-        .map_err(|e| AppError::context(format!("Failed to fetch subscription from {}", link), e))?;
+        .map_err(|e| {
+            AppError::context(
+                format!(
+                    "Failed to fetch subscription from {}",
+                    redact_subscription_link(link)
+                ),
+                e,
+            )
+        })?;
 
-    let text = res.text().await.map_err(|e| {
+    let status = res.status();
+    if !status.is_success() {
+        return Err(AppError::message(format!(
+            "Subscription server returned HTTP {} from {}",
+            status,
+            redact_subscription_link(link)
+        )));
+    }
+
+    res.text().await.map_err(|e| {
         AppError::context(
-            format!("Failed to read subscription response from {}", link),
+            format!(
+                "Failed to read subscription response from {}",
+                redact_subscription_link(link)
+            ),
             e,
         )
-    })?;
+    })
+}
 
+fn parse_subscription_text(link: &str, text: &str) -> AppResult<FetchResult> {
     let parse_result = match parse_uri_subscription(&text) {
         Ok(result) if !result.nodes.is_empty() => result,
         _ => parse_clash_proxies(&text).map_err(|e| {
             AppError::context(
-                format!("Failed to parse subscription content from {}", link),
+                format!(
+                    "Failed to parse subscription content from {}",
+                    redact_subscription_link(link)
+                ),
                 e,
             )
         })?,
@@ -47,6 +98,30 @@ pub async fn fetch_sub(link: &str, client: &reqwest::Client) -> AppResult<FetchR
         parse_errors: parse_result.errors,
         total_count,
     })
+}
+
+fn local_subscription_path(link: &str) -> Option<&str> {
+    if let Some(path) = link.strip_prefix("file://") {
+        return Some(path);
+    }
+
+    let path = Path::new(link);
+    if path.is_absolute() || path.exists() {
+        Some(link)
+    } else {
+        None
+    }
+}
+
+fn redact_subscription_link(link: &str) -> String {
+    let mut output = link.to_string();
+    for key in ["token", "access_token", "password", "passwd", "key"] {
+        let pattern = format!(r"(?i)({}=)[^&\s]+", regex::escape(key));
+        if let Ok(re) = regex::Regex::new(&pattern) {
+            output = re.replace_all(&output, "${1}<redacted>").to_string();
+        }
+    }
+    output
 }
 
 #[cfg(test)]
@@ -194,6 +269,31 @@ proxies:
         assert!(err
             .to_string()
             .contains("Failed to parse subscription YAML"));
+    }
+
+    #[test]
+    fn redact_subscription_link_hides_sensitive_query_values() {
+        let redacted = redact_subscription_link(
+            "https://example.com/sub?token=secret-token&foo=bar&password=secret-pass",
+        );
+
+        assert_eq!(
+            redacted,
+            "https://example.com/sub?token=<redacted>&foo=bar&password=<redacted>"
+        );
+    }
+
+    #[test]
+    fn local_subscription_path_accepts_absolute_and_file_urls() {
+        assert_eq!(
+            local_subscription_path("/tmp/sub.txt"),
+            Some("/tmp/sub.txt")
+        );
+        assert_eq!(
+            local_subscription_path("file:///tmp/sub.txt"),
+            Some("/tmp/sub.txt")
+        );
+        assert_eq!(local_subscription_path("https://example.com/sub"), None);
     }
 
     #[test]

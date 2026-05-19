@@ -20,6 +20,7 @@ use crate::state::AppState;
 const CONFIG_CACHE_DIR: &str = "data/cache";
 const CONFIG_CACHE_FILE: &str = "config.json";
 const CONFIG_CACHE_META_FILE: &str = "config.meta.json";
+const CONFIG_CACHE_SCHEMA_VERSION: u32 = 2;
 const MAX_CONCURRENT_SUBS: usize = 5;
 
 #[derive(Serialize, Deserialize)]
@@ -37,6 +38,7 @@ fn get_config_cache_meta_path() -> PathBuf {
 
 fn config_cache_fingerprint(config: &Config) -> AppResult<String> {
     let value = serde_json::json!({
+        "schema_version": CONFIG_CACHE_SCHEMA_VERSION,
         "socks_port": config.socks_port,
         "route_mode": &config.route_mode,
         "subs": &config.subs,
@@ -552,7 +554,7 @@ fn get_config_template(route_mode: &RouteMode) -> serde_json::Value {
             "rules": dns_rules
         },
         "inbounds": [
-            {"type": "tun", "tag": "tun-in", "interface_name": "sing-tun", "address": ["172.18.0.1/30"], "mtu": 9000, "auto_route": true, "strict_route": true, "auto_redirect": true}
+            {"type": "tun", "tag": "tun-in", "interface_name": "sing-tun", "address": ["172.18.0.1/30"], "mtu": 9000, "auto_route": true, "strict_route": true, "auto_redirect": true, "dns_mode": "disabled"}
         ],
         "outbounds": [
             {"type": "selector", "tag": "proxy", "outbounds": []},
@@ -672,6 +674,8 @@ mod tests {
 
         let inbounds = built["inbounds"].as_array().unwrap();
         assert_eq!(inbounds.len(), 2);
+        assert_eq!(inbounds[0]["type"], "tun");
+        assert_eq!(inbounds[0]["dns_mode"], "disabled");
         assert_eq!(inbounds[1]["type"], "socks");
         assert_eq!(inbounds[1]["listen"], "127.0.0.1");
         assert_eq!(inbounds[1]["listen_port"], 1080);
