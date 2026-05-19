@@ -678,6 +678,7 @@ version = "0.18.4"
 dependencies = [
  "arc-swap",
  "axum",
+ "base64",
  "bytes",
  "futures",
  "hex",

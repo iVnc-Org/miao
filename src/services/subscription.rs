@@ -1,5 +1,5 @@
 use crate::error::{AppError, AppResult};
-use crate::services::node_parser::parse_clash_proxies;
+use crate::services::node_parser::{parse_clash_proxies, parse_uri_subscription};
 
 /// 订阅获取结果，包含节点和解析错误信息
 pub struct FetchResult {
@@ -25,12 +25,15 @@ pub async fn fetch_sub(link: &str, client: &reqwest::Client) -> AppResult<FetchR
         )
     })?;
 
-    let parse_result = parse_clash_proxies(&text).map_err(|e| {
-        AppError::context(
-            format!("Failed to parse subscription content from {}", link),
-            e,
-        )
-    })?;
+    let parse_result = match parse_clash_proxies(&text) {
+        Ok(result) if result.total_count > 0 || !result.nodes.is_empty() => result,
+        _ => parse_uri_subscription(&text).map_err(|e| {
+            AppError::context(
+                format!("Failed to parse subscription content from {}", link),
+                e,
+            )
+        })?,
+    };
 
     let total_count = parse_result.total_count;
     let node_names: Vec<String> = parse_result.nodes.iter().map(|(n, _)| n.clone()).collect();

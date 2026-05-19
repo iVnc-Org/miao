@@ -1,4 +1,6 @@
+use base64::{engine::general_purpose, Engine as _};
 use serde_yaml::Value;
+use url::Url;
 
 use crate::error::{AppError, AppResult};
 
@@ -55,6 +57,159 @@ pub fn parse_clash_proxies(clash_yaml: &str) -> AppResult<ParseResult> {
     }
 
     Ok(result)
+}
+
+pub fn parse_uri_subscription(content: &str) -> AppResult<ParseResult> {
+    let decoded = decode_subscription_body(content);
+    let lines: Vec<&str> = decoded
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+
+    let mut result = ParseResult {
+        nodes: vec![],
+        errors: vec![],
+        total_count: lines.len(),
+    };
+
+    for (idx, line) in lines.iter().enumerate() {
+        match parse_uri_node(line) {
+            Ok(Some(node)) => result.nodes.push(node),
+            Ok(None) => {}
+            Err(err) => result
+                .errors
+                .push(format!("URI node #{}: {}", idx + 1, err)),
+        }
+    }
+
+    if result.total_count == 0 {
+        return Err(AppError::message("No URI nodes found"));
+    }
+
+    Ok(result)
+}
+
+fn decode_subscription_body(content: &str) -> String {
+    let trimmed = content.trim();
+    if trimmed.contains("://") {
+        return trimmed.to_string();
+    }
+
+    decode_base64_text(trimmed).unwrap_or_else(|| trimmed.to_string())
+}
+
+fn decode_base64_text(input: &str) -> Option<String> {
+    let compact: String = input.chars().filter(|c| !c.is_whitespace()).collect();
+    for engine in [
+        &general_purpose::STANDARD,
+        &general_purpose::STANDARD_NO_PAD,
+        &general_purpose::URL_SAFE,
+        &general_purpose::URL_SAFE_NO_PAD,
+    ] {
+        if let Ok(bytes) = engine.decode(compact.as_bytes()) {
+            if let Ok(text) = String::from_utf8(bytes) {
+                return Some(text);
+            }
+        }
+    }
+    None
+}
+
+fn parse_uri_node(uri: &str) -> AppResult<Option<(String, serde_json::Value)>> {
+    if uri.starts_with("ss://") {
+        return parse_shadowsocks_uri(uri).map(Some);
+    }
+    Ok(None)
+}
+
+fn parse_shadowsocks_uri(uri: &str) -> AppResult<(String, serde_json::Value)> {
+    let url = Url::parse(uri).map_err(|e| AppError::context("Invalid ss URI", e.to_string()))?;
+    let name = url
+        .fragment()
+        .map(urlencoding::decode)
+        .transpose()
+        .map_err(|e| AppError::context("Invalid ss URI name", e.to_string()))?
+        .map(|name| name.into_owned())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| {
+            format!(
+                "{}:{}",
+                url.host_str().unwrap_or("unknown"),
+                url.port().unwrap_or(0)
+            )
+        });
+
+    let server = url
+        .host_str()
+        .filter(|server| !server.trim().is_empty())
+        .ok_or_else(|| AppError::message("ss URI missing server"))?;
+    let port = url
+        .port()
+        .filter(|port| *port > 0)
+        .ok_or_else(|| AppError::message("ss URI missing port"))?;
+
+    let (method, password) = parse_ss_userinfo(&url)?;
+    let mut outbound = serde_json::json!({
+        "type": "shadowsocks",
+        "tag": name,
+        "server": server,
+        "server_port": port,
+        "method": method,
+        "password": password
+    });
+
+    if let Some(plugin) = url
+        .query_pairs()
+        .find(|(key, _)| key == "plugin")
+        .map(|(_, value)| value.into_owned())
+    {
+        if let Some((plugin_name, plugin_opts)) = convert_ss_plugin(&plugin) {
+            outbound["plugin"] = serde_json::Value::String(plugin_name);
+            outbound["plugin_opts"] = serde_json::Value::String(plugin_opts);
+        }
+    }
+
+    Ok((
+        outbound["tag"].as_str().unwrap_or_default().to_string(),
+        outbound,
+    ))
+}
+
+fn parse_ss_userinfo(url: &Url) -> AppResult<(String, String)> {
+    let username = url.username();
+    let password = url.password();
+
+    if !username.is_empty() && password.is_some() {
+        let method = urlencoding::decode(username)
+            .map_err(|e| AppError::context("Invalid ss method", e.to_string()))?
+            .into_owned();
+        let password = urlencoding::decode(password.unwrap_or_default())
+            .map_err(|e| AppError::context("Invalid ss password", e.to_string()))?
+            .into_owned();
+        return Ok((method, password));
+    }
+
+    let decoded = decode_base64_text(username)
+        .ok_or_else(|| AppError::message("ss URI userinfo is not valid base64"))?;
+    let (method, password) = decoded
+        .split_once(':')
+        .ok_or_else(|| AppError::message("ss URI userinfo missing method/password"))?;
+
+    if method.is_empty() || password.is_empty() {
+        return Err(AppError::message("ss URI method/password is empty"));
+    }
+
+    Ok((method.to_string(), password.to_string()))
+}
+
+fn convert_ss_plugin(plugin: &str) -> Option<(String, String)> {
+    let (name, opts) = plugin.split_once(';').unwrap_or((plugin, ""));
+    match name {
+        "simple-obfs" => Some(("obfs-local".to_string(), opts.to_string())),
+        "obfs-local" => Some(("obfs-local".to_string(), opts.to_string())),
+        _ => None,
+    }
 }
 
 fn is_supported_node_type(node_type: &str) -> bool {
@@ -258,6 +413,40 @@ proxies:
         assert_eq!(result.nodes[0].0, "hy2-node");
         assert_eq!(result.nodes[1].0, "anytls-node");
         assert_eq!(result.nodes[2].0, "ss-node");
+    }
+
+    #[test]
+    fn parse_uri_subscription_decodes_base64_shadowsocks_links() {
+        let body = general_purpose::STANDARD.encode(
+            "ss://YWVzLTEyOC1nY206cGFzcw@example.com:12022/?plugin=simple-obfs%3Bobfs%3Dhttp%3Bobfs-host%3Dcdn.example.com#%E9%A6%99%E6%B8%AF%2001\n",
+        );
+
+        let result = parse_uri_subscription(&body).unwrap();
+
+        assert_eq!(result.total_count, 1);
+        assert_eq!(result.nodes.len(), 1);
+        assert_eq!(result.nodes[0].0, "香港 01");
+        let outbound = &result.nodes[0].1;
+        assert_eq!(outbound["type"], "shadowsocks");
+        assert_eq!(outbound["tag"], "香港 01");
+        assert_eq!(outbound["server"], "example.com");
+        assert_eq!(outbound["server_port"], 12022);
+        assert_eq!(outbound["method"], "aes-128-gcm");
+        assert_eq!(outbound["password"], "pass");
+        assert_eq!(outbound["plugin"], "obfs-local");
+        assert_eq!(
+            outbound["plugin_opts"],
+            "obfs=http;obfs-host=cdn.example.com"
+        );
+    }
+
+    #[test]
+    fn parse_uri_subscription_skips_unsupported_uri_types() {
+        let result = parse_uri_subscription("vmess://ignored\nss://bad").unwrap();
+
+        assert_eq!(result.total_count, 2);
+        assert!(result.nodes.is_empty());
+        assert_eq!(result.errors.len(), 1);
     }
 
     #[test]
