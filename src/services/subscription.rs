@@ -77,6 +77,10 @@ proxies:
     port: 8388
     cipher: 2022-blake3-aes-128-gcm
     password: pass-ss
+    plugin: obfs
+    plugin-opts:
+      mode: http
+      host: cdn.example.com
   - name: ignored-node
     type: vmess
     server: vmess.example.com
@@ -100,6 +104,11 @@ proxies:
         assert_eq!(outbounds[1]["tls"]["insecure"], true);
         assert_eq!(outbounds[2]["type"], "shadowsocks");
         assert_eq!(outbounds[2]["method"], "2022-blake3-aes-128-gcm");
+        assert_eq!(outbounds[2]["plugin"], "obfs-local");
+        assert_eq!(
+            outbounds[2]["plugin_opts"],
+            "obfs=http;obfs-host=cdn.example.com"
+        );
     }
 
     #[test]

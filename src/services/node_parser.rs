@@ -281,19 +281,60 @@ fn parse_single_node(node: &Value) -> Option<(String, serde_json::Value)> {
         }
         "ss" => {
             let method = node.get("cipher")?.as_str()?;
-            serde_json::json!({
+            let mut obj = serde_json::json!({
                 "type": "shadowsocks",
                 "tag": name,
                 "server": server,
                 "server_port": port,
                 "method": method,
                 "password": password
-            })
+            });
+
+            if let Some((plugin, plugin_opts)) = parse_clash_ss_plugin(node) {
+                obj["plugin"] = serde_json::Value::String(plugin);
+                obj["plugin_opts"] = serde_json::Value::String(plugin_opts);
+            }
+
+            obj
         }
         _ => return None, // 不支持的类型
     };
 
     Some((name.to_string(), outbound))
+}
+
+fn parse_clash_ss_plugin(node: &Value) -> Option<(String, String)> {
+    let plugin = node.get("plugin")?.as_str()?;
+    let opts = node.get("plugin-opts").or_else(|| node.get("plugin_opts"));
+
+    match plugin {
+        "obfs" | "simple-obfs" | "obfs-local" => {
+            let mode = opts
+                .and_then(|opts| opts.get("mode"))
+                .and_then(|mode| mode.as_str())
+                .or_else(|| {
+                    opts.and_then(|opts| opts.get("obfs"))
+                        .and_then(|obfs| obfs.as_str())
+                })
+                .unwrap_or("http");
+            let host = opts
+                .and_then(|opts| opts.get("host"))
+                .and_then(|host| host.as_str())
+                .or_else(|| {
+                    opts.and_then(|opts| opts.get("obfs-host"))
+                        .and_then(|host| host.as_str())
+                });
+
+            let mut plugin_opts = format!("obfs={mode}");
+            if let Some(host) = host.filter(|host| !host.trim().is_empty()) {
+                plugin_opts.push_str(";obfs-host=");
+                plugin_opts.push_str(host);
+            }
+
+            Some(("obfs-local".to_string(), plugin_opts))
+        }
+        _ => None,
+    }
 }
 
 /// 解析单个节点 JSON 字符串，返回验证后的 Value 和显示信息
