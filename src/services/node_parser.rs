@@ -305,36 +305,50 @@ fn parse_single_node(node: &Value) -> Option<(String, serde_json::Value)> {
 
 fn parse_clash_ss_plugin(node: &Value) -> Option<(String, String)> {
     let plugin = node.get("plugin")?.as_str()?;
+    let (plugin_name, inline_opts) = plugin.split_once(';').unwrap_or((plugin, ""));
     let opts = node.get("plugin-opts").or_else(|| node.get("plugin_opts"));
 
-    match plugin {
+    match plugin_name {
         "obfs" | "simple-obfs" | "obfs-local" => {
-            let mode = opts
-                .and_then(|opts| opts.get("mode"))
-                .and_then(|mode| mode.as_str())
-                .or_else(|| {
-                    opts.and_then(|opts| opts.get("obfs"))
-                        .and_then(|obfs| obfs.as_str())
-                })
-                .unwrap_or("http");
-            let host = opts
-                .and_then(|opts| opts.get("host"))
-                .and_then(|host| host.as_str())
-                .or_else(|| {
-                    opts.and_then(|opts| opts.get("obfs-host"))
-                        .and_then(|host| host.as_str())
-                });
-
-            let mut plugin_opts = format!("obfs={mode}");
-            if let Some(host) = host.filter(|host| !host.trim().is_empty()) {
-                plugin_opts.push_str(";obfs-host=");
-                plugin_opts.push_str(host);
-            }
-
+            let plugin_opts = if inline_opts.is_empty() {
+                parse_clash_ss_plugin_opts(opts)
+            } else {
+                inline_opts.to_string()
+            };
             Some(("obfs-local".to_string(), plugin_opts))
         }
         _ => None,
     }
+}
+
+fn parse_clash_ss_plugin_opts(opts: Option<&Value>) -> String {
+    if let Some(opts) = opts.and_then(|opts| opts.as_str()) {
+        return opts.to_string();
+    }
+
+    let mode = opts
+        .and_then(|opts| opts.get("mode"))
+        .and_then(|mode| mode.as_str())
+        .or_else(|| {
+            opts.and_then(|opts| opts.get("obfs"))
+                .and_then(|obfs| obfs.as_str())
+        })
+        .unwrap_or("http");
+    let host = opts
+        .and_then(|opts| opts.get("host"))
+        .and_then(|host| host.as_str())
+        .or_else(|| {
+            opts.and_then(|opts| opts.get("obfs-host"))
+                .and_then(|host| host.as_str())
+        });
+
+    let mut plugin_opts = format!("obfs={mode}");
+    if let Some(host) = host.filter(|host| !host.trim().is_empty()) {
+        plugin_opts.push_str(";obfs-host=");
+        plugin_opts.push_str(host);
+    }
+
+    plugin_opts
 }
 
 /// 解析单个节点 JSON 字符串，返回验证后的 Value 和显示信息

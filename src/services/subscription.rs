@@ -13,7 +13,7 @@ pub async fn fetch_sub(link: &str, client: &reqwest::Client) -> AppResult<FetchR
     let res = client
         .get(link)
         .timeout(std::time::Duration::from_secs(30))
-        .header("User-Agent", "clash-meta")
+        .header("User-Agent", "miao")
         .send()
         .await
         .map_err(|e| AppError::context(format!("Failed to fetch subscription from {}", link), e))?;
@@ -81,6 +81,13 @@ proxies:
     plugin-opts:
       mode: http
       host: cdn.example.com
+  - name: ss-inline-obfs-node
+    type: ss
+    server: ss-inline.example.com
+    port: 8389
+    cipher: aes-128-gcm
+    password: pass-inline
+    plugin: simple-obfs;obfs=http;obfs-host=inline.example.com
   - name: ignored-node
     type: vmess
     server: vmess.example.com
@@ -90,10 +97,13 @@ proxies:
 
         let result = parse_clash_proxies(yaml).unwrap();
 
-        // 3 valid nodes + 1 unsupported type (vmess) silently skipped
+        // 4 valid nodes + 1 unsupported type (vmess) silently skipped
         let names: Vec<String> = result.nodes.iter().map(|(n, _)| n.clone()).collect();
-        assert_eq!(names, vec!["hy2-node", "anytls-node", "ss-node"]);
-        assert_eq!(result.nodes.len(), 3);
+        assert_eq!(
+            names,
+            vec!["hy2-node", "anytls-node", "ss-node", "ss-inline-obfs-node"]
+        );
+        assert_eq!(result.nodes.len(), 4);
         assert!(result.errors.is_empty()); // vmess is silently skipped, not reported as error
 
         let outbounds: Vec<serde_json::Value> = result.nodes.into_iter().map(|(_, o)| o).collect();
@@ -108,6 +118,11 @@ proxies:
         assert_eq!(
             outbounds[2]["plugin_opts"],
             "obfs=http;obfs-host=cdn.example.com"
+        );
+        assert_eq!(outbounds[3]["plugin"], "obfs-local");
+        assert_eq!(
+            outbounds[3]["plugin_opts"],
+            "obfs=http;obfs-host=inline.example.com"
         );
     }
 
