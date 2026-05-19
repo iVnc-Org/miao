@@ -13,7 +13,6 @@ pub async fn fetch_sub(link: &str, client: &reqwest::Client) -> AppResult<FetchR
     let res = client
         .get(link)
         .timeout(std::time::Duration::from_secs(30))
-        .header("User-Agent", "miao")
         .send()
         .await
         .map_err(|e| AppError::context(format!("Failed to fetch subscription from {}", link), e))?;
@@ -25,9 +24,9 @@ pub async fn fetch_sub(link: &str, client: &reqwest::Client) -> AppResult<FetchR
         )
     })?;
 
-    let parse_result = match parse_clash_proxies(&text) {
-        Ok(result) if result.total_count > 0 || !result.nodes.is_empty() => result,
-        _ => parse_uri_subscription(&text).map_err(|e| {
+    let parse_result = match parse_uri_subscription(&text) {
+        Ok(result) if !result.nodes.is_empty() => result,
+        _ => parse_clash_proxies(&text).map_err(|e| {
             AppError::context(
                 format!("Failed to parse subscription content from {}", link),
                 e,
@@ -53,6 +52,7 @@ pub async fn fetch_sub(link: &str, client: &reqwest::Client) -> AppResult<FetchR
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{engine::general_purpose, Engine as _};
 
     #[test]
     fn parse_clash_proxies_extracts_supported_nodes() {
@@ -123,6 +123,23 @@ proxies:
         assert_eq!(
             outbounds[3]["plugin_opts"],
             "obfs=http;obfs-host=inline.example.com"
+        );
+    }
+
+    #[test]
+    fn uri_subscription_parse_preserves_simple_obfs_plugin() {
+        let body = general_purpose::STANDARD.encode(
+            "ss://YWVzLTEyOC1nY206cGFzcw@example.com:12022/?plugin=simple-obfs%3Bobfs%3Dhttp%3Bobfs-host%3Dcdn.example.com#%E9%A6%99%E6%B8%AF%2001\n",
+        );
+
+        let result = parse_uri_subscription(&body).unwrap();
+        let outbound = &result.nodes[0].1;
+
+        assert_eq!(outbound["type"], "shadowsocks");
+        assert_eq!(outbound["plugin"], "obfs-local");
+        assert_eq!(
+            outbound["plugin_opts"],
+            "obfs=http;obfs-host=cdn.example.com"
         );
     }
 
