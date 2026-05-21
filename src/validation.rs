@@ -22,7 +22,17 @@ impl Validator {
         Self::node_tag(&req.tag)?;
         Self::server_address(&req.server)?;
         Self::port(req.server_port)?;
-        Self::password(&req.password)?;
+        let node_type = req.node_type.as_deref().unwrap_or("hysteria2");
+        if matches!(node_type, "socks" | "http") {
+            if let Some(ref username) = req.username {
+                Self::optional_credential(username, "用户名")?;
+            }
+            if let Some(ref password) = req.password {
+                Self::optional_credential(password, "密码")?;
+            }
+        } else {
+            Self::password(req.password.as_deref().unwrap_or(""))?;
+        }
         if let Some(ref sni) = req.sni {
             Self::sni(sni)?;
         }
@@ -133,6 +143,14 @@ impl Validator {
 
         if password.len() > 256 {
             return Err("密码过长（最多 256 个字符）".to_string());
+        }
+
+        Ok(())
+    }
+
+    pub fn optional_credential(value: &str, label: &str) -> Result<(), String> {
+        if value.len() > 256 {
+            return Err(format!("{}过长（最多 256 个字符）", label));
         }
 
         Ok(())
@@ -264,5 +282,47 @@ mod tests {
         assert!(Validator::password("abc").is_err());
         assert!(Validator::password("secret").is_err()); // 6 字符，不够
         assert!(Validator::password(&"a".repeat(257)).is_err());
+    }
+
+    #[test]
+    fn test_optional_credentials() {
+        assert!(Validator::optional_credential("", "用户名").is_ok());
+        assert!(Validator::optional_credential("u", "用户名").is_ok());
+        assert!(Validator::optional_credential("p", "密码").is_ok());
+        assert!(Validator::optional_credential(&"a".repeat(257), "密码").is_err());
+    }
+
+    #[test]
+    fn validate_node_request_allows_socks_without_password() {
+        let req = NodeRequest {
+            node_type: Some("socks".to_string()),
+            tag: "socks-node".to_string(),
+            server: "127.0.0.1".to_string(),
+            server_port: 1080,
+            username: None,
+            password: None,
+            sni: None,
+            cipher: None,
+            skip_cert_verify: false,
+        };
+
+        assert!(Validator::validate_node_request(&req).is_ok());
+    }
+
+    #[test]
+    fn validate_node_request_still_requires_password_for_hysteria2() {
+        let req = NodeRequest {
+            node_type: Some("hysteria2".to_string()),
+            tag: "hy2-node".to_string(),
+            server: "example.com".to_string(),
+            server_port: 443,
+            username: None,
+            password: None,
+            sni: None,
+            cipher: None,
+            skip_cert_verify: false,
+        };
+
+        assert!(Validator::validate_node_request(&req).is_err());
     }
 }

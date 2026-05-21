@@ -15,6 +15,7 @@ export const EMPTY_NODE_FORM = {
   server: '',
   server_port: 443,
   password: '',
+  username: '',
   sni: '',
   cipher: '2022-blake3-aes-128-gcm',
   skip_cert_verify: false,
@@ -71,6 +72,8 @@ export function protocolLabel(type) {
     anytls: 'anytls',
     shadowsocks: 'shadowsocks',
     ss: 'shadowsocks',
+    socks: 'SOCKS',
+    http: 'HTTP',
   }
   return map[type] || type || 'unknown'
 }
@@ -149,5 +152,11 @@ export function validatePassword(password) {
   if (!password || !password.trim()) return '密码不能为空'
   if (password.length < 8) return '密码太短（至少 8 个字符）'
   if (password.length > 256) return '密码过长（最多 256 个字符）'
+  return null
+}
+
+export function validateOptionalCredential(value, label) {
+  if (!value) return null
+  if (value.length > 256) return `${label}过长（最多 256 个字符）`
   return null
 }

@@ -33,7 +33,15 @@ export function ConfirmModal({ open, title, message, onCancel, onConfirm }) {
 export function NodeModal({ open, nodeType, setNodeType, form, setForm, loading, onClose, onSubmit }) {
   if (!open) return null
 
-  const canSubmit = form.tag.trim() && form.server.trim() && form.server_port && form.password.trim()
+  const isSimpleProxy = nodeType === 'socks' || nodeType === 'http'
+  const canSubmit = form.tag.trim() && form.server.trim() && form.server_port && (isSimpleProxy || form.password.trim())
+  const nodeTypeOptions = [
+    ['hysteria2', 'Hysteria2'],
+    ['anytls', 'AnyTLS'],
+    ['ss', 'Shadowsocks'],
+    ['socks', 'SOCKS'],
+    ['http', 'HTTP'],
+  ]
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -49,13 +57,13 @@ export function NodeModal({ open, nodeType, setNodeType, form, setForm, loading,
         </div>
 
         <div className="tab-row">
-          {['hysteria2', 'anytls', 'ss'].map((value) => (
+          {nodeTypeOptions.map(([value, label]) => (
             <button
               key={value}
               className={classNames('tab-button', nodeType === value && 'active')}
               onClick={() => setNodeType(value)}
             >
-              {value === 'ss' ? 'Shadowsocks' : value === 'anytls' ? 'AnyTLS' : 'Hysteria2'}
+              {label}
             </button>
           ))}
         </div>
@@ -105,7 +113,7 @@ export function NodeModal({ open, nodeType, setNodeType, form, setForm, loading,
               </select>
             </label>
           </div>
-        ) : (
+        ) : !isSimpleProxy ? (
           <div className="form-grid single">
             <label className="field">
               <span>SNI（可选）</span>
@@ -116,9 +124,9 @@ export function NodeModal({ open, nodeType, setNodeType, form, setForm, loading,
               />
             </label>
           </div>
-        )}
+        ) : null}
 
-        {nodeType !== 'ss' && (
+        {!isSimpleProxy && nodeType !== 'ss' && (
           <div className="form-grid single">
             <label className="field checkbox-field">
               <input
@@ -131,16 +139,39 @@ export function NodeModal({ open, nodeType, setNodeType, form, setForm, loading,
           </div>
         )}
 
-        <div className="form-grid single">
-          <label className="field">
-            <span>密码</span>
-            <input 
-              value={form.password} 
-              onChange={(event) => setForm((prev) => ({ ...prev, password: event.target.value }))} 
-              placeholder="密码" 
-            />
-          </label>
-        </div>
+        {isSimpleProxy && (
+          <div className="form-grid two">
+            <label className="field">
+              <span>用户名（可选）</span>
+              <input
+                value={form.username}
+                onChange={(event) => setForm((prev) => ({ ...prev, username: event.target.value }))}
+                placeholder="留空表示无需认证"
+              />
+            </label>
+            <label className="field">
+              <span>密码（可选）</span>
+              <input
+                value={form.password}
+                onChange={(event) => setForm((prev) => ({ ...prev, password: event.target.value }))}
+                placeholder="留空表示无需认证"
+              />
+            </label>
+          </div>
+        )}
+
+        {!isSimpleProxy && (
+          <div className="form-grid single">
+            <label className="field">
+              <span>密码</span>
+              <input
+                value={form.password}
+                onChange={(event) => setForm((prev) => ({ ...prev, password: event.target.value }))}
+                placeholder="密码"
+              />
+            </label>
+          </div>
+        )}
 
         <Button 
           tone="primary" 
@@ -149,7 +180,7 @@ export function NodeModal({ open, nodeType, setNodeType, form, setForm, loading,
           disabled={!canSubmit || loading} 
           onClick={onSubmit}
         >
-          添加 {nodeType === 'ss' ? 'Shadowsocks' : nodeType === 'anytls' ? 'AnyTLS' : 'Hysteria2'} 节点
+          添加 {nodeTypeOptions.find(([value]) => value === nodeType)?.[1] || nodeType} 节点
         </Button>
       </div>
     </div>

@@ -114,6 +114,16 @@ pub async fn save_config_cache(config: &Config) {
     info!(cache = ?cache_path, "Config cache saved");
 }
 
+async fn clear_generated_config_state() {
+    for path in [
+        get_sing_box_home().join("config.json"),
+        get_config_cache_path(),
+        get_config_cache_meta_path(),
+    ] {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+}
+
 pub async fn restore_config_from_cache(config: &Config) -> AppResult<()> {
     let cache = get_config_cache_path();
     if !cache.exists() {
@@ -208,6 +218,22 @@ pub async fn apply_config_change(
 
     save_config(new_config).await?;
 
+    if config_has_no_nodes(new_config) {
+        stop_sing_internal(state).await;
+        clear_generated_config_state().await;
+        {
+            let mut status_map = state.sub_status.lock().await;
+            status_map.retain(|url, _| new_config.subs.contains(url));
+        }
+        *state.config.write().await = new_config.clone();
+        *state.config_source.lock().await = None;
+        *state.config_warning.lock().await = None;
+        let _ = tokio::fs::remove_file(backup_path).await;
+        return Ok(());
+    }
+
+    let was_running = sing_box_process_is_running(state).await;
+
     match regenerate_and_restart(new_config, state).await {
         Ok(()) => {
             *state.config.write().await = new_config.clone();
@@ -241,7 +267,7 @@ pub async fn apply_config_change(
                 if still_running {
                     // sing-box 仍以旧配置运行，无需重启，config.yaml 已恢复
                     info!("sing-box still running with previous config, skipping restart");
-                } else {
+                } else if was_running {
                     // 优先从 config.json 缓存恢复，避免重新拉取订阅
                     if get_config_cache_path().exists() {
                         info!("Restoring config.json from cache for rollback");
@@ -260,6 +286,8 @@ pub async fn apply_config_change(
                         warn!("No config cache available, falling back to full regeneration");
                         regenerate_and_restart(old_config, state).await?;
                     }
+                } else {
+                    info!("sing-box was stopped before config change, skipping rollback restart");
                 }
                 Ok::<(), AppError>(())
             }
@@ -278,6 +306,18 @@ pub async fn apply_config_change(
                 ))),
             }
         }
+    }
+}
+
+fn config_has_no_nodes(config: &Config) -> bool {
+    config.subs.is_empty() && config.nodes.is_empty()
+}
+
+async fn sing_box_process_is_running(state: &Arc<AppState>) -> bool {
+    let mut lock = state.sing_process.lock().await;
+    match &mut *lock {
+        Some(proc) => proc.child.try_wait().ok().flatten().is_none(),
+        None => false,
     }
 }
 
@@ -628,6 +668,31 @@ mod tests {
     }
 
     #[test]
+    fn collect_manual_outbounds_preserves_socks_and_http_nodes() {
+        let config = Config {
+            port: None,
+            socks_port: None,
+            route_mode: None,
+            subs: vec![],
+            nodes: vec![
+                r#"{"type":"socks","tag":"socks-a","server":"socks.example.com","server_port":1080}"#.to_string(),
+                r#"{"type":"http","tag":"http-a","server":"http.example.com","server_port":8080,"username":"user","password":"pass"}"#.to_string(),
+            ],
+            custom_rules: vec![],
+        };
+
+        let (outbounds, names) = collect_manual_outbounds(&config);
+
+        assert_eq!(names, vec!["socks-a", "http-a"]);
+        assert_eq!(outbounds[0]["type"], "socks");
+        assert_eq!(outbounds[0]["server_port"], 1080);
+        assert!(outbounds[0].get("username").is_none());
+        assert_eq!(outbounds[1]["type"], "http");
+        assert_eq!(outbounds[1]["username"], "user");
+        assert_eq!(outbounds[1]["password"], "pass");
+    }
+
+    #[test]
     fn build_sing_box_config_merges_nodes_and_valid_custom_rules() {
         let config = Config {
             port: None,
@@ -863,6 +928,36 @@ mod tests {
         assert!(err.to_string().contains(
             "No nodes available: all subscriptions failed and no manual nodes configured"
         ));
+    }
+
+    #[test]
+    fn config_has_no_nodes_only_when_subs_and_manual_nodes_empty() {
+        assert!(super::config_has_no_nodes(&Config {
+            port: None,
+            socks_port: None,
+            route_mode: None,
+            subs: vec![],
+            nodes: vec![],
+            custom_rules: vec![],
+        }));
+
+        assert!(!super::config_has_no_nodes(&Config {
+            port: None,
+            socks_port: None,
+            route_mode: None,
+            subs: vec!["https://example.com/sub".to_string()],
+            nodes: vec![],
+            custom_rules: vec![],
+        }));
+
+        assert!(!super::config_has_no_nodes(&Config {
+            port: None,
+            socks_port: None,
+            route_mode: None,
+            subs: vec![],
+            nodes: vec![r#"{"tag":"manual"}"#.to_string()],
+            custom_rules: vec![],
+        }));
     }
 
     #[test]

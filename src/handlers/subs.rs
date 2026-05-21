@@ -73,6 +73,9 @@ pub async fn delete_sub(
     }
 
     match apply_config_change(&state, &old_config, &new_config).await {
+        Ok(_) if new_config.subs.is_empty() && new_config.nodes.is_empty() => Ok(success_no_data(
+            "Subscription deleted; no nodes configured, sing-box stopped",
+        )),
         Ok(_) => Ok(success_no_data(
             "Subscription deleted and sing-box restarted",
         )),

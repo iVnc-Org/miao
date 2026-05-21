@@ -31,6 +31,7 @@ import {
   validateServer,
   validatePort,
   validatePassword,
+  validateOptionalCredential,
   CONNECTIVITY_SITES
 } from './utils.js'
 
@@ -100,6 +101,14 @@ export default function App() {
 
   const closeConfirm = useCallback(() => {
     setConfirmState({ open: false, title: '', message: '', onConfirm: null })
+  }, [])
+
+  const handleNodeTypeChange = useCallback((nextType) => {
+    setNodeType(nextType)
+    setNodeForm((prev) => {
+      const nextPort = nextType === 'socks' ? 1080 : nextType === 'http' ? 8080 : 443
+      return { ...prev, server_port: nextPort }
+    })
   }, [])
 
   // 首次加载：获取初始状态后再决定显示 onboarding 还是 dashboard
@@ -244,6 +253,7 @@ export default function App() {
   }, [apiCall, clearConnectivity, clearDelays, fetchSubs, showToast])
 
   const handleAddNode = useCallback(async () => {
+    const isSimpleProxy = nodeType === 'socks' || nodeType === 'http'
     const tagError = validateNodeTag(nodeForm.tag)
     if (tagError) {
       showToast(tagError, 'error')
@@ -259,10 +269,19 @@ export default function App() {
       showToast(portError, 'error')
       return
     }
-    const passwordError = validatePassword(nodeForm.password)
+    const passwordError = isSimpleProxy
+      ? validateOptionalCredential(nodeForm.password, '密码')
+      : validatePassword(nodeForm.password)
     if (passwordError) {
       showToast(passwordError, 'error')
       return
+    }
+    if (isSimpleProxy) {
+      const usernameError = validateOptionalCredential(nodeForm.username, '用户名')
+      if (usernameError) {
+        showToast(usernameError, 'error')
+        return
+      }
     }
 
     const payload = {
@@ -270,11 +289,18 @@ export default function App() {
       tag: nodeForm.tag.trim(),
       server: nodeForm.server.trim(),
       server_port: nodeForm.server_port,
-      password: nodeForm.password.trim(),
     }
+
+    if (isSimpleProxy) {
+      if (nodeForm.username?.trim()) payload.username = nodeForm.username.trim()
+      if (nodeForm.password?.trim()) payload.password = nodeForm.password.trim()
+    } else {
+      payload.password = nodeForm.password.trim()
+    }
+
     if (nodeType === 'ss') {
       payload.cipher = nodeForm.cipher
-    } else {
+    } else if (!isSimpleProxy) {
       if (nodeForm.sni?.trim()) payload.sni = nodeForm.sni.trim()
       payload.skip_cert_verify = nodeForm.skip_cert_verify
     }
@@ -393,7 +419,7 @@ export default function App() {
         <NodeModal
           open={showNodeModal}
           nodeType={nodeType}
-          setNodeType={setNodeType}
+          setNodeType={handleNodeTypeChange}
           form={nodeForm}
           setForm={setNodeForm}
           loading={loadingAction === 'addNode'}
@@ -475,7 +501,7 @@ export default function App() {
       <NodeModal 
         open={showNodeModal} 
         nodeType={nodeType} 
-        setNodeType={setNodeType} 
+        setNodeType={handleNodeTypeChange}
         form={nodeForm} 
         setForm={setNodeForm} 
         loading={loadingAction === 'addNode'} 

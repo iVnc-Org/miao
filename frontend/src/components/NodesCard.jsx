@@ -1,6 +1,6 @@
 import { memo } from 'react'
-import { Shield, Trash2 } from 'lucide-react'
-import { SectionCard } from './ui.jsx'
+import { Plus, Shield, Trash2 } from 'lucide-react'
+import { Button, SectionCard } from './ui.jsx'
 import { classNames, protocolLabel } from '../utils.js'
 
 const NodeRow = memo(function NodeRow({ node, onDelete }) {
@@ -37,6 +37,14 @@ export function NodesCard({ nodes, onDeleteNode, onOpenAddNode }) {
             <span>手动节点</span>
             <span className="counter-pill">{nodes.length}</span>
           </div>
+          <Button
+            tone="secondary"
+            size="sm"
+            icon={<Plus size={12} />}
+            onClick={onOpenAddNode}
+          >
+            添加
+          </Button>
         </div>
       }
     >

@@ -3,7 +3,8 @@ use std::sync::Arc;
 use tracing::warn;
 
 use crate::models::{
-    AnyTls, ApiResponse, DeleteNodeRequest, Hysteria2, NodeInfo, NodeRequest, Shadowsocks, Tls,
+    AnyTls, ApiResponse, DeleteNodeRequest, HttpProxy, Hysteria2, NodeInfo, NodeRequest,
+    Shadowsocks, SocksProxy, Tls,
 };
 use crate::responses::{status_error, success, success_no_data, HandlerResult};
 use crate::services::config::apply_config_change;
@@ -53,7 +54,7 @@ pub async fn add_node(
     let node_type = req.node_type.as_deref().unwrap_or("hysteria2");
 
     // 验证节点类型是否支持
-    const VALID_NODE_TYPES: &[&str] = &["hysteria2", "anytls", "ss"];
+    const VALID_NODE_TYPES: &[&str] = &["hysteria2", "anytls", "ss", "socks", "http"];
     if !VALID_NODE_TYPES.contains(&node_type) {
         return Err(status_error(
             StatusCode::BAD_REQUEST,
@@ -94,7 +95,7 @@ pub async fn add_node(
                 tag: req.tag,
                 server: req.server,
                 server_port: req.server_port,
-                password: req.password,
+                password: req.password.unwrap_or_default(),
                 tls: Tls {
                     enabled: true,
                     server_name: req.sni,
@@ -112,7 +113,29 @@ pub async fn add_node(
                 method: req
                     .cipher
                     .unwrap_or_else(|| "2022-blake3-aes-128-gcm".to_string()),
-                password: req.password,
+                password: req.password.unwrap_or_default(),
+            };
+            serde_json::to_string(&node)
+        }
+        "socks" => {
+            let node = SocksProxy {
+                outbound_type: "socks".to_string(),
+                tag: req.tag,
+                server: req.server,
+                server_port: req.server_port,
+                username: non_empty(req.username),
+                password: non_empty(req.password),
+            };
+            serde_json::to_string(&node)
+        }
+        "http" => {
+            let node = HttpProxy {
+                outbound_type: "http".to_string(),
+                tag: req.tag,
+                server: req.server,
+                server_port: req.server_port,
+                username: non_empty(req.username),
+                password: non_empty(req.password),
             };
             serde_json::to_string(&node)
         }
@@ -122,7 +145,7 @@ pub async fn add_node(
                 tag: req.tag,
                 server: req.server,
                 server_port: req.server_port,
-                password: req.password,
+                password: req.password.unwrap_or_default(),
                 up_mbps: None,
                 down_mbps: None,
                 tls: Tls {
@@ -147,6 +170,12 @@ pub async fn add_node(
         Ok(_) => Ok(success_no_data("Node added and sing-box restarted")),
         Err(e) => Err(status_error(StatusCode::INTERNAL_SERVER_ERROR, e)),
     }
+}
+
+fn non_empty(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 pub async fn delete_node(
@@ -315,6 +344,8 @@ mod tests {
                 r#"{"type":"hysteria2","tag":"hy2-node","server":"hy2.example.com","server_port":443,"password":"secret"}"#.to_string(),
                 r#"{"type":"shadowsocks","tag":"ss-node","server":"ss.example.com","server_port":8388,"password":"secret","method":"aes-128-gcm"}"#.to_string(),
                 r#"{"type":"anytls","tag":"anytls-node","server":"any.example.com","server_port":8443,"password":"secret"}"#.to_string(),
+                r#"{"type":"socks","tag":"socks-node","server":"socks.example.com","server_port":1080}"#.to_string(),
+                r#"{"type":"http","tag":"http-node","server":"http.example.com","server_port":8080,"username":"u","password":"p"}"#.to_string(),
             ],
             custom_rules: vec![],
         });
@@ -323,12 +354,14 @@ mod tests {
 
         assert!(response.success);
         let nodes = response.data.unwrap();
-        assert_eq!(nodes.len(), 3);
+        assert_eq!(nodes.len(), 5);
 
         let types: Vec<String> = nodes.iter().map(|n| n.node_type.clone()).collect();
         assert!(types.contains(&"hysteria2".to_string()));
         assert!(types.contains(&"shadowsocks".to_string()));
         assert!(types.contains(&"anytls".to_string()));
+        assert!(types.contains(&"socks".to_string()));
+        assert!(types.contains(&"http".to_string()));
     }
 
     #[tokio::test]
