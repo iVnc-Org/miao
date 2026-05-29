@@ -117,28 +117,68 @@ fn decode_base64_text(input: &str) -> Option<String> {
 }
 
 fn parse_uri_node(uri: &str) -> AppResult<Option<(String, serde_json::Value)>> {
-    if uri.starts_with("ss://") {
+    if has_uri_scheme(uri, "ss://") {
         return parse_shadowsocks_uri(uri).map(Some);
+    }
+    if has_uri_scheme(uri, "anytls://") {
+        return parse_anytls_uri(uri).map(Some);
     }
     Ok(None)
 }
 
+fn has_uri_scheme(uri: &str, scheme: &str) -> bool {
+    uri.get(..scheme.len())
+        .map(|prefix| prefix.eq_ignore_ascii_case(scheme))
+        .unwrap_or(false)
+}
+
+fn parse_anytls_uri(uri: &str) -> AppResult<(String, serde_json::Value)> {
+    let url =
+        Url::parse(uri).map_err(|e| AppError::context("Invalid anytls URI", e.to_string()))?;
+    let name = parse_uri_name(&url, "anytls")?;
+
+    let server = url
+        .host_str()
+        .filter(|server| !server.trim().is_empty())
+        .ok_or_else(|| AppError::message("anytls URI missing server"))?;
+    let port = url
+        .port()
+        .filter(|port| *port > 0)
+        .ok_or_else(|| AppError::message("anytls URI missing port"))?;
+    let password = decode_uri_component(url.username(), "Invalid anytls password")?;
+    if password.trim().is_empty() {
+        return Err(AppError::message("anytls URI missing password"));
+    }
+
+    let sni = query_value(&url, "sni").filter(|sni| !sni.trim().is_empty());
+    let insecure = query_value(&url, "insecure")
+        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true"))
+        .unwrap_or(false);
+    let mut outbound = serde_json::json!({
+        "type": "anytls",
+        "tag": name,
+        "server": server,
+        "server_port": port,
+        "password": password,
+        "tls": {
+            "enabled": true,
+            "insecure": insecure
+        }
+    });
+
+    if let Some(sni) = sni {
+        outbound["tls"]["server_name"] = serde_json::Value::String(sni);
+    }
+
+    Ok((
+        outbound["tag"].as_str().unwrap_or_default().to_string(),
+        outbound,
+    ))
+}
+
 fn parse_shadowsocks_uri(uri: &str) -> AppResult<(String, serde_json::Value)> {
     let url = Url::parse(uri).map_err(|e| AppError::context("Invalid ss URI", e.to_string()))?;
-    let name = url
-        .fragment()
-        .map(urlencoding::decode)
-        .transpose()
-        .map_err(|e| AppError::context("Invalid ss URI name", e.to_string()))?
-        .map(|name| name.into_owned())
-        .filter(|name| !name.trim().is_empty())
-        .unwrap_or_else(|| {
-            format!(
-                "{}:{}",
-                url.host_str().unwrap_or("unknown"),
-                url.port().unwrap_or(0)
-            )
-        });
+    let name = parse_uri_name(&url, "ss")?;
 
     let server = url
         .host_str()
@@ -174,6 +214,33 @@ fn parse_shadowsocks_uri(uri: &str) -> AppResult<(String, serde_json::Value)> {
         outbound["tag"].as_str().unwrap_or_default().to_string(),
         outbound,
     ))
+}
+
+fn parse_uri_name(url: &Url, uri_type: &str) -> AppResult<String> {
+    Ok(url
+        .fragment()
+        .map(|name| decode_uri_component(name, &format!("Invalid {uri_type} URI name")))
+        .transpose()?
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| {
+            format!(
+                "{}:{}",
+                url.host_str().unwrap_or("unknown"),
+                url.port().unwrap_or(0)
+            )
+        }))
+}
+
+fn decode_uri_component(value: &str, context: &str) -> AppResult<String> {
+    urlencoding::decode(value)
+        .map(|value| value.into_owned())
+        .map_err(|e| AppError::context(context, e.to_string()))
+}
+
+fn query_value(url: &Url, key: &str) -> Option<String> {
+    url.query_pairs()
+        .find(|(query_key, _)| query_key == key)
+        .map(|(_, value)| value.into_owned())
 }
 
 fn parse_ss_userinfo(url: &Url) -> AppResult<(String, String)> {
@@ -493,6 +560,56 @@ proxies:
             outbound["plugin_opts"],
             "obfs=http;obfs-host=cdn.example.com"
         );
+    }
+
+    #[test]
+    fn parse_uri_subscription_decodes_base64_anytls_links() {
+        let body = general_purpose::STANDARD.encode(
+            "anytls://secret-pass@example.com:23001/?type=tcp&insecure=0&fp=chrome&sni=live.example.com#%E9%A6%99%E6%B8%AF%2001\n\
+             AnyTLS://second-pass@example.com:23002/?type=tcp&insecure=1&fingerprint=firefox&sni=tw.example.com#%E5%8F%B0%E6%B9%BE%2001\n",
+        );
+
+        let result = parse_uri_subscription(&body).unwrap();
+
+        assert_eq!(result.total_count, 2);
+        assert_eq!(result.nodes.len(), 2);
+        assert!(result.errors.is_empty());
+
+        let first = &result.nodes[0].1;
+        assert_eq!(result.nodes[0].0, "香港 01");
+        assert_eq!(first["type"], "anytls");
+        assert_eq!(first["tag"], "香港 01");
+        assert_eq!(first["server"], "example.com");
+        assert_eq!(first["server_port"], 23001);
+        assert_eq!(first["password"], "secret-pass");
+        assert_eq!(first["tls"]["server_name"], "live.example.com");
+        assert_eq!(first["tls"]["insecure"], false);
+        assert!(first["tls"].get("utls").is_none());
+
+        let second = &result.nodes[1].1;
+        assert_eq!(result.nodes[1].0, "台湾 01");
+        assert_eq!(second["tls"]["insecure"], true);
+        assert!(second["tls"].get("utls").is_none());
+    }
+
+    #[test]
+    fn parse_uri_subscription_reports_invalid_anytls_links() {
+        let result = parse_uri_subscription(
+            "anytls://@example.com:443#missing-password\n\
+             anytls://pass@example.com/#missing-port\n\
+             anytls://pass@:443#missing-server\n",
+        )
+        .unwrap();
+
+        assert_eq!(result.total_count, 3);
+        assert!(result.nodes.is_empty());
+        assert_eq!(result.errors.len(), 3);
+        assert!(result.errors.iter().any(|e| e.contains("password")));
+        assert!(result.errors.iter().any(|e| e.contains("port")));
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.contains("server") || e.contains("Invalid anytls URI")));
     }
 
     #[test]

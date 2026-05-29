@@ -46,7 +46,7 @@ port: 6161  # Web 面板端口，默认 6161
 socks_port: 2080  # 可选：覆盖本机 SOCKS5 端口，默认监听 127.0.0.1:1080
 route_mode: rule  # 可选：`tunnel` 为默认全量代理，`global` 保留私网直连，`rule` 为国内直连/国外代理
 
-# 订阅链接（推荐，Clash.Meta 格式）
+# 订阅链接（支持 Clash.Meta 格式，以及 ss:// / anytls:// URI 订阅）
 subs:
   - "https://your-subscription-url"
 
