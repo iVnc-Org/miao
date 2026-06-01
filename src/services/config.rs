@@ -374,13 +374,19 @@ fn build_sing_box_config(
     }
 
     if let Some(rules) = sing_box_config["route"]["rules"].as_array_mut() {
+        let mut custom_rules = Vec::new();
         for rule_str in &config.custom_rules {
             if let Ok(rule_json) = serde_json::from_str::<serde_json::Value>(rule_str) {
-                rules.push(rule_json);
+                custom_rules.push(rule_json);
             } else {
                 warn!("Failed to parse custom rule: {}", rule_str);
             }
         }
+
+        // Preserve the mandatory pre-routing actions, then let user rules take
+        // precedence over the built-in direct/proxy split rules.
+        let insertion_index = rules.len().min(2);
+        rules.splice(insertion_index..insertion_index, custom_rules);
     }
 
     Ok(sing_box_config)
@@ -527,7 +533,10 @@ mod tests {
 
         let rules = built["route"]["rules"].as_array().unwrap();
         assert_eq!(rules.len(), 7);
-        assert_eq!(rules[6]["domain_suffix"][0], "example.com");
+        assert_eq!(rules[0]["action"], "sniff");
+        assert_eq!(rules[1]["action"], "hijack-dns");
+        assert_eq!(rules[2]["domain_suffix"][0], "example.com");
+        assert_eq!(rules[3]["ip_is_private"], true);
     }
 
     #[test]
