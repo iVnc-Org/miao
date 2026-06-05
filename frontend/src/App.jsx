@@ -37,6 +37,8 @@ import {
   CONNECTIVITY_SITES
 } from './utils.js'
 
+const CONNECTIONS_MODAL_MIN_WIDTH = 841
+
 export default function App() {
   const [firstLoadDone, setFirstLoadDone] = useState(false)
   const [loadingAction, setLoadingAction] = useState('')
@@ -145,6 +147,17 @@ export default function App() {
       clearConnectivity()
     }
   }, [status.running, clearDelays, clearConnectivity])
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia(`(max-width: ${CONNECTIONS_MODAL_MIN_WIDTH - 1}px)`)
+    const handleChange = () => {
+      if (mediaQuery.matches) setShowConnectionsModal(false)
+    }
+
+    handleChange()
+    mediaQuery.addEventListener('change', handleChange)
+    return () => mediaQuery.removeEventListener('change', handleChange)
+  }, [])
 
   const handleToggleService = useCallback(async () => {
     try {
@@ -324,9 +337,14 @@ export default function App() {
   }, [testAllConnectivity])
 
   const handleOpenConnections = useCallback(() => {
+    if (window.matchMedia(`(max-width: ${CONNECTIONS_MODAL_MIN_WIDTH - 1}px)`).matches) {
+      showToast('移动端暂不支持连接统计面板', 'info')
+      return
+    }
+
     setShowConnectionsModal(true)
     fetchConnections()
-  }, [fetchConnections])
+  }, [fetchConnections, showToast])
 
   const handleUpgradeClick = useCallback(async () => {
     if (!status.running) {
