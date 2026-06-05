@@ -9,8 +9,20 @@ use crate::models::LastProxy;
 use crate::services::singbox::get_sing_box_home;
 use crate::state::AppState;
 
+fn is_openwrt_system() -> bool {
+    std::path::Path::new("/etc/openwrt_release").exists()
+}
+
+fn get_last_proxy_path_for(openwrt: bool) -> PathBuf {
+    if openwrt {
+        get_sing_box_home().join(".last_proxy")
+    } else {
+        PathBuf::from(".last_proxy")
+    }
+}
+
 fn get_last_proxy_path() -> PathBuf {
-    get_sing_box_home().join(".last_proxy")
+    get_last_proxy_path_for(is_openwrt_system())
 }
 
 pub async fn save_last_proxy(proxy: &LastProxy) -> AppResult<()> {
@@ -90,5 +102,26 @@ pub async fn restore_last_proxy(state: &Arc<AppState>) {
         Err(e) => {
             error!("Failed to restore last proxy: {}", e);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{get_last_proxy_path_for, get_sing_box_home};
+
+    #[test]
+    fn last_proxy_path_uses_tmp_on_openwrt() {
+        assert_eq!(
+            get_last_proxy_path_for(true),
+            get_sing_box_home().join(".last_proxy")
+        );
+    }
+
+    #[test]
+    fn last_proxy_path_uses_working_directory_on_regular_linux() {
+        assert_eq!(
+            get_last_proxy_path_for(false),
+            std::path::PathBuf::from(".last_proxy")
+        );
     }
 }
