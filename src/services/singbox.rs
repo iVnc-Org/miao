@@ -22,7 +22,6 @@ compile_error!("Unsupported architecture: only x86_64 and aarch64 are supported.
 
 const IP_RULE_BINARY: &[u8] = include_bytes!("../../embedded/geoip-cn.srs");
 const SITE_RULE_BINARY: &[u8] = include_bytes!("../../embedded/geosite-geolocation-cn.srs");
-const ADBLOCK_RULE_BINARY: &[u8] = include_bytes!("../../embedded/adblock_reject.srs");
 
 pub fn get_sing_box_home() -> PathBuf {
     PathBuf::from("/tmp/miao-sing-box")
@@ -38,7 +37,6 @@ pub fn extract_sing_box() -> AppResult<PathBuf> {
     let sing_box_path = sing_box_home.join("sing-box");
     let ip_rule_path = sing_box_home.join("chinaip.srs");
     let site_rule_path = sing_box_home.join("chinasite.srs");
-    let adblock_rule_path = sing_box_home.join("adblock_reject.srs");
 
     if !sing_box_path.exists() {
         info!("Extracting embedded sing-box binary to {:?}", sing_box_path);
@@ -59,12 +57,6 @@ pub fn extract_sing_box() -> AppResult<PathBuf> {
         fs::write(&site_rule_path, SITE_RULE_BINARY)
             .map_err(|e| AppError::context("Failed to write geosite rule file", e))?;
     }
-    if !adblock_rule_path.exists() {
-        info!("Extracting adblock rule file to {:?}", adblock_rule_path);
-        fs::write(&adblock_rule_path, ADBLOCK_RULE_BINARY)
-            .map_err(|e| AppError::context("Failed to write adblock rule file", e))?;
-    }
-
     let dashboard_dir = sing_box_home.join("dashboard");
     if !dashboard_dir.exists() {
         fs::create_dir_all(&dashboard_dir)
