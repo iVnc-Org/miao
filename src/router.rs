@@ -56,6 +56,7 @@ mod tests {
     async fn router_serves_index_page() {
         let app = test_app(Config {
             port: None,
+            socks_listen: None,
             socks_port: None,
             route_mode: None,
             subs: vec![],
@@ -75,6 +76,7 @@ mod tests {
     async fn router_serves_favicon_with_svg_content_type() {
         let app = test_app(Config {
             port: None,
+            socks_listen: None,
             socks_port: None,
             route_mode: None,
             subs: vec![],
@@ -101,6 +103,7 @@ mod tests {
     async fn router_returns_status_payload() {
         let app = test_app(Config {
             port: None,
+            socks_listen: None,
             socks_port: None,
             route_mode: None,
             subs: vec![],
@@ -125,6 +128,7 @@ mod tests {
     async fn router_returns_version_build_info() {
         let app = test_app(Config {
             port: None,
+            socks_listen: None,
             socks_port: None,
             route_mode: None,
             subs: vec![],
@@ -151,6 +155,7 @@ mod tests {
     async fn router_returns_node_list_payload() {
         let app = test_app(Config {
             port: None,
+            socks_listen: None,
             socks_port: None,
             route_mode: None,
             subs: vec![],
@@ -179,6 +184,7 @@ mod tests {
     async fn router_returns_subscription_list_payload() {
         let app = test_app(Config {
             port: None,
+            socks_listen: None,
             socks_port: None,
             route_mode: None,
             subs: vec!["https://example.com/subscription".to_string()],
@@ -204,6 +210,7 @@ mod tests {
     async fn router_rejects_duplicate_subscription_with_bad_request() {
         let app = test_app(Config {
             port: None,
+            socks_listen: None,
             socks_port: None,
             route_mode: None,
             subs: vec!["https://example.com/subscription".to_string()],
@@ -231,6 +238,7 @@ mod tests {
     async fn router_returns_not_found_when_deleting_missing_subscription() {
         let app = test_app(Config {
             port: None,
+            socks_listen: None,
             socks_port: None,
             route_mode: None,
             subs: vec!["https://example.com/subscription".to_string()],
@@ -258,6 +266,7 @@ mod tests {
     async fn router_rejects_duplicate_node_with_bad_request() {
         let app = test_app(Config {
             port: None,
+            socks_listen: None,
             socks_port: None,
             route_mode: None,
             subs: vec![],
@@ -292,6 +301,7 @@ mod tests {
     async fn router_returns_not_found_when_deleting_missing_node() {
         let app = test_app(Config {
             port: None,
+            socks_listen: None,
             socks_port: None,
             route_mode: None,
             subs: vec![],

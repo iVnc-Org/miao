@@ -1,10 +1,12 @@
 use axum::{extract::State, http::StatusCode, response::Json};
 use serde::Deserialize;
-use std::{sync::Arc, time::Instant};
+use std::{net::IpAddr, sync::Arc, time::Instant};
 use tokio::time::Duration;
 
 use crate::error::AppError;
-use crate::models::{ApiResponse, ConnectivityResult, StatusData, DEFAULT_SOCKS_PORT};
+use crate::models::{
+    ApiResponse, ConnectivityResult, StatusData, DEFAULT_SOCKS_LISTEN, DEFAULT_SOCKS_PORT,
+};
 use crate::responses::{status_error, success, success_no_data, HandlerResult};
 use crate::services::{
     config::{gen_config, restore_config_from_cache, save_config_cache},
@@ -123,18 +125,20 @@ pub async fn test_connectivity(
     Json(req): Json<ConnectivityRequest>,
 ) -> Json<ApiResponse<ConnectivityResult>> {
     let start = Instant::now();
-    let socks_port = state
-        .config
-        .read()
-        .await
-        .socks_port
-        .unwrap_or(DEFAULT_SOCKS_PORT);
+    let (socks_listen, socks_port) = {
+        let config = state.config.read().await;
+        (
+            config
+                .socks_listen
+                .clone()
+                .unwrap_or_else(|| DEFAULT_SOCKS_LISTEN.to_string()),
+            config.socks_port.unwrap_or(DEFAULT_SOCKS_PORT),
+        )
+    };
+    let proxy_url = socks_proxy_url(&socks_listen, socks_port);
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
-        .proxy(
-            reqwest::Proxy::all(format!("socks5h://127.0.0.1:{socks_port}"))
-                .expect("valid local socks proxy URL"),
-        )
+        .proxy(reqwest::Proxy::all(proxy_url).expect("valid local socks proxy URL"))
         .build();
 
     let result = match client {
@@ -163,11 +167,31 @@ pub async fn test_connectivity(
     success("Test completed", result)
 }
 
+fn socks_proxy_url(listen: &str, port: u16) -> String {
+    let host = if listen == "0.0.0.0" {
+        DEFAULT_SOCKS_LISTEN
+    } else if listen == "::" {
+        "::1"
+    } else {
+        listen
+    };
+
+    if host
+        .parse::<IpAddr>()
+        .map(|ip| ip.is_ipv6())
+        .unwrap_or(false)
+    {
+        format!("socks5h://[{host}]:{port}")
+    } else {
+        format!("socks5h://{host}:{port}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use axum::extract::State;
 
-    use super::get_status;
+    use super::{get_status, socks_proxy_url};
     use crate::models::Config;
     use crate::test_support::app_state;
 
@@ -175,6 +199,7 @@ mod tests {
     async fn get_status_reports_stopped_when_no_process_exists() {
         let state = app_state(Config {
             port: None,
+            socks_listen: None,
             socks_port: None,
             route_mode: None,
             subs: vec![],
@@ -190,5 +215,12 @@ mod tests {
         assert!(!data.running);
         assert!(data.pid.is_none());
         assert!(data.uptime_secs.is_none());
+    }
+
+    #[test]
+    fn socks_proxy_url_handles_wildcard_and_ipv6_listeners() {
+        assert_eq!(socks_proxy_url("0.0.0.0", 1080), "socks5h://127.0.0.1:1080");
+        assert_eq!(socks_proxy_url("::", 1080), "socks5h://[::1]:1080");
+        assert_eq!(socks_proxy_url("::1", 1080), "socks5h://[::1]:1080");
     }
 }

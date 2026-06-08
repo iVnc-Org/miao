@@ -13,10 +13,10 @@ mod validation;
 use crate::build_info::{git_commit_short, VERSION};
 use crate::error::{AppError, AppResult};
 use nix::unistd::Uid;
-use std::{fs, sync::Arc};
+use std::{fs, net::IpAddr, sync::Arc};
 use tracing::{error, info, warn};
 
-use models::{Config, DEFAULT_PORT};
+use models::{Config, DEFAULT_PORT, DEFAULT_SOCKS_LISTEN, DEFAULT_SOCKS_PORT};
 use services::{
     config::{gen_config, restore_config_from_cache, save_config, save_config_cache},
     openwrt::check_and_install_openwrt_dependencies,
@@ -24,6 +24,109 @@ use services::{
     singbox::{extract_sing_box, start_sing_internal, stop_sing_internal},
 };
 use state::AppState;
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct CliOptions {
+    show_help: bool,
+    show_version: bool,
+    socks_listen: Option<String>,
+    socks_port: Option<u16>,
+}
+
+fn print_help() {
+    println!(
+        r#"miao v{VERSION}
+
+Usage:
+  miao [OPTIONS]
+
+Options:
+  -h, --help                    Show this help message
+  -V, --version                 Show version information
+      --socks-listen <ADDR>     SOCKS5 listen address (default: {DEFAULT_SOCKS_LISTEN})
+      --socks-port <PORT>       SOCKS5 listen port (default: {DEFAULT_SOCKS_PORT})
+
+Examples:
+  miao --socks-listen 0.0.0.0 --socks-port 1080
+  miao --socks-listen=0.0.0.0 --socks-port=1080
+"#
+    );
+}
+
+fn parse_cli_args<I, S>(args: I) -> AppResult<CliOptions>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let mut options = CliOptions::default();
+    let mut args = args.into_iter().map(Into::into).skip(1);
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-h" | "--help" => options.show_help = true,
+            "-V" | "--version" => options.show_version = true,
+            "--socks-listen" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| AppError::message("--socks-listen requires an address"))?;
+                options.socks_listen = Some(parse_socks_listen(&value)?);
+            }
+            "--socks-port" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| AppError::message("--socks-port requires a port"))?;
+                options.socks_port = Some(parse_socks_port(&value)?);
+            }
+            _ if arg.starts_with("--socks-listen=") => {
+                let value = arg.trim_start_matches("--socks-listen=");
+                options.socks_listen = Some(parse_socks_listen(value)?);
+            }
+            _ if arg.starts_with("--socks-port=") => {
+                let value = arg.trim_start_matches("--socks-port=");
+                options.socks_port = Some(parse_socks_port(value)?);
+            }
+            _ => {
+                return Err(AppError::message(format!(
+                    "Unknown argument: {arg}. Use --help for usage."
+                )));
+            }
+        }
+    }
+
+    Ok(options)
+}
+
+fn parse_socks_listen(value: &str) -> AppResult<String> {
+    if value.trim().is_empty() {
+        return Err(AppError::message("--socks-listen cannot be empty"));
+    }
+
+    value
+        .parse::<IpAddr>()
+        .map_err(|_| AppError::message("--socks-listen must be an IP address"))?;
+    Ok(value.to_string())
+}
+
+fn parse_socks_port(value: &str) -> AppResult<u16> {
+    let port = value
+        .parse::<u16>()
+        .map_err(|_| AppError::message("--socks-port must be between 1 and 65535"))?;
+    if port == 0 {
+        return Err(AppError::message(
+            "--socks-port must be between 1 and 65535",
+        ));
+    }
+    Ok(port)
+}
+
+fn apply_cli_overrides(config: &mut Config, options: &CliOptions) {
+    if let Some(socks_listen) = &options.socks_listen {
+        config.socks_listen = Some(socks_listen.clone());
+    }
+    if let Some(socks_port) = options.socks_port {
+        config.socks_port = Some(socks_port);
+    }
+}
 
 fn browser_launch_env() -> Vec<(String, String)> {
     let mut envs = Vec::new();
@@ -100,6 +203,51 @@ async fn open_onboarding_browser(url: String) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_cli_args_accepts_socks_overrides() {
+        let options =
+            parse_cli_args(["miao", "--socks-listen", "0.0.0.0", "--socks-port=2080"]).unwrap();
+
+        assert_eq!(options.socks_listen, Some("0.0.0.0".to_string()));
+        assert_eq!(options.socks_port, Some(2080));
+    }
+
+    #[test]
+    fn parse_cli_args_accepts_help_and_version() {
+        let help = parse_cli_args(["miao", "--help"]).unwrap();
+        assert!(help.show_help);
+
+        let version = parse_cli_args(["miao", "-V"]).unwrap();
+        assert!(version.show_version);
+    }
+
+    #[test]
+    fn parse_cli_args_rejects_invalid_socks_options() {
+        assert!(parse_cli_args(["miao", "--socks-listen", "localhost"]).is_err());
+        assert!(parse_cli_args(["miao", "--socks-port", "0"]).is_err());
+        assert!(parse_cli_args(["miao", "--unknown"]).is_err());
+    }
+
+    #[test]
+    fn apply_cli_overrides_updates_runtime_config() {
+        let mut config = Config::default();
+        let options = CliOptions {
+            socks_listen: Some("0.0.0.0".to_string()),
+            socks_port: Some(2080),
+            ..CliOptions::default()
+        };
+
+        apply_cli_overrides(&mut config, &options);
+
+        assert_eq!(config.socks_listen, Some("0.0.0.0".to_string()));
+        assert_eq!(config.socks_port, Some(2080));
+    }
+}
+
 #[tokio::main]
 async fn main() -> AppResult<()> {
     // 初始化结构化日志
@@ -110,7 +258,14 @@ async fn main() -> AppResult<()> {
         )
         .init();
 
-    if std::env::args().any(|a| a == "--version" || a == "-V") {
+    let cli_options = parse_cli_args(std::env::args())?;
+
+    if cli_options.show_help {
+        print_help();
+        return Ok(());
+    }
+
+    if cli_options.show_version {
         match git_commit_short() {
             Some(commit) => println!("miao v{} ({})", VERSION, commit),
             None => println!("miao v{}", VERSION),
@@ -131,7 +286,7 @@ async fn main() -> AppResult<()> {
     }
 
     info!("Reading configuration...");
-    let config: Config = match tokio::fs::read_to_string("config.yaml").await {
+    let mut config: Config = match tokio::fs::read_to_string("config.yaml").await {
         Ok(content) => serde_yaml::from_str(&content)?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             info!("No config.yaml found, creating default configuration");
@@ -141,12 +296,20 @@ async fn main() -> AppResult<()> {
         }
         Err(e) => return Err(e.into()),
     };
+    apply_cli_overrides(&mut config, &cli_options);
     let port = config.port.unwrap_or(DEFAULT_PORT);
+    let socks_listen = config
+        .socks_listen
+        .as_deref()
+        .unwrap_or(DEFAULT_SOCKS_LISTEN);
+    let socks_port = config.socks_port.unwrap_or(DEFAULT_SOCKS_PORT);
     let subs_count = config.subs.len();
     let nodes_count = config.nodes.len();
 
     info!(
         port = port,
+        socks_listen = socks_listen,
+        socks_port = socks_port,
         subs = subs_count,
         nodes = nodes_count,
         "Configuration loaded"

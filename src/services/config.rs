@@ -7,7 +7,7 @@ use tokio::time::Duration;
 use tracing::{error, info, warn};
 
 use crate::error::{AppError, AppResult};
-use crate::models::{Config, RouteMode, SubStatus, DEFAULT_SOCKS_PORT};
+use crate::models::{Config, RouteMode, SubStatus, DEFAULT_SOCKS_LISTEN, DEFAULT_SOCKS_PORT};
 use crate::services::{
     proxy::restore_last_proxy,
     singbox::{
@@ -39,6 +39,7 @@ fn get_config_cache_meta_path() -> PathBuf {
 fn config_cache_fingerprint(config: &Config) -> AppResult<String> {
     let value = serde_json::json!({
         "schema_version": CONFIG_CACHE_SCHEMA_VERSION,
+        "socks_listen": &config.socks_listen,
         "socks_port": config.socks_port,
         "route_mode": &config.route_mode,
         "subs": &config.subs,
@@ -498,11 +499,20 @@ fn build_sing_box_config(
         ));
     }
 
+    let socks_listen = config
+        .socks_listen
+        .as_deref()
+        .unwrap_or(DEFAULT_SOCKS_LISTEN);
+    if socks_listen.parse::<std::net::IpAddr>().is_err() {
+        return Err(AppError::message(
+            "Invalid socks_listen: must be an IP address",
+        ));
+    }
     if let Some(inbounds) = sing_box_config["inbounds"].as_array_mut() {
         inbounds.push(serde_json::json!({
             "type": "socks",
             "tag": "socks-in",
-            "listen": "127.0.0.1",
+            "listen": socks_listen,
             "listen_port": socks_port
         }));
     }
@@ -626,6 +636,7 @@ mod tests {
     fn collect_manual_outbounds_ignores_invalid_json_nodes() {
         let config = Config {
             port: None,
+            socks_listen: None,
             socks_port: None,
             route_mode: None,
             subs: vec![],
@@ -648,6 +659,7 @@ mod tests {
         // 测试：Hysteria2 节点不强制包含带宽默认值
         let config = Config {
             port: None,
+            socks_listen: None,
             socks_port: None,
             route_mode: None,
             subs: vec![],
@@ -671,6 +683,7 @@ mod tests {
     fn collect_manual_outbounds_preserves_socks_and_http_nodes() {
         let config = Config {
             port: None,
+            socks_listen: None,
             socks_port: None,
             route_mode: None,
             subs: vec![],
@@ -696,6 +709,7 @@ mod tests {
     fn build_sing_box_config_merges_nodes_and_valid_custom_rules() {
         let config = Config {
             port: None,
+            socks_listen: None,
             socks_port: Some(1080),
             route_mode: None,
             subs: vec![],
@@ -756,9 +770,44 @@ mod tests {
     }
 
     #[test]
+    fn build_sing_box_config_uses_configured_socks_listen_and_port() {
+        let config = Config {
+            port: None,
+            socks_listen: Some("0.0.0.0".to_string()),
+            socks_port: Some(2080),
+            route_mode: None,
+            subs: vec![],
+            nodes: vec![],
+            custom_rules: vec![],
+        };
+        let my_outbounds = vec![json!({
+            "type": "hysteria2",
+            "tag": "manual-a",
+            "server": "manual.example.com",
+            "server_port": 443,
+            "password": "secret"
+        })];
+
+        let built = build_sing_box_config(
+            &config,
+            vec!["manual-a".to_string()],
+            my_outbounds,
+            vec![],
+            vec![],
+        )
+        .unwrap();
+
+        let inbounds = built["inbounds"].as_array().unwrap();
+        assert_eq!(inbounds[1]["type"], "socks");
+        assert_eq!(inbounds[1]["listen"], "0.0.0.0");
+        assert_eq!(inbounds[1]["listen_port"], 2080);
+    }
+
+    #[test]
     fn build_sing_box_config_defaults_to_tunnel_mode_with_local_socks() {
         let config = Config {
             port: None,
+            socks_listen: None,
             socks_port: None,
             route_mode: None,
             subs: vec![],
@@ -803,6 +852,7 @@ mod tests {
     fn build_sing_box_config_supports_global_mode_private_direct() {
         let config = Config {
             port: None,
+            socks_listen: None,
             socks_port: None,
             route_mode: Some(RouteMode::Global),
             subs: vec![],
@@ -840,6 +890,7 @@ mod tests {
     fn build_sing_box_config_supports_rule_mode_domestic_bypass() {
         let config = Config {
             port: None,
+            socks_listen: None,
             socks_port: None,
             route_mode: Some(RouteMode::Rule),
             subs: vec![],
@@ -878,6 +929,7 @@ mod tests {
     fn config_cache_fingerprint_ignores_web_port() {
         let mut first = Config {
             port: Some(6161),
+            socks_listen: None,
             socks_port: Some(1080),
             route_mode: Some(RouteMode::Tunnel),
             subs: vec!["https://example.com/sub".to_string()],
@@ -916,6 +968,7 @@ mod tests {
     fn build_sing_box_config_errors_when_no_nodes_available() {
         let config = Config {
             port: None,
+            socks_listen: None,
             socks_port: None,
             route_mode: None,
             subs: vec![],
@@ -934,6 +987,7 @@ mod tests {
     fn config_has_no_nodes_only_when_subs_and_manual_nodes_empty() {
         assert!(super::config_has_no_nodes(&Config {
             port: None,
+            socks_listen: None,
             socks_port: None,
             route_mode: None,
             subs: vec![],
@@ -943,6 +997,7 @@ mod tests {
 
         assert!(!super::config_has_no_nodes(&Config {
             port: None,
+            socks_listen: None,
             socks_port: None,
             route_mode: None,
             subs: vec!["https://example.com/sub".to_string()],
@@ -952,6 +1007,7 @@ mod tests {
 
         assert!(!super::config_has_no_nodes(&Config {
             port: None,
+            socks_listen: None,
             socks_port: None,
             route_mode: None,
             subs: vec![],
@@ -964,6 +1020,7 @@ mod tests {
     fn collect_manual_outbounds_handles_empty_nodes() {
         let config = Config {
             port: None,
+            socks_listen: None,
             socks_port: None,
             route_mode: None,
             subs: vec![],
@@ -981,6 +1038,7 @@ mod tests {
     fn collect_manual_outbounds_handles_all_invalid_nodes() {
         let config = Config {
             port: None,
+            socks_listen: None,
             socks_port: None,
             route_mode: None,
             subs: vec![],
@@ -1003,6 +1061,7 @@ mod tests {
     fn build_sing_box_config_preserves_node_order() {
         let config = Config {
             port: None,
+            socks_listen: None,
             socks_port: None,
             route_mode: None,
             subs: vec![],
@@ -1040,6 +1099,7 @@ mod tests {
     fn build_sing_box_config_handles_no_custom_rules() {
         let config = Config {
             port: None,
+            socks_listen: None,
             socks_port: None,
             route_mode: None,
             subs: vec![],
@@ -1073,6 +1133,7 @@ mod tests {
     fn build_sing_box_config_ignores_all_invalid_custom_rules() {
         let config = Config {
             port: None,
+            socks_listen: None,
             socks_port: None,
             route_mode: None,
             subs: vec![],
@@ -1113,6 +1174,7 @@ mod tests {
 
         let config = Config {
             port: Some(8080),
+            socks_listen: None,
             socks_port: Some(1080),
             route_mode: Some(RouteMode::Rule),
             subs: vec!["https://example.com/sub".to_string()],
@@ -1161,6 +1223,7 @@ mod tests {
         // 使用原子写入保存新配置
         let config = Config {
             port: Some(7777),
+            socks_listen: None,
             socks_port: Some(2080),
             route_mode: Some(RouteMode::Rule),
             subs: vec![],

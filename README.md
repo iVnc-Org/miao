@@ -37,12 +37,27 @@ sudo ./miao
 
 访问 `http://localhost:6161`，首次启动会进入引导页面，添加订阅链接或手动节点即可开始使用。
 
+查看启动参数：
+
+```bash
+./miao --help
+```
+
+将本机 SOCKS5 入站开放到所有网卡：
+
+```bash
+sudo ./miao --socks-listen 0.0.0.0 --socks-port 1080
+```
+
+`--socks-listen` 默认是 `127.0.0.1`，`--socks-port` 默认是 `1080`。监听 `0.0.0.0` 会把代理暴露给网络中的其他设备，建议仅在可信内网或有防火墙限制时使用。
+
 ### 进阶：手动编写配置文件
 
 你也可以预先创建 `config.yaml` 跳过引导：
 
 ```yaml
 port: 6161  # Web 面板端口，默认 6161
+socks_listen: 127.0.0.1  # 可选：覆盖本机 SOCKS5 监听地址，默认 127.0.0.1
 socks_port: 2080  # 可选：覆盖本机 SOCKS5 端口，默认监听 127.0.0.1:1080
 route_mode: rule  # 可选：`tunnel` 为默认全量代理，`global` 保留私网直连，`rule` 为国内直连/国外代理
 
@@ -57,7 +72,7 @@ nodes:
   - '{"type":"shadowsocks","tag":"SS","server":"example.com","server_port":443,"method":"2022-blake3-aes-128-gcm","password":"xxx"}'
 ```
 
-miao 默认会开启一个仅本机可访问的 SOCKS5 入站，监听 `127.0.0.1:1080`。设置 `socks_port` 可以覆盖默认端口。
+miao 默认会开启一个仅本机可访问的 SOCKS5 入站，监听 `127.0.0.1:1080`。设置 `socks_port` 可以覆盖默认端口；启动参数 `--socks-listen` 和 `--socks-port` 会覆盖本次运行的监听地址和端口，但不会改写 `config.yaml`。
 
 `route_mode` 默认是 `tunnel`：公网流量和 DNS 默认都经代理转发，不做国内外分流；`127.0.0.1`、`localhost` 和其他私网地址仍保持直连。设置为 `global` 时保留私网直连和本地 DNS 兼容性；设置为 `rule` 时恢复原先的国内直连、国外代理策略。
 
