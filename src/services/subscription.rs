@@ -2,6 +2,7 @@ use crate::error::{AppError, AppResult};
 use crate::services::node_parser::parse_clash_proxies;
 
 /// 订阅获取结果，包含节点和解析错误信息
+#[derive(Debug)]
 pub struct FetchResult {
     pub node_names: Vec<String>,
     pub outbounds: Vec<serde_json::Value>,
@@ -16,7 +17,14 @@ pub async fn fetch_sub(link: &str, client: &reqwest::Client) -> AppResult<FetchR
         .header("User-Agent", "clash-meta")
         .send()
         .await
-        .map_err(|e| AppError::context(format!("Failed to fetch subscription from {}", link), e))?;
+        .map_err(|e| AppError::context(format!("Failed to fetch subscription from {}", link), e))?
+        .error_for_status()
+        .map_err(|e| {
+            AppError::context(
+                format!("Subscription server returned HTTP error for {}", link),
+                e,
+            )
+        })?;
 
     let text = res.text().await.map_err(|e| {
         AppError::context(
@@ -50,6 +58,30 @@ pub async fn fetch_sub(link: &str, client: &reqwest::Client) -> AppResult<FetchR
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn fetch_sub_rejects_http_error_status() {
+        use axum::{http::StatusCode, routing::get, Router};
+
+        let app = Router::new().route(
+            "/sub",
+            get(|| async { (StatusCode::INTERNAL_SERVER_ERROR, "boom") }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let client = reqwest::Client::new();
+        let err = fetch_sub(&format!("http://{addr}/sub"), &client)
+            .await
+            .unwrap_err();
+        let message = err.to_string();
+
+        assert!(message.contains("Subscription server returned HTTP error"));
+        assert!(message.contains("500"));
+    }
 
     #[test]
     fn parse_clash_proxies_extracts_supported_nodes() {
@@ -202,7 +234,7 @@ proxies:
 
         let result = parse_clash_proxies(yaml).unwrap();
 
-        // Both nodes should be parsed (sing-box will handle duplicate tags)
+        // Both nodes should be parsed; config generation will de-duplicate tags later.
         assert_eq!(result.nodes.len(), 2);
         assert!(result.errors.is_empty());
     }

@@ -1,5 +1,5 @@
 use futures::{stream, StreamExt};
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 use tokio::time::Duration;
 use tracing::{error, info, warn};
 
@@ -344,6 +344,79 @@ fn collect_manual_outbounds(config: &Config) -> (Vec<serde_json::Value>, Vec<Str
     (my_outbounds, my_names)
 }
 
+fn make_unique_tag(tag: &str, used: &mut HashSet<String>) -> String {
+    let base = if tag.trim().is_empty() { "node" } else { tag };
+    if used.insert(base.to_string()) {
+        return base.to_string();
+    }
+
+    for index in 2.. {
+        let candidate = format!("{base} ({index})");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+
+    unreachable!("unbounded duplicate tag search should always find a value")
+}
+
+fn normalize_outbound_tags(
+    node_names: Vec<String>,
+    outbounds: Vec<serde_json::Value>,
+) -> (Vec<String>, Vec<serde_json::Value>) {
+    let names_len = node_names.len();
+    let mut used = HashSet::new();
+    // Built-in outbounds from the template already reserve these tags.
+    used.insert("proxy".to_string());
+    used.insert("direct".to_string());
+    let mut unique_names = Vec::with_capacity(outbounds.len());
+    let mut unique_outbounds = Vec::with_capacity(outbounds.len());
+
+    for (idx, mut outbound) in outbounds.into_iter().enumerate() {
+        let original_name = node_names
+            .get(idx)
+            .cloned()
+            .or_else(|| {
+                outbound
+                    .get("tag")
+                    .and_then(|tag| tag.as_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| format!("node-{}", idx + 1));
+        let unique_name = make_unique_tag(&original_name, &mut used);
+
+        if unique_name != original_name {
+            warn!(
+                from = %original_name,
+                to = %unique_name,
+                "Renamed duplicate outbound tag to avoid sing-box conflict"
+            );
+        }
+
+        if let Some(obj) = outbound.as_object_mut() {
+            obj.insert(
+                "tag".to_string(),
+                serde_json::Value::String(unique_name.clone()),
+            );
+        } else {
+            warn!(tag = %unique_name, "Outbound is not a JSON object; cannot set tag");
+        }
+
+        unique_names.push(unique_name);
+        unique_outbounds.push(outbound);
+    }
+
+    if names_len != unique_outbounds.len() {
+        warn!(
+            names = names_len,
+            outbounds = unique_outbounds.len(),
+            "Outbound name count did not match outbound config count"
+        );
+    }
+
+    (unique_names, unique_outbounds)
+}
+
 fn build_sing_box_config(
     config: &Config,
     my_names: Vec<String>,
@@ -358,19 +431,19 @@ fn build_sing_box_config(
         ));
     }
 
+    let (node_names, outbounds) = normalize_outbound_tags(
+        my_names.into_iter().chain(final_node_names).collect(),
+        my_outbounds.into_iter().chain(final_outbounds).collect(),
+    );
+
     let mut sing_box_config = get_config_template();
-    if let Some(outbounds) = sing_box_config["outbounds"][0].get_mut("outbounds") {
-        if let Some(arr) = outbounds.as_array_mut() {
-            arr.extend(
-                my_names
-                    .into_iter()
-                    .chain(final_node_names)
-                    .map(serde_json::Value::String),
-            );
+    if let Some(selector_outbounds) = sing_box_config["outbounds"][0].get_mut("outbounds") {
+        if let Some(arr) = selector_outbounds.as_array_mut() {
+            arr.extend(node_names.into_iter().map(serde_json::Value::String));
         }
     }
     if let Some(arr) = sing_box_config["outbounds"].as_array_mut() {
-        arr.extend(my_outbounds.into_iter().chain(final_outbounds));
+        arr.extend(outbounds);
     }
 
     if let Some(rules) = sing_box_config["route"]["rules"].as_array_mut() {
@@ -540,6 +613,113 @@ mod tests {
         assert_eq!(rules[1]["action"], "hijack-dns");
         assert_eq!(rules[2]["domain_suffix"][0], "example.com");
         assert_eq!(rules[3]["ip_is_private"], true);
+    }
+
+    #[test]
+    fn build_sing_box_config_renames_duplicate_outbound_tags() {
+        let config = Config {
+            port: None,
+            subs: vec![],
+            nodes: vec![],
+            custom_rules: vec![],
+            vps_ip: None,
+        };
+
+        let my_outbounds = vec![json!({
+            "type": "hysteria2",
+            "tag": "dup",
+            "server": "manual.example.com",
+            "server_port": 443,
+            "password": "manual-secret"
+        })];
+        let final_outbounds = vec![
+            json!({
+                "type": "hysteria2",
+                "tag": "dup",
+                "server": "sub1.example.com",
+                "server_port": 443,
+                "password": "sub-secret-1"
+            }),
+            json!({
+                "type": "shadowsocks",
+                "tag": "dup",
+                "server": "sub2.example.com",
+                "server_port": 8388,
+                "method": "2022-blake3-aes-128-gcm",
+                "password": "sub-secret-2"
+            }),
+        ];
+
+        let built = build_sing_box_config(
+            &config,
+            vec!["dup".to_string()],
+            my_outbounds,
+            vec!["dup".to_string(), "dup".to_string()],
+            final_outbounds,
+        )
+        .unwrap();
+
+        let selector = built["outbounds"][0]["outbounds"].as_array().unwrap();
+        let selector_tags: Vec<_> = selector
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect();
+        assert_eq!(selector_tags, vec!["dup", "dup (2)", "dup (3)"]);
+
+        let all_outbounds = built["outbounds"].as_array().unwrap();
+        assert_eq!(all_outbounds[2]["tag"], "dup");
+        assert_eq!(all_outbounds[3]["tag"], "dup (2)");
+        assert_eq!(all_outbounds[4]["tag"], "dup (3)");
+    }
+
+    #[test]
+    fn build_sing_box_config_renames_tags_reserved_by_template() {
+        let config = Config {
+            port: None,
+            subs: vec![],
+            nodes: vec![],
+            custom_rules: vec![],
+            vps_ip: None,
+        };
+
+        let my_outbounds = vec![
+            json!({
+                "type": "hysteria2",
+                "tag": "proxy",
+                "server": "proxy.example.com",
+                "server_port": 443,
+                "password": "proxy-secret"
+            }),
+            json!({
+                "type": "hysteria2",
+                "tag": "direct",
+                "server": "direct.example.com",
+                "server_port": 443,
+                "password": "direct-secret"
+            }),
+        ];
+
+        let built = build_sing_box_config(
+            &config,
+            vec!["proxy".to_string(), "direct".to_string()],
+            my_outbounds,
+            vec![],
+            vec![],
+        )
+        .unwrap();
+
+        let selector = built["outbounds"][0]["outbounds"].as_array().unwrap();
+        let selector_tags: Vec<_> = selector
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect();
+        assert_eq!(selector_tags, vec!["proxy (2)", "direct (2)"]);
+
+        let all_outbounds = built["outbounds"].as_array().unwrap();
+        assert_eq!(all_outbounds[0]["tag"], "proxy");
+        assert_eq!(all_outbounds[1]["tag"], "direct");
+        assert_eq!(all_outbounds[2]["tag"], "proxy (2)");
+        assert_eq!(all_outbounds[3]["tag"], "direct (2)");
     }
 
     #[test]
