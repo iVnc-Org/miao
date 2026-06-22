@@ -1,4 +1,5 @@
 use std::io::Read;
+use std::path::Path;
 use std::process::Stdio;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -7,7 +8,7 @@ use tracing::{info, warn};
 
 use crate::error::{AppError, AppResult};
 use crate::models::{Config, Hysteria2, Hysteria2Obfs, Tls};
-use crate::services::config::save_config;
+use crate::services::config::save_config_to;
 use crate::services::node_parser::parse_node_json;
 use crate::validation::Validator;
 
@@ -40,7 +41,7 @@ pub fn has_manual_node_for_vps(config: &Config) -> bool {
     })
 }
 
-pub async fn ensure_vps_hysteria_node(config: &mut Config) -> AppResult<bool> {
+pub async fn ensure_vps_hysteria_node(config: &mut Config, config_path: &Path) -> AppResult<bool> {
     let Some(vps_ip) = config
         .vps_ip
         .as_deref()
@@ -97,8 +98,8 @@ pub async fn ensure_vps_hysteria_node(config: &mut Config) -> AppResult<bool> {
         &credentials.password,
         &credentials.obfs_password,
     )?);
-    save_config(config).await?;
-    info!(vps_ip = %vps_ip, port = HYSTERIA_PORT, "Added provisioned VPS Hysteria2 node to config.yaml");
+    save_config_to(config_path, config).await?;
+    info!(vps_ip = %vps_ip, port = HYSTERIA_PORT, config_path = ?config_path, "Added provisioned VPS Hysteria2 node to config");
 
     Ok(true)
 }

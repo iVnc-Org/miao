@@ -197,19 +197,19 @@ fn get_port(node: &Value) -> Result<u16, String> {
 }
 
 fn map_get_str<'a>(map: &'a Mapping, key: &str) -> Option<&'a str> {
-    map.get(&Value::String(key.to_string()))
+    map.get(Value::String(key.to_string()))
         .and_then(|value| value.as_str())
         .map(str::trim)
         .filter(|value| !value.is_empty())
 }
 
 fn map_get_bool(map: &Mapping, key: &str) -> Option<bool> {
-    map.get(&Value::String(key.to_string()))
+    map.get(Value::String(key.to_string()))
         .and_then(|value| value.as_bool())
 }
 
 fn map_get_value<'a>(map: &'a Mapping, key: &str) -> Option<&'a Value> {
-    map.get(&Value::String(key.to_string()))
+    map.get(Value::String(key.to_string()))
 }
 
 fn yaml_to_json(value: &Value) -> Option<JsonValue> {

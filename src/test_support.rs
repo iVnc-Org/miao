@@ -10,7 +10,14 @@ use serde_json::Value;
 use crate::{models::Config, router::build_router, state::AppState};
 
 pub fn app_state(config: Config) -> Arc<AppState> {
-    Arc::new(AppState::new(config).expect("Failed to create AppState in test"))
+    let config_path = std::env::temp_dir().join(format!(
+        "miao-test-config-{}-{}.yaml",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("unnamed")
+    ));
+    Arc::new(
+        AppState::with_config_path(config, config_path).expect("Failed to create AppState in test"),
+    )
 }
 
 pub async fn reset_version_cache(state: &Arc<AppState>) {
