@@ -102,6 +102,16 @@ async fn open_onboarding_browser(url: String) {
     }
 }
 
+fn config_declares_route_mode(content: &str) -> bool {
+    let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(content) else {
+        return false;
+    };
+
+    value
+        .as_mapping()
+        .is_some_and(|mapping| mapping.contains_key("route_mode"))
+}
+
 #[tokio::main]
 async fn main() -> AppResult<()> {
     // 初始化结构化日志
@@ -138,8 +148,19 @@ async fn main() -> AppResult<()> {
         "Resolved configuration path"
     );
 
-    let mut config: Config = match tokio::fs::read_to_string(&config_path).await {
-        Ok(content) => serde_yaml::from_str(&content)?,
+    let config: Config = match tokio::fs::read_to_string(&config_path).await {
+        Ok(content) => {
+            let route_mode_declared = config_declares_route_mode(&content);
+            let mut config: Config = serde_yaml::from_str(&content)?;
+            if route_mode_declared {
+                info!(
+                    config_path = ?config_path,
+                    "Ignoring route_mode from configuration file; route mode is session-only"
+                );
+                config.route_mode = Default::default();
+            }
+            config
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             info!(
                 config_path = ?config_path,
@@ -149,10 +170,6 @@ async fn main() -> AppResult<()> {
         }
         Err(e) => return Err(e.into()),
     };
-    if config.route_mode != Default::default() {
-        info!("Ignoring route_mode from configuration file; route mode is session-only");
-        config.route_mode = Default::default();
-    }
     let port = config.port.unwrap_or(DEFAULT_PORT);
     let subs_count = config.subs.len();
     let nodes_count = config.nodes.len();
@@ -283,4 +300,35 @@ async fn shutdown_signal(state: Arc<AppState>) {
 
     info!("Shutting down, stopping sing-box...");
     stop_sing_internal(&state).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::config_declares_route_mode;
+
+    #[test]
+    fn config_declares_route_mode_when_top_level_key_exists() {
+        let yaml = r#"
+port: 6161
+route_mode: global
+subs: []
+"#;
+
+        assert!(config_declares_route_mode(yaml));
+    }
+
+    #[test]
+    fn config_declares_route_mode_ignores_nested_key() {
+        let yaml = r#"
+custom_rules:
+  - '{"route_mode":"global"}'
+"#;
+
+        assert!(!config_declares_route_mode(yaml));
+    }
+
+    #[test]
+    fn config_declares_route_mode_handles_invalid_yaml() {
+        assert!(!config_declares_route_mode("route_mode: ["));
+    }
 }
