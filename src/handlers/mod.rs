@@ -1,3 +1,4 @@
+pub mod clash;
 pub mod nodes;
 pub mod proxy;
 pub mod service;

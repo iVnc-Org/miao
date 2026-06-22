@@ -571,7 +571,7 @@ fn apply_route_mode(
 fn get_config_template() -> serde_json::Value {
     serde_json::json!({
         "log": {"disabled": false, "timestamp": true, "level": "info"},
-        "experimental": {"clash_api": {"external_controller": "0.0.0.0:6262", "access_control_allow_origin": ["*"]}},
+        "experimental": {"clash_api": {"external_controller": "127.0.0.1:6262"}},
         "dns": {
             "final": "cfdns",
             "strategy": "ipv4_only",
@@ -1071,6 +1071,38 @@ mod tests {
             .all(|server| server["type"] != "fakeip" && server["tag"] != "fakeip"));
 
         assert!(built["experimental"].get("cache_file").is_none());
+    }
+
+    #[test]
+    fn build_sing_box_config_binds_clash_api_to_localhost() {
+        let config = Config {
+            port: None,
+            subs: vec![],
+            nodes: vec![],
+            custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
+        };
+
+        let built = build_sing_box_config(
+            &config,
+            vec!["manual-a".to_string()],
+            vec![json!({
+                "type": "hysteria2",
+                "tag": "manual-a",
+                "server": "manual.example.com",
+                "server_port": 443,
+                "password": "secret"
+            })],
+            vec![],
+            vec![],
+        )
+        .unwrap();
+
+        assert_eq!(
+            built["experimental"]["clash_api"]["external_controller"],
+            "127.0.0.1:6262"
+        );
     }
 
     #[test]

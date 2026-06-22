@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
 use axum::{
-    routing::{delete, get, post},
+    routing::{any, delete, get, post},
     Router,
 };
 
 use crate::handlers::{
+    clash::{proxy_clash_http, proxy_clash_traffic},
     nodes::{add_node, delete_node, get_nodes},
     proxy::set_last_proxy,
     service::{get_status, set_route_mode, start_service, stop_service, test_connectivity},
@@ -24,6 +25,8 @@ pub fn build_router(app_state: Arc<AppState>) -> Router {
         .route("/api/service/stop", post(stop_service))
         .route("/api/route-mode", post(set_route_mode))
         .route("/api/connectivity", post(test_connectivity))
+        .route("/api/clash/traffic", get(proxy_clash_traffic))
+        .route("/api/clash/{*path}", any(proxy_clash_http))
         .route("/api/version", get(get_version))
         .route("/api/upgrade", post(upgrade))
         .route("/api/subs", get(get_subs))

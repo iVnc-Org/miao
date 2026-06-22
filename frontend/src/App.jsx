@@ -55,7 +55,7 @@ export default function App() {
   const [showConnectionsModal, setShowConnectionsModal] = useState(false)
   const [confirmState, setConfirmState] = useState({ open: false, title: '', message: '', onConfirm: null })
 
-  const clashApiBase = useMemo(() => `http://${window.location.hostname}:6262`, [])
+  const clashApiBase = useMemo(() => '/api/clash', [])
 
   const { toasts, showToast } = useToast()
   const { apiCall } = useApi({ loadingAction, setLoadingAction })

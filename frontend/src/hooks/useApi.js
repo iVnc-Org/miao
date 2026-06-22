@@ -93,8 +93,8 @@ export function useNodes() {
 
 export function useProxies(status) {
   const [proxies, setProxies] = useState({})
-  
-  const clashApiBase = useMemo(() => `http://${window.location.hostname}:6262`, [])
+
+  const clashApiBase = useMemo(() => '/api/clash', [])
 
   const fetchProxies = useCallback(async () => {
     try {
@@ -130,7 +130,10 @@ export function useProxies(status) {
 export function useTraffic(status) {
   const [traffic, setTraffic] = useState({})
 
-  const trafficUrl = useMemo(() => `ws://${window.location.hostname}:6262/traffic`, [])
+  const trafficUrl = useMemo(() => {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    return `${protocol}//${window.location.host}/api/clash/traffic`
+  }, [])
 
   const handleMessage = useCallback((data) => {
     if (data && typeof data.up === 'number' && typeof data.down === 'number') {
