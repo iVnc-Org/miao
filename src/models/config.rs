@@ -8,12 +8,6 @@ pub enum RouteMode {
     Global,
 }
 
-impl RouteMode {
-    pub fn is_rule(&self) -> bool {
-        matches!(self, Self::Rule)
-    }
-}
-
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -26,7 +20,7 @@ pub struct Config {
     pub nodes: Vec<String>,
     #[serde(default)]
     pub custom_rules: Vec<String>,
-    #[serde(default, skip_serializing_if = "RouteMode::is_rule")]
+    #[serde(default, skip_serializing, skip_deserializing)]
     pub route_mode: RouteMode,
 }
 
@@ -69,7 +63,7 @@ mod tests {
     }
 
     #[test]
-    fn config_serializes_global_route_mode_when_selected() {
+    fn config_omits_global_route_mode() {
         let config = Config {
             port: None,
             subs: vec![],
@@ -81,7 +75,7 @@ mod tests {
 
         let yaml = serde_yaml::to_string(&config).unwrap();
 
-        assert!(yaml.contains("route_mode: global"));
+        assert!(!yaml.contains("route_mode"));
     }
 
     #[test]
@@ -98,5 +92,20 @@ mod tests {
         let yaml = serde_yaml::to_string(&config).unwrap();
 
         assert!(!yaml.contains("route_mode"));
+    }
+
+    #[test]
+    fn config_ignores_route_mode_when_deserializing() {
+        let yaml = r#"
+port: 6161
+route_mode: definitely-not-valid
+subs: []
+nodes: []
+custom_rules: []
+"#;
+
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+
+        assert_eq!(config.route_mode, super::RouteMode::Rule);
     }
 }

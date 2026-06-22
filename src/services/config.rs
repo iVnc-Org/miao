@@ -1,5 +1,5 @@
 use futures::{stream, StreamExt};
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashSet, path::Path, sync::Arc};
 use tokio::time::Duration;
 use tracing::{error, info, warn};
 
@@ -18,7 +18,16 @@ const CONFIG_CACHE_PATH: &str = "/tmp/miao-sing-box/config.json.cache";
 const MAX_CONCURRENT_SUBS: usize = 5;
 
 /// 原子写入文件：先写入临时文件，再重命名为目标文件
-async fn write_file_atomic(path: &std::path::Path, content: &str) -> AppResult<()> {
+async fn write_file_atomic(path: &Path, content: &str) -> AppResult<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| AppError::context("Failed to create config directory", e))?;
+    }
+
     let temp_path = path.with_extension("tmp");
 
     // 先写入临时文件
@@ -34,9 +43,16 @@ async fn write_file_atomic(path: &std::path::Path, content: &str) -> AppResult<(
     Ok(())
 }
 
-pub async fn save_config(config: &Config) -> AppResult<()> {
+pub async fn save_config_to(path: &Path, config: &Config) -> AppResult<()> {
     let yaml = serde_yaml::to_string(config)?;
-    write_file_atomic(std::path::Path::new("config.yaml"), &yaml).await
+    if let Ok(existing) = tokio::fs::read_to_string(path).await {
+        if existing == yaml {
+            info!(config_path = ?path, "Config file already up to date, skipping write");
+            return Ok(());
+        }
+    }
+
+    write_file_atomic(path, &yaml).await
 }
 
 pub async fn save_config_cache() {
@@ -61,7 +77,10 @@ pub async fn restore_config_from_cache() -> AppResult<()> {
     Ok(())
 }
 
-pub async fn regenerate_and_restart(config: &Config, state: &Arc<AppState>) -> AppResult<()> {
+pub async fn regenerate_and_restart_runtime(
+    config: &Config,
+    state: &Arc<AppState>,
+) -> AppResult<bool> {
     let has_sub_nodes = gen_config(config, state)
         .await
         .map_err(|e| AppError::context("Failed to regenerate config", e))?;
@@ -78,19 +97,32 @@ pub async fn regenerate_and_restart(config: &Config, state: &Arc<AppState>) -> A
         .map_err(|e| AppError::context("Failed to restart sing-box", e))?;
     info!("sing-box restarted successfully");
 
+    Ok(has_sub_nodes)
+}
+
+pub async fn regenerate_and_restart(config: &Config, state: &Arc<AppState>) -> AppResult<()> {
+    let route_override = *state.route_mode_override.read().await;
+    let runtime_config = config_with_route_override(config, route_override);
+    let has_sub_nodes = regenerate_and_restart_runtime(&runtime_config, state).await?;
+
+    finalize_started_config(&runtime_config, state, has_sub_nodes).await;
+
+    Ok(())
+}
+
+pub async fn finalize_started_config(config: &Config, state: &Arc<AppState>, has_sub_nodes: bool) {
     update_config_warning(config, state, has_sub_nodes).await;
 
     let state_for_proxy = state.clone();
     tokio::spawn(async move {
         restore_last_proxy(&state_for_proxy).await;
     });
-
-    Ok(())
 }
 
 async fn update_config_warning(config: &Config, state: &Arc<AppState>, has_sub_nodes: bool) {
+    save_config_cache().await;
+
     if has_sub_nodes {
-        save_config_cache().await;
         *state.config_warning.lock().await = None;
     } else if !config.subs.is_empty() {
         *state.config_warning.lock().await = Some("所有订阅获取失败，请检查当前订阅".to_string());
@@ -99,7 +131,10 @@ async fn update_config_warning(config: &Config, state: &Arc<AppState>, has_sub_n
     }
 }
 
-pub async fn regenerate_without_restart(config: &Config, state: &Arc<AppState>) -> AppResult<()> {
+pub async fn regenerate_without_restart_runtime(
+    config: &Config,
+    state: &Arc<AppState>,
+) -> AppResult<bool> {
     let has_sub_nodes = gen_config(config, state)
         .await
         .map_err(|e| AppError::context("Failed to regenerate config", e))?;
@@ -109,8 +144,13 @@ pub async fn regenerate_without_restart(config: &Config, state: &Arc<AppState>) 
         .await
         .map_err(|e| AppError::context("Config validation failed", e))?;
 
-    update_config_warning(config, state, has_sub_nodes).await;
-    Ok(())
+    Ok(has_sub_nodes)
+}
+
+fn config_with_route_override(config: &Config, route_mode: Option<RouteMode>) -> Config {
+    let mut config = config.clone();
+    config.route_mode = route_mode.unwrap_or_default();
+    config
 }
 
 pub async fn apply_config_change(
@@ -118,89 +158,43 @@ pub async fn apply_config_change(
     old_config: &Config,
     new_config: &Config,
 ) -> AppResult<()> {
-    let config_path = std::path::Path::new("config.yaml");
-    let backup_path = std::path::Path::new("config.yaml.bak");
+    let route_override = *state.route_mode_override.read().await;
+    let runtime_old_config = config_with_route_override(old_config, route_override);
+    let runtime_new_config = config_with_route_override(new_config, route_override);
+    let persisted_new_config = config_with_route_override(new_config, None);
 
-    // 修改前先备份当前配置文件，确保回滚时可从磁盘恢复
-    if config_path.exists() {
-        tokio::fs::copy(config_path, backup_path)
-            .await
-            .map_err(|e| AppError::context("Failed to backup config before applying change", e))?;
-    }
-
-    save_config(new_config).await?;
-
-    match regenerate_and_restart(new_config, state).await {
-        Ok(()) => {
-            *state.config.write().await = new_config.clone();
-            let _ = tokio::fs::remove_file(backup_path).await;
-            Ok(())
+    match regenerate_and_restart_runtime(&runtime_new_config, state).await {
+        Ok(has_sub_nodes) => {
+            match save_config_to(&state.config_path, &persisted_new_config).await {
+                Ok(()) => {
+                    *state.config.write().await = persisted_new_config;
+                    finalize_started_config(&runtime_new_config, state, has_sub_nodes).await;
+                    Ok(())
+                }
+                Err(save_err) => {
+                    error!(error = %save_err, "Runtime config applied but persistent config write failed, attempting runtime rollback");
+                    match restart_with_previous_config(&runtime_old_config, state).await {
+                        Ok(()) => Err(AppError::context(
+                            "Failed to persist config change; restored previous runtime config",
+                            save_err,
+                        )),
+                        Err(rollback_err) => Err(AppError::message(format!(
+                            "Failed to persist config change: {}. Runtime rollback failed: {}",
+                            save_err, rollback_err
+                        ))),
+                    }
+                }
+            }
         }
         Err(apply_err) => {
-            error!(error = %apply_err, "Failed to apply config change, attempting rollback");
-
-            let rollback_result = async {
-                // 从备份文件恢复，避免重新序列化导致格式差异或磁盘满时失败
-                if backup_path.exists() {
-                    tokio::fs::copy(backup_path, config_path)
-                        .await
-                        .map_err(|e| {
-                            AppError::context("Failed to restore config from backup", e)
-                        })?;
-                } else {
-                    save_config(old_config).await?;
-                }
-
-                // 检查 sing-box 是否仍在运行（配置校验或生成失败时进程未被停止）
-                let still_running = {
-                    let mut lock = state.sing_process.lock().await;
-                    match &mut *lock {
-                        Some(proc) => proc.child.try_wait().ok().flatten().is_none(),
-                        None => false,
-                    }
-                };
-
-                if still_running {
-                    // sing-box 仍以旧配置运行，无需重启，config.yaml 已恢复
-                    info!("sing-box still running with previous config, skipping restart");
-                } else {
-                    // 优先从 config.json 缓存恢复，避免重新拉取订阅
-                    let cache_path = std::path::Path::new(CONFIG_CACHE_PATH);
-                    let config_json_path = get_sing_box_home().join("config.json");
-                    if cache_path.exists() {
-                        info!("Restoring config.json from cache for rollback");
-                        tokio::fs::copy(cache_path, &config_json_path)
-                            .await
-                            .map_err(|e| {
-                                AppError::context("Failed to restore config.json from cache", e)
-                            })?;
-                        start_sing_internal(state).await.map_err(|e| {
-                            AppError::context("Failed to restart sing-box with cached config", e)
-                        })?;
-                        *state.config_warning.lock().await = None;
-                        let state_for_proxy = state.clone();
-                        tokio::spawn(async move {
-                            restore_last_proxy(&state_for_proxy).await;
-                        });
-                    } else {
-                        // 无缓存，只能重新生成（会重新拉取订阅）
-                        warn!("No config cache available, falling back to full regeneration");
-                        regenerate_and_restart(old_config, state).await?;
-                    }
-                }
-                Ok::<(), AppError>(())
-            }
-            .await;
-
-            let _ = tokio::fs::remove_file(backup_path).await;
-
-            match rollback_result {
+            error!(error = %apply_err, "Failed to apply runtime config change, attempting runtime rollback");
+            match restore_previous_running_config(&runtime_old_config, state).await {
                 Ok(()) => Err(AppError::context(
-                    "Failed to apply config change; rolled back to previous config",
+                    "Failed to apply config change; restored previous runtime config",
                     apply_err,
                 )),
                 Err(rollback_err) => Err(AppError::message(format!(
-                    "Failed to apply config change: {}. Rollback failed: {}",
+                    "Failed to apply config change: {}. Runtime rollback failed: {}",
                     apply_err, rollback_err
                 ))),
             }
@@ -208,60 +202,117 @@ pub async fn apply_config_change(
     }
 }
 
-pub async fn apply_config_change_without_restart(
+pub async fn apply_runtime_config_change(
     state: &Arc<AppState>,
     old_config: &Config,
     new_config: &Config,
+    restart: bool,
 ) -> AppResult<()> {
-    let config_path = std::path::Path::new("config.yaml");
-    let backup_path = std::path::Path::new("config.yaml.bak");
-
-    if config_path.exists() {
-        tokio::fs::copy(config_path, backup_path)
-            .await
-            .map_err(|e| AppError::context("Failed to backup config before applying change", e))?;
-    }
-
-    save_config(new_config).await?;
-
-    match regenerate_without_restart(new_config, state).await {
-        Ok(()) => {
-            *state.config.write().await = new_config.clone();
-            let _ = tokio::fs::remove_file(backup_path).await;
-            Ok(())
-        }
-        Err(apply_err) => {
-            error!(error = %apply_err, "Failed to apply config change, attempting stopped-state rollback");
-
-            let rollback_result = async {
-                if backup_path.exists() {
-                    tokio::fs::copy(backup_path, config_path)
-                        .await
-                        .map_err(|e| {
-                            AppError::context("Failed to restore config from backup", e)
-                        })?;
-                } else {
-                    save_config(old_config).await?;
+    if restart {
+        match regenerate_and_restart_runtime(new_config, state).await {
+            Ok(has_sub_nodes) => {
+                *state.route_mode_override.write().await = Some(new_config.route_mode);
+                finalize_started_config(new_config, state, has_sub_nodes).await;
+                Ok(())
+            }
+            Err(apply_err) => {
+                error!(error = %apply_err, "Failed to apply runtime-only config change, attempting runtime rollback");
+                match restore_previous_running_config(old_config, state).await {
+                    Ok(()) => Err(AppError::context(
+                        "Failed to apply runtime-only config change; restored previous runtime config",
+                        apply_err,
+                    )),
+                    Err(rollback_err) => Err(AppError::message(format!(
+                        "Failed to apply runtime-only config change: {}. Runtime rollback failed: {}",
+                        apply_err, rollback_err
+                    ))),
                 }
-
-                regenerate_without_restart(old_config, state).await
             }
-            .await;
-
-            let _ = tokio::fs::remove_file(backup_path).await;
-
-            match rollback_result {
-                Ok(()) => Err(AppError::context(
-                    "Failed to apply config change; rolled back to previous config",
+        }
+    } else {
+        match regenerate_without_restart_runtime(new_config, state).await {
+            Ok(has_sub_nodes) => {
+                *state.route_mode_override.write().await = Some(new_config.route_mode);
+                update_config_warning(new_config, state, has_sub_nodes).await;
+                Ok(())
+            }
+            Err(apply_err) => {
+                let _ = restore_previous_stopped_config(old_config, state).await;
+                Err(AppError::context(
+                    "Failed to apply runtime-only config change",
                     apply_err,
-                )),
-                Err(rollback_err) => Err(AppError::message(format!(
-                    "Failed to apply config change: {}. Rollback failed: {}",
-                    apply_err, rollback_err
-                ))),
+                ))
             }
         }
     }
+}
+
+async fn sing_box_is_running(state: &Arc<AppState>) -> bool {
+    let mut lock = state.sing_process.lock().await;
+    match &mut *lock {
+        Some(proc) => match proc.child.try_wait() {
+            Ok(Some(_)) => {
+                *lock = None;
+                false
+            }
+            Ok(None) => true,
+            Err(_) => false,
+        },
+        None => false,
+    }
+}
+
+async fn restore_previous_running_config(
+    old_config: &Config,
+    state: &Arc<AppState>,
+) -> AppResult<()> {
+    if sing_box_is_running(state).await {
+        match restore_config_from_cache().await {
+            Ok(()) => {}
+            Err(cache_err) => {
+                warn!(error = %cache_err, "Failed to restore runtime config from cache while previous sing-box process is still running");
+                let has_sub_nodes = regenerate_without_restart_runtime(old_config, state).await?;
+                update_config_warning(old_config, state, has_sub_nodes).await;
+            }
+        }
+        return Ok(());
+    }
+
+    restart_with_previous_config(old_config, state).await
+}
+
+async fn restart_with_previous_config(old_config: &Config, state: &Arc<AppState>) -> AppResult<()> {
+    stop_sing_internal(state).await;
+
+    if let Err(cache_err) = restore_config_from_cache().await {
+        warn!(error = %cache_err, "Failed to restore runtime config from cache for rollback; regenerating previous config");
+    } else {
+        match start_sing_internal(state).await {
+            Ok(()) => {
+                finalize_started_config(old_config, state, true).await;
+                return Ok(());
+            }
+            Err(start_err) => {
+                warn!(error = %start_err, "Failed to restart sing-box from cached config; regenerating previous config");
+            }
+        }
+    }
+
+    let has_sub_nodes = regenerate_without_restart_runtime(old_config, state).await?;
+    start_sing_internal(state)
+        .await
+        .map_err(|e| AppError::context("Failed to restart sing-box with previous config", e))?;
+    finalize_started_config(old_config, state, has_sub_nodes).await;
+    Ok(())
+}
+
+async fn restore_previous_stopped_config(
+    old_config: &Config,
+    state: &Arc<AppState>,
+) -> AppResult<()> {
+    let has_sub_nodes = regenerate_without_restart_runtime(old_config, state).await?;
+    update_config_warning(old_config, state, has_sub_nodes).await;
+    Ok(())
 }
 
 /// Returns `true` if at least one subscription node was fetched successfully.
@@ -614,7 +665,9 @@ fn get_config_template() -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_sing_box_config, collect_manual_outbounds};
+    use super::{
+        build_sing_box_config, collect_manual_outbounds, config_with_route_override, save_config_to,
+    };
     use crate::models::{Config, RouteMode};
     use serde_json::json;
 
@@ -761,6 +814,22 @@ mod tests {
         let dns_rules = built["dns"]["rules"].as_array().unwrap();
         assert!(dns_rules.is_empty());
         assert_eq!(built["route"]["final"], "proxy");
+    }
+
+    #[test]
+    fn config_with_route_override_defaults_to_rule_mode() {
+        let config = Config {
+            port: None,
+            subs: vec![],
+            nodes: vec![],
+            custom_rules: vec![],
+            route_mode: RouteMode::Global,
+            vps_ip: None,
+        };
+
+        let runtime_config = config_with_route_override(&config, None);
+
+        assert_eq!(runtime_config.route_mode, RouteMode::Rule);
     }
 
     #[test]
@@ -1144,8 +1213,12 @@ mod tests {
 
     #[tokio::test]
     async fn save_config_performs_atomic_write() {
-        let temp_dir = std::env::temp_dir().join(format!("miao-test-{}", std::process::id()));
-        tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "miao-test-save-{}-{}",
+            std::process::id(),
+            "atomic"
+        ));
+        let config_path = temp_dir.join("nested").join("config.yaml");
 
         let config = Config {
             port: Some(8080),
@@ -1156,17 +1229,8 @@ mod tests {
             vps_ip: None,
         };
 
-        // 使用绝对路径保存配置
-        let config_path = temp_dir.join("config.yaml");
-        let temp_config_path = temp_dir.join("config.yaml.tmp");
-        let yaml = serde_yaml::to_string(&config).unwrap();
+        save_config_to(&config_path, &config).await.unwrap();
 
-        tokio::fs::write(&temp_config_path, yaml).await.unwrap();
-        tokio::fs::rename(&temp_config_path, &config_path)
-            .await
-            .unwrap();
-
-        // 验证文件存在且格式正确
         let content = tokio::fs::read_to_string(&config_path).await.unwrap();
         let parsed: Config = serde_yaml::from_str(&content).unwrap();
         assert_eq!(parsed.port, Some(8080));
@@ -1178,8 +1242,11 @@ mod tests {
 
     #[tokio::test]
     async fn save_config_overwrites_existing_file() {
-        let temp_dir =
-            std::env::temp_dir().join(format!("miao-test-overwrite-{}", std::process::id()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "miao-test-save-{}-{}",
+            std::process::id(),
+            "overwrite"
+        ));
         tokio::fs::create_dir_all(&temp_dir).await.unwrap();
 
         let config_path = temp_dir.join("config.yaml");
@@ -1201,19 +1268,49 @@ mod tests {
             route_mode: Default::default(),
             vps_ip: None,
         };
-        let yaml = serde_yaml::to_string(&config).unwrap();
-        let temp_config_path = temp_dir.join("config.yaml.tmp");
-        tokio::fs::write(&temp_config_path, yaml).await.unwrap();
-        tokio::fs::rename(&temp_config_path, &config_path)
-            .await
-            .unwrap();
+        save_config_to(&config_path, &config).await.unwrap();
 
-        // 验证被覆盖
         let content = tokio::fs::read_to_string(&config_path).await.unwrap();
         let parsed: Config = serde_yaml::from_str(&content).unwrap();
         assert_eq!(parsed.port, Some(7777));
 
         // 清理
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[tokio::test]
+    async fn save_config_skips_identical_content() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("miao-test-save-{}-{}", std::process::id(), "skip"));
+        tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+
+        let config_path = temp_dir.join("config.yaml");
+        let config = Config {
+            port: Some(6161),
+            subs: vec![],
+            nodes: vec![],
+            custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
+        };
+
+        save_config_to(&config_path, &config).await.unwrap();
+        let before = tokio::fs::metadata(&config_path)
+            .await
+            .unwrap()
+            .modified()
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        save_config_to(&config_path, &config).await.unwrap();
+
+        let after = tokio::fs::metadata(&config_path)
+            .await
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(before, after);
+
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;
     }
 }

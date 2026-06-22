@@ -1,6 +1,7 @@
 mod error;
 mod handlers;
 mod models;
+mod paths;
 mod responses;
 mod router;
 mod services;
@@ -16,7 +17,7 @@ use tracing::{error, info, warn};
 
 use models::{Config, DEFAULT_PORT};
 use services::{
-    config::{gen_config, restore_config_from_cache, save_config, save_config_cache},
+    config::{gen_config, restore_config_from_cache, save_config_cache},
     openwrt::check_and_install_openwrt_dependencies,
     proxy::restore_last_proxy,
     singbox::{extract_sing_box, start_sing_internal, stop_sing_internal},
@@ -101,6 +102,16 @@ async fn open_onboarding_browser(url: String) {
     }
 }
 
+fn config_declares_route_mode(content: &str) -> bool {
+    let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(content) else {
+        return false;
+    };
+
+    value
+        .as_mapping()
+        .is_some_and(|mapping| mapping.contains_key("route_mode"))
+}
+
 #[tokio::main]
 async fn main() -> AppResult<()> {
     // 初始化结构化日志
@@ -129,13 +140,33 @@ async fn main() -> AppResult<()> {
     }
 
     info!("Reading configuration...");
-    let config: Config = match tokio::fs::read_to_string("config.yaml").await {
-        Ok(content) => serde_yaml::from_str(&content)?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            info!("No config.yaml found, creating default configuration");
-            let config = Config::default();
-            save_config(&config).await?;
+    let config_resolution = paths::resolve_config_path()?;
+    let config_path = config_resolution.path.clone();
+    info!(
+        config_path = ?config_path,
+        source = ?config_resolution.source,
+        "Resolved configuration path"
+    );
+
+    let config: Config = match tokio::fs::read_to_string(&config_path).await {
+        Ok(content) => {
+            let route_mode_declared = config_declares_route_mode(&content);
+            let mut config: Config = serde_yaml::from_str(&content)?;
+            if route_mode_declared {
+                info!(
+                    config_path = ?config_path,
+                    "Ignoring route_mode from configuration file; route mode is session-only"
+                );
+                config.route_mode = Default::default();
+            }
             config
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            info!(
+                config_path = ?config_path,
+                "No config file found, using in-memory default configuration"
+            );
+            Config::default()
         }
         Err(e) => return Err(e.into()),
     };
@@ -154,7 +185,7 @@ async fn main() -> AppResult<()> {
 
     // 初始化应用状态
     let app_state = Arc::new(
-        AppState::new(config.clone())
+        AppState::with_config_path(config.clone(), config_path)
             .map_err(|e| AppError::context("Failed to create HTTP client", e))?,
     );
     let state_for_init = app_state.clone();
@@ -176,7 +207,7 @@ async fn main() -> AppResult<()> {
     tokio::spawn(async move {
         let mut config = config;
 
-        match ensure_vps_hysteria_node(&mut config).await {
+        match ensure_vps_hysteria_node(&mut config, &state_for_init.config_path).await {
             Ok(_) => {
                 *state_for_init.config.write().await = config.clone();
             }
@@ -199,9 +230,7 @@ async fn main() -> AppResult<()> {
         let mut all_subs_failed = false;
         match gen_config(&config, &state_for_init).await {
             Ok(has_sub_nodes) => {
-                if has_sub_nodes {
-                    save_config_cache().await;
-                } else if !config.subs.is_empty() {
+                if !has_sub_nodes && !config.subs.is_empty() {
                     all_subs_failed = true;
                 }
             }
@@ -233,6 +262,7 @@ async fn main() -> AppResult<()> {
         match start_sing_internal(&state_for_init).await {
             Ok(_) => {
                 info!("sing-box started successfully");
+                save_config_cache().await;
                 if all_subs_failed {
                     warn!("所有订阅获取失败，请检查当前订阅");
                     *state_for_init.config_warning.lock().await =
@@ -270,4 +300,35 @@ async fn shutdown_signal(state: Arc<AppState>) {
 
     info!("Shutting down, stopping sing-box...");
     stop_sing_internal(&state).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::config_declares_route_mode;
+
+    #[test]
+    fn config_declares_route_mode_when_top_level_key_exists() {
+        let yaml = r#"
+port: 6161
+route_mode: global
+subs: []
+"#;
+
+        assert!(config_declares_route_mode(yaml));
+    }
+
+    #[test]
+    fn config_declares_route_mode_ignores_nested_key() {
+        let yaml = r#"
+custom_rules:
+  - '{"route_mode":"global"}'
+"#;
+
+        assert!(!config_declares_route_mode(yaml));
+    }
+
+    #[test]
+    fn config_declares_route_mode_handles_invalid_yaml() {
+        assert!(!config_declares_route_mode("route_mode: ["));
+    }
 }
