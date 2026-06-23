@@ -1,16 +1,257 @@
 use axum::{extract::State, http::StatusCode, response::Json};
+use serde_json::{json, Map, Value as JsonValue};
 use std::sync::Arc;
 use tracing::warn;
 
-use crate::models::{
-    AnyTls, ApiResponse, DeleteNodeRequest, HttpProxy, Hysteria2, NodeInfo, NodeRequest,
-    Shadowsocks, SocksProxy, Tls,
-};
+use crate::models::{ApiResponse, DeleteNodeRequest, NodeInfo, NodeRequest};
 use crate::responses::{status_error, success, success_no_data, HandlerResult};
 use crate::services::config::apply_config_change;
 use crate::services::node_parser::parse_node_json;
 use crate::state::AppState;
 use crate::validation::Validator;
+
+const VALID_NODE_TYPES: &[&str] = &[
+    "hysteria2",
+    "anytls",
+    "ss",
+    "socks",
+    "http",
+    "vmess",
+    "vless",
+    "trojan",
+    "tuic",
+];
+
+fn non_empty(value: &Option<String>) -> Option<&str> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn insert_optional_string(obj: &mut Map<String, JsonValue>, key: &str, value: Option<&str>) {
+    if let Some(value) = value {
+        obj.insert(key.to_string(), json!(value));
+    }
+}
+
+fn base_outbound(typ: &str, req: &NodeRequest) -> Map<String, JsonValue> {
+    let mut obj = Map::new();
+    obj.insert("type".to_string(), json!(typ));
+    obj.insert("tag".to_string(), json!(req.tag.trim()));
+    obj.insert("server".to_string(), json!(req.server.trim()));
+    obj.insert("server_port".to_string(), json!(req.server_port));
+    obj
+}
+
+fn build_tls(req: &NodeRequest, default_enabled: bool, force_enabled: bool) -> Option<JsonValue> {
+    let enabled = force_enabled
+        || req.tls_enabled.unwrap_or(default_enabled)
+        || non_empty(&req.reality_public_key).is_some();
+    if !enabled {
+        return None;
+    }
+
+    let mut tls = Map::new();
+    tls.insert("enabled".to_string(), json!(true));
+    tls.insert("insecure".to_string(), json!(req.skip_cert_verify));
+    insert_optional_string(&mut tls, "server_name", non_empty(&req.sni));
+
+    if let Some(alpn) = req.alpn.as_ref().map(|values| {
+        values
+            .iter()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>()
+    }) {
+        if !alpn.is_empty() {
+            tls.insert("alpn".to_string(), json!(alpn));
+        }
+    }
+
+    if let Some(fingerprint) = non_empty(&req.client_fingerprint) {
+        let fingerprint = fingerprint.to_ascii_lowercase();
+        if fingerprint != "none" {
+            tls.insert(
+                "utls".to_string(),
+                json!({
+                    "enabled": true,
+                    "fingerprint": fingerprint
+                }),
+            );
+        }
+    }
+
+    if let Some(public_key) = non_empty(&req.reality_public_key) {
+        let mut reality = Map::new();
+        reality.insert("enabled".to_string(), json!(true));
+        reality.insert("public_key".to_string(), json!(public_key));
+        insert_optional_string(&mut reality, "short_id", non_empty(&req.reality_short_id));
+        tls.insert("reality".to_string(), JsonValue::Object(reality));
+    }
+
+    Some(JsonValue::Object(tls))
+}
+
+fn build_transport(req: &NodeRequest) -> Option<JsonValue> {
+    let transport_type = non_empty(&req.transport_type).unwrap_or("tcp");
+    match transport_type {
+        "tcp" => None,
+        "ws" => {
+            let mut transport = Map::new();
+            transport.insert("type".to_string(), json!("ws"));
+            insert_optional_string(&mut transport, "path", non_empty(&req.transport_path));
+            if let Some(host) = non_empty(&req.transport_host) {
+                transport.insert("headers".to_string(), json!({ "Host": host }));
+            }
+            Some(JsonValue::Object(transport))
+        }
+        "grpc" => {
+            let mut transport = Map::new();
+            transport.insert("type".to_string(), json!("grpc"));
+            insert_optional_string(
+                &mut transport,
+                "service_name",
+                non_empty(&req.grpc_service_name),
+            );
+            Some(JsonValue::Object(transport))
+        }
+        "http" | "h2" => {
+            let mut transport = Map::new();
+            transport.insert("type".to_string(), json!("http"));
+            insert_optional_string(&mut transport, "path", non_empty(&req.transport_path));
+            if let Some(host) = non_empty(&req.transport_host) {
+                transport.insert("host".to_string(), json!([host]));
+            }
+            Some(JsonValue::Object(transport))
+        }
+        _ => None,
+    }
+}
+
+fn build_node_value(req: &NodeRequest, node_type: &str) -> JsonValue {
+    match node_type {
+        "anytls" => {
+            let mut obj = base_outbound("anytls", req);
+            obj.insert("password".to_string(), json!(non_empty(&req.password).unwrap_or_default()));
+            obj.insert(
+                "tls".to_string(),
+                build_tls(req, true, true).expect("AnyTLS TLS is always enabled"),
+            );
+            JsonValue::Object(obj)
+        }
+        "ss" => {
+            let mut obj = base_outbound("shadowsocks", req);
+            obj.insert(
+                "method".to_string(),
+                json!(non_empty(&req.cipher).unwrap_or("2022-blake3-aes-128-gcm")),
+            );
+            obj.insert("password".to_string(), json!(non_empty(&req.password).unwrap_or_default()));
+            JsonValue::Object(obj)
+        }
+        "vmess" => {
+            let mut obj = base_outbound("vmess", req);
+            obj.insert(
+                "uuid".to_string(),
+                json!(non_empty(&req.uuid).unwrap_or_default()),
+            );
+            obj.insert(
+                "security".to_string(),
+                json!(non_empty(&req.cipher).unwrap_or("auto")),
+            );
+            obj.insert("alter_id".to_string(), json!(req.alter_id.unwrap_or(0)));
+            insert_optional_string(&mut obj, "packet_encoding", non_empty(&req.packet_encoding));
+            if let Some(tls) = build_tls(req, false, false) {
+                obj.insert("tls".to_string(), tls);
+            }
+            if let Some(transport) = build_transport(req) {
+                obj.insert("transport".to_string(), transport);
+            }
+            JsonValue::Object(obj)
+        }
+        "vless" => {
+            let mut obj = base_outbound("vless", req);
+            obj.insert(
+                "uuid".to_string(),
+                json!(non_empty(&req.uuid).unwrap_or_default()),
+            );
+            insert_optional_string(&mut obj, "flow", non_empty(&req.flow));
+            insert_optional_string(&mut obj, "packet_encoding", non_empty(&req.packet_encoding));
+            if let Some(tls) = build_tls(req, true, false) {
+                obj.insert("tls".to_string(), tls);
+            }
+            if let Some(transport) = build_transport(req) {
+                obj.insert("transport".to_string(), transport);
+            }
+            JsonValue::Object(obj)
+        }
+        "trojan" => {
+            let mut obj = base_outbound("trojan", req);
+            obj.insert("password".to_string(), json!(non_empty(&req.password).unwrap_or_default()));
+            if let Some(tls) = build_tls(req, true, true) {
+                obj.insert("tls".to_string(), tls);
+            }
+            if let Some(transport) = build_transport(req) {
+                obj.insert("transport".to_string(), transport);
+            }
+            JsonValue::Object(obj)
+        }
+        "tuic" => {
+            let mut obj = base_outbound("tuic", req);
+            obj.insert(
+                "uuid".to_string(),
+                json!(non_empty(&req.uuid).unwrap_or_default()),
+            );
+            obj.insert("password".to_string(), json!(non_empty(&req.password).unwrap_or_default()));
+            obj.insert(
+                "congestion_control".to_string(),
+                json!(non_empty(&req.tuic_congestion_control).unwrap_or("cubic")),
+            );
+            obj.insert(
+                "udp_relay_mode".to_string(),
+                json!(non_empty(&req.tuic_udp_relay_mode).unwrap_or("native")),
+            );
+            if req.tuic_zero_rtt {
+                obj.insert("zero_rtt_handshake".to_string(), json!(true));
+            }
+            obj.insert(
+                "tls".to_string(),
+                build_tls(req, true, true).expect("TUIC TLS is always enabled"),
+            );
+            JsonValue::Object(obj)
+        }
+        "socks" => {
+            let mut obj = base_outbound("socks", req);
+            insert_optional_string(&mut obj, "username", non_empty(&req.username));
+            insert_optional_string(&mut obj, "password", non_empty(&req.password));
+            JsonValue::Object(obj)
+        }
+        "http" => {
+            let mut obj = base_outbound("http", req);
+            insert_optional_string(&mut obj, "username", non_empty(&req.username));
+            insert_optional_string(&mut obj, "password", non_empty(&req.password));
+            JsonValue::Object(obj)
+        }
+        _ => {
+            let mut obj = base_outbound("hysteria2", req);
+            obj.insert("password".to_string(), json!(non_empty(&req.password).unwrap_or_default()));
+            obj.insert(
+                "tls".to_string(),
+                build_tls(req, true, true).expect("Hysteria2 TLS is always enabled"),
+            );
+            if let Some(obfs_type) = non_empty(&req.obfs_type) {
+                obj.insert(
+                    "obfs".to_string(),
+                    json!({
+                        "type": obfs_type,
+                        "password": non_empty(&req.obfs_password).unwrap_or_default()
+                    }),
+                );
+            }
+            JsonValue::Object(obj)
+        }
+    }
+}
 
 pub async fn get_nodes(State(state): State<Arc<AppState>>) -> Json<ApiResponse<Vec<NodeInfo>>> {
     let config = state.config.read().await;
@@ -54,7 +295,6 @@ pub async fn add_node(
     let node_type = req.node_type.as_deref().unwrap_or("hysteria2");
 
     // 验证节点类型是否支持
-    const VALID_NODE_TYPES: &[&str] = &["hysteria2", "anytls", "ss", "socks", "http"];
     if !VALID_NODE_TYPES.contains(&node_type) {
         return Err(status_error(
             StatusCode::BAD_REQUEST,
@@ -88,76 +328,8 @@ pub async fn add_node(
         }
     }
 
-    let node_json = match node_type {
-        "anytls" => {
-            let node = AnyTls {
-                outbound_type: "anytls".to_string(),
-                tag: req.tag,
-                server: req.server,
-                server_port: req.server_port,
-                password: req.password.unwrap_or_default(),
-                tls: Tls {
-                    enabled: true,
-                    server_name: req.sni,
-                    insecure: req.skip_cert_verify,
-                },
-            };
-            serde_json::to_string(&node)
-        }
-        "ss" => {
-            let node = Shadowsocks {
-                outbound_type: "shadowsocks".to_string(),
-                tag: req.tag,
-                server: req.server,
-                server_port: req.server_port,
-                method: req
-                    .cipher
-                    .unwrap_or_else(|| "2022-blake3-aes-128-gcm".to_string()),
-                password: req.password.unwrap_or_default(),
-            };
-            serde_json::to_string(&node)
-        }
-        "socks" => {
-            let node = SocksProxy {
-                outbound_type: "socks".to_string(),
-                tag: req.tag,
-                server: req.server,
-                server_port: req.server_port,
-                username: non_empty(req.username),
-                password: non_empty(req.password),
-            };
-            serde_json::to_string(&node)
-        }
-        "http" => {
-            let node = HttpProxy {
-                outbound_type: "http".to_string(),
-                tag: req.tag,
-                server: req.server,
-                server_port: req.server_port,
-                username: non_empty(req.username),
-                password: non_empty(req.password),
-            };
-            serde_json::to_string(&node)
-        }
-        _ => {
-            let node = Hysteria2 {
-                outbound_type: "hysteria2".to_string(),
-                tag: req.tag,
-                server: req.server,
-                server_port: req.server_port,
-                password: req.password.unwrap_or_default(),
-                up_mbps: None,
-                down_mbps: None,
-                tls: Tls {
-                    enabled: true,
-                    server_name: req.sni,
-                    insecure: req.skip_cert_verify,
-                },
-            };
-            serde_json::to_string(&node)
-        }
-    }
-    .map_err(|e| {
+    let node_value = build_node_value(&req, node_type);
+    let node_json = serde_json::to_string(&node_value).map_err(|e| {
         status_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Failed to serialize node: {}", e),
@@ -170,12 +342,6 @@ pub async fn add_node(
         Ok(_) => Ok(success_no_data("Node added and sing-box restarted")),
         Err(e) => Err(status_error(StatusCode::INTERNAL_SERVER_ERROR, e)),
     }
-}
-
-fn non_empty(value: Option<String>) -> Option<String> {
-    value
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
 }
 
 pub async fn delete_node(
@@ -209,8 +375,11 @@ pub async fn delete_node(
 mod tests {
     use axum::{extract::State, response::Json};
 
-    use super::get_nodes;
-    use crate::{models::Config, test_support::app_state};
+    use super::{build_node_value, get_nodes};
+    use crate::{
+        models::{Config, NodeRequest},
+        test_support::app_state,
+    };
 
     #[tokio::test]
     async fn get_nodes_returns_parsed_manual_nodes() {
@@ -218,13 +387,14 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: None,
             subs: vec![],
             nodes: vec![
                 r#"{"type":"hysteria2","tag":"node-a","server":"a.example.com","server_port":443,"password":"secret","up_mbps":40,"down_mbps":350,"tls":{"enabled":true,"server_name":"sni.example.com","insecure":true}}"#.to_string(),
                 "not-json".to_string(),
             ],
             custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
         });
 
         let Json(response) = get_nodes(State(state)).await;
@@ -240,6 +410,58 @@ mod tests {
         assert_eq!(nodes[0].sni.as_deref(), Some("sni.example.com"));
     }
 
+    #[test]
+    fn build_node_value_maps_manual_vmess_transport_and_tls() {
+        let req = NodeRequest {
+            node_type: Some("vmess".to_string()),
+            tag: "vmess".to_string(),
+            server: "vm.example.com".to_string(),
+            server_port: 443,
+            uuid: Some("123e4567-e89b-12d3-a456-426614174000".to_string()),
+            cipher: Some("auto".to_string()),
+            alter_id: Some(0),
+            tls_enabled: Some(true),
+            sni: Some("vm.example.com".to_string()),
+            client_fingerprint: Some("chrome".to_string()),
+            transport_type: Some("ws".to_string()),
+            transport_path: Some("/ws".to_string()),
+            transport_host: Some("cdn.example.com".to_string()),
+            packet_encoding: Some("xudp".to_string()),
+            ..NodeRequest::default()
+        };
+
+        let value = build_node_value(&req, "vmess");
+
+        assert_eq!(value["type"], "vmess");
+        assert_eq!(value["uuid"], "123e4567-e89b-12d3-a456-426614174000");
+        assert_eq!(value["security"], "auto");
+        assert_eq!(value["tls"]["server_name"], "vm.example.com");
+        assert_eq!(value["tls"]["utls"]["fingerprint"], "chrome");
+        assert_eq!(value["transport"]["type"], "ws");
+        assert_eq!(value["transport"]["path"], "/ws");
+        assert_eq!(value["transport"]["headers"]["Host"], "cdn.example.com");
+    }
+
+    #[test]
+    fn build_node_value_maps_manual_tuic_defaults() {
+        let req = NodeRequest {
+            node_type: Some("tuic".to_string()),
+            tag: "tuic".to_string(),
+            server: "tuic.example.com".to_string(),
+            server_port: 443,
+            uuid: Some("123e4567-e89b-12d3-a456-426614174000".to_string()),
+            password: Some("password123".to_string()),
+            ..NodeRequest::default()
+        };
+
+        let value = build_node_value(&req, "tuic");
+
+        assert_eq!(value["type"], "tuic");
+        assert_eq!(value["congestion_control"], "cubic");
+        assert_eq!(value["udp_relay_mode"], "native");
+        assert_eq!(value["tls"]["enabled"], true);
+    }
+
     #[tokio::test]
     async fn get_nodes_handles_hysteria2_without_bandwidth() {
         // 测试：Hysteria2 节点不包含带宽默认值也能被正确解析
@@ -247,13 +469,14 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: None,
             subs: vec![],
             nodes: vec![
                 // 不包含 up_mbps/down_mbps 的 Hysteria2 节点
                 r#"{"type":"hysteria2","tag":"no-bw-node","server":"example.com","server_port":443,"password":"secret","tls":{"enabled":true}}"#.to_string(),
             ],
             custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
         });
 
         let Json(response) = get_nodes(State(state)).await;
@@ -272,7 +495,6 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: None,
             subs: vec![],
             nodes: vec![
                 // Valid node
@@ -285,6 +507,8 @@ mod tests {
                 r#"{"type":"hysteria2","tag":"invalid-server","server_port":443,"password":"secret"}"#.to_string(),
             ],
             custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
         });
 
         let Json(response) = get_nodes(State(state)).await;
@@ -301,10 +525,11 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: None,
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
         });
 
         let Json(response) = get_nodes(State(state)).await;
@@ -321,7 +546,6 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: None,
             subs: vec![],
             nodes: vec![
                 "not-json".to_string(),
@@ -329,6 +553,8 @@ mod tests {
                 r#"{"type":"hysteria2"}"#.to_string(),
             ],
             custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
         });
 
         let Json(response) = get_nodes(State(state)).await;
@@ -344,7 +570,6 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: None,
             subs: vec![],
             nodes: vec![
                 r#"{"type":"hysteria2","tag":"hy2-node","server":"hy2.example.com","server_port":443,"password":"secret"}"#.to_string(),
@@ -354,6 +579,8 @@ mod tests {
                 r#"{"type":"http","tag":"http-node","server":"http.example.com","server_port":8080,"username":"u","password":"p"}"#.to_string(),
             ],
             custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
         });
 
         let Json(response) = get_nodes(State(state)).await;
@@ -376,7 +603,6 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: None,
             subs: vec![],
             nodes: vec![
                 r#"{"type":"hysteria2","tag":"first","server":"first.example.com","server_port":443,"password":"secret"}"#.to_string(),
@@ -384,6 +610,8 @@ mod tests {
                 r#"{"type":"hysteria2","tag":"third","server":"third.example.com","server_port":443,"password":"secret"}"#.to_string(),
             ],
             custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
         });
 
         let Json(response) = get_nodes(State(state)).await;
@@ -402,13 +630,14 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: None,
             subs: vec![],
             nodes: vec![
                 r#"{"type":"hysteria2","tag":"ipv6-node","server":"2001:db8::1","server_port":443,"password":"secret"}"#.to_string(),
                 r#"{"type":"hysteria2","tag":"localhost-ipv6","server":"::1","server_port":443,"password":"secret"}"#.to_string(),
             ],
             custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
         });
 
         let Json(response) = get_nodes(State(state)).await;
@@ -426,13 +655,14 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: None,
             subs: vec![],
             nodes: vec![
                 r#"{"type":"hysteria2","tag":"香港节点","server":"hk.example.com","server_port":443,"password":"secret"}"#.to_string(),
                 r#"{"type":"hysteria2","tag":"日本サーバー","server":"jp.example.com","server_port":443,"password":"secret"}"#.to_string(),
             ],
             custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
         });
 
         let Json(response) = get_nodes(State(state)).await;

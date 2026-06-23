@@ -1,8 +1,11 @@
 use futures::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tokio::time::Duration;
 use tracing::{error, info, warn};
 
@@ -60,7 +63,16 @@ fn normalize_cached_sing_box_config(mut config: serde_json::Value) -> serde_json
 }
 
 /// 原子写入文件：先写入临时文件，再重命名为目标文件
-async fn write_file_atomic(path: &std::path::Path, content: &str) -> AppResult<()> {
+async fn write_file_atomic(path: &Path, content: &str) -> AppResult<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| AppError::context("Failed to create config directory", e))?;
+    }
+
     let temp_path = path.with_extension("tmp");
 
     // 先写入临时文件
@@ -76,9 +88,16 @@ async fn write_file_atomic(path: &std::path::Path, content: &str) -> AppResult<(
     Ok(())
 }
 
-pub async fn save_config(config: &Config) -> AppResult<()> {
+pub async fn save_config_to(path: &Path, config: &Config) -> AppResult<()> {
     let yaml = serde_yaml::to_string(config)?;
-    write_file_atomic(std::path::Path::new("config.yaml"), &yaml).await
+    if let Ok(existing) = tokio::fs::read_to_string(path).await {
+        if existing == yaml {
+            info!(config_path = ?path, "Config file already up to date, skipping write");
+            return Ok(());
+        }
+    }
+
+    write_file_atomic(path, &yaml).await
 }
 
 pub async fn save_config_cache(config: &Config) {
@@ -166,7 +185,10 @@ pub async fn restore_config_from_cache(config: &Config) -> AppResult<()> {
     Ok(())
 }
 
-pub async fn regenerate_and_restart(config: &Config, state: &Arc<AppState>) -> AppResult<()> {
+pub async fn regenerate_and_restart_runtime(
+    config: &Config,
+    state: &Arc<AppState>,
+) -> AppResult<bool> {
     let has_sub_nodes = gen_config(config, state)
         .await
         .map_err(|e| AppError::context("Failed to regenerate config", e))?;
@@ -183,23 +205,64 @@ pub async fn regenerate_and_restart(config: &Config, state: &Arc<AppState>) -> A
         .map_err(|e| AppError::context("Failed to restart sing-box", e))?;
     info!("sing-box restarted successfully");
 
+    Ok(has_sub_nodes)
+}
+
+pub async fn regenerate_and_restart(config: &Config, state: &Arc<AppState>) -> AppResult<()> {
+    let route_override = *state.route_mode_override.read().await;
+    let runtime_config = config_with_route_override(config, route_override);
+    let has_sub_nodes = regenerate_and_restart_runtime(&runtime_config, state).await?;
+
+    finalize_started_config(&runtime_config, state, has_sub_nodes).await;
+
+    Ok(())
+}
+
+pub async fn finalize_started_config(config: &Config, state: &Arc<AppState>, has_sub_nodes: bool) {
+    update_config_warning(config, state, has_sub_nodes).await;
+
+    let state_for_proxy = state.clone();
+    tokio::spawn(async move {
+        restore_last_proxy(&state_for_proxy).await;
+    });
+}
+
+async fn update_config_warning(config: &Config, state: &Arc<AppState>, has_sub_nodes: bool) {
     *state.config_source.lock().await = Some("generated".to_string());
 
     if has_sub_nodes || config.subs.is_empty() {
         save_config_cache(config).await;
+    }
+
+    if has_sub_nodes {
         *state.config_warning.lock().await = None;
     } else if !config.subs.is_empty() {
         *state.config_warning.lock().await = Some("所有订阅获取失败，请检查当前订阅".to_string());
     } else {
         *state.config_warning.lock().await = None;
     }
+}
 
-    let state_for_proxy = state.clone();
-    tokio::spawn(async move {
-        restore_last_proxy(&state_for_proxy).await;
-    });
+pub async fn regenerate_without_restart_runtime(
+    config: &Config,
+    state: &Arc<AppState>,
+) -> AppResult<bool> {
+    let has_sub_nodes = gen_config(config, state)
+        .await
+        .map_err(|e| AppError::context("Failed to regenerate config", e))?;
+    info!("Config regenerated successfully");
 
-    Ok(())
+    validate_sing_box_config()
+        .await
+        .map_err(|e| AppError::context("Config validation failed", e))?;
+
+    Ok(has_sub_nodes)
+}
+
+fn config_with_route_override(config: &Config, route_mode: Option<RouteMode>) -> Config {
+    let mut config = config.clone();
+    config.route_mode = route_mode.unwrap_or_default();
+    config
 }
 
 pub async fn apply_config_change(
@@ -207,102 +270,57 @@ pub async fn apply_config_change(
     old_config: &Config,
     new_config: &Config,
 ) -> AppResult<()> {
-    let config_path = std::path::Path::new("config.yaml");
-    let backup_path = std::path::Path::new("config.yaml.bak");
-
-    // 修改前先备份当前配置文件，确保回滚时可从磁盘恢复
-    if config_path.exists() {
-        tokio::fs::copy(config_path, backup_path)
-            .await
-            .map_err(|e| AppError::context("Failed to backup config before applying change", e))?;
-    }
-
-    save_config(new_config).await?;
+    let route_override = *state.route_mode_override.read().await;
+    let runtime_old_config = config_with_route_override(old_config, route_override);
+    let runtime_new_config = config_with_route_override(new_config, route_override);
+    let persisted_new_config = config_with_route_override(new_config, None);
 
     if config_has_no_nodes(new_config) {
+        save_config_to(&state.config_path, &persisted_new_config).await?;
         stop_sing_internal(state).await;
         clear_generated_config_state().await;
         {
             let mut status_map = state.sub_status.lock().await;
             status_map.retain(|url, _| new_config.subs.contains(url));
         }
-        *state.config.write().await = new_config.clone();
+        *state.config.write().await = persisted_new_config;
         *state.config_source.lock().await = None;
         *state.config_warning.lock().await = None;
-        let _ = tokio::fs::remove_file(backup_path).await;
         return Ok(());
     }
 
-    let was_running = sing_box_process_is_running(state).await;
-
-    match regenerate_and_restart(new_config, state).await {
-        Ok(()) => {
-            *state.config.write().await = new_config.clone();
-            let _ = tokio::fs::remove_file(backup_path).await;
-            Ok(())
+    match regenerate_and_restart_runtime(&runtime_new_config, state).await {
+        Ok(has_sub_nodes) => {
+            match save_config_to(&state.config_path, &persisted_new_config).await {
+                Ok(()) => {
+                    *state.config.write().await = persisted_new_config;
+                    finalize_started_config(&runtime_new_config, state, has_sub_nodes).await;
+                    Ok(())
+                }
+                Err(save_err) => {
+                    error!(error = %save_err, "Runtime config applied but persistent config write failed, attempting runtime rollback");
+                    match restart_with_previous_config(&runtime_old_config, state).await {
+                        Ok(()) => Err(AppError::context(
+                            "Failed to persist config change; restored previous runtime config",
+                            save_err,
+                        )),
+                        Err(rollback_err) => Err(AppError::message(format!(
+                            "Failed to persist config change: {}. Runtime rollback failed: {}",
+                            save_err, rollback_err
+                        ))),
+                    }
+                }
+            }
         }
         Err(apply_err) => {
-            error!(error = %apply_err, "Failed to apply config change, attempting rollback");
-
-            let rollback_result = async {
-                // 从备份文件恢复，避免重新序列化导致格式差异或磁盘满时失败
-                if backup_path.exists() {
-                    tokio::fs::copy(backup_path, config_path)
-                        .await
-                        .map_err(|e| {
-                            AppError::context("Failed to restore config from backup", e)
-                        })?;
-                } else {
-                    save_config(old_config).await?;
-                }
-
-                // 检查 sing-box 是否仍在运行（配置校验或生成失败时进程未被停止）
-                let still_running = {
-                    let mut lock = state.sing_process.lock().await;
-                    match &mut *lock {
-                        Some(proc) => proc.child.try_wait().ok().flatten().is_none(),
-                        None => false,
-                    }
-                };
-
-                if still_running {
-                    // sing-box 仍以旧配置运行，无需重启，config.yaml 已恢复
-                    info!("sing-box still running with previous config, skipping restart");
-                } else if was_running {
-                    // 优先从 config.json 缓存恢复，避免重新拉取订阅
-                    if get_config_cache_path().exists() {
-                        info!("Restoring config.json from cache for rollback");
-                        restore_config_from_cache(old_config).await?;
-                        start_sing_internal(state).await.map_err(|e| {
-                            AppError::context("Failed to restart sing-box with cached config", e)
-                        })?;
-                        *state.config_source.lock().await = Some("cache".to_string());
-                        *state.config_warning.lock().await = None;
-                        let state_for_proxy = state.clone();
-                        tokio::spawn(async move {
-                            restore_last_proxy(&state_for_proxy).await;
-                        });
-                    } else {
-                        // 无缓存，只能重新生成（会重新拉取订阅）
-                        warn!("No config cache available, falling back to full regeneration");
-                        regenerate_and_restart(old_config, state).await?;
-                    }
-                } else {
-                    info!("sing-box was stopped before config change, skipping rollback restart");
-                }
-                Ok::<(), AppError>(())
-            }
-            .await;
-
-            let _ = tokio::fs::remove_file(backup_path).await;
-
-            match rollback_result {
+            error!(error = %apply_err, "Failed to apply runtime config change, attempting runtime rollback");
+            match restore_previous_running_config(&runtime_old_config, state).await {
                 Ok(()) => Err(AppError::context(
-                    "Failed to apply config change; rolled back to previous config",
+                    "Failed to apply config change; restored previous runtime config",
                     apply_err,
                 )),
                 Err(rollback_err) => Err(AppError::message(format!(
-                    "Failed to apply config change: {}. Rollback failed: {}",
+                    "Failed to apply config change: {}. Runtime rollback failed: {}",
                     apply_err, rollback_err
                 ))),
             }
@@ -314,12 +332,117 @@ fn config_has_no_nodes(config: &Config) -> bool {
     config.subs.is_empty() && config.nodes.is_empty()
 }
 
-async fn sing_box_process_is_running(state: &Arc<AppState>) -> bool {
+pub async fn apply_runtime_config_change(
+    state: &Arc<AppState>,
+    old_config: &Config,
+    new_config: &Config,
+    restart: bool,
+) -> AppResult<()> {
+    if restart {
+        match regenerate_and_restart_runtime(new_config, state).await {
+            Ok(has_sub_nodes) => {
+                *state.route_mode_override.write().await = Some(new_config.route_mode);
+                finalize_started_config(new_config, state, has_sub_nodes).await;
+                Ok(())
+            }
+            Err(apply_err) => {
+                error!(error = %apply_err, "Failed to apply runtime-only config change, attempting runtime rollback");
+                match restore_previous_running_config(old_config, state).await {
+                    Ok(()) => Err(AppError::context(
+                        "Failed to apply runtime-only config change; restored previous runtime config",
+                        apply_err,
+                    )),
+                    Err(rollback_err) => Err(AppError::message(format!(
+                        "Failed to apply runtime-only config change: {}. Runtime rollback failed: {}",
+                        apply_err, rollback_err
+                    ))),
+                }
+            }
+        }
+    } else {
+        match regenerate_without_restart_runtime(new_config, state).await {
+            Ok(has_sub_nodes) => {
+                *state.route_mode_override.write().await = Some(new_config.route_mode);
+                update_config_warning(new_config, state, has_sub_nodes).await;
+                Ok(())
+            }
+            Err(apply_err) => {
+                let _ = restore_previous_stopped_config(old_config, state).await;
+                Err(AppError::context(
+                    "Failed to apply runtime-only config change",
+                    apply_err,
+                ))
+            }
+        }
+    }
+}
+
+async fn sing_box_is_running(state: &Arc<AppState>) -> bool {
     let mut lock = state.sing_process.lock().await;
     match &mut *lock {
-        Some(proc) => proc.child.try_wait().ok().flatten().is_none(),
+        Some(proc) => match proc.child.try_wait() {
+            Ok(Some(_)) => {
+                *lock = None;
+                false
+            }
+            Ok(None) => true,
+            Err(_) => false,
+        },
         None => false,
     }
+}
+
+async fn restore_previous_running_config(
+    old_config: &Config,
+    state: &Arc<AppState>,
+) -> AppResult<()> {
+    if sing_box_is_running(state).await {
+        match restore_config_from_cache(old_config).await {
+            Ok(()) => {}
+            Err(cache_err) => {
+                warn!(error = %cache_err, "Failed to restore runtime config from cache while previous sing-box process is still running");
+                let has_sub_nodes = regenerate_without_restart_runtime(old_config, state).await?;
+                update_config_warning(old_config, state, has_sub_nodes).await;
+            }
+        }
+        return Ok(());
+    }
+
+    restart_with_previous_config(old_config, state).await
+}
+
+async fn restart_with_previous_config(old_config: &Config, state: &Arc<AppState>) -> AppResult<()> {
+    stop_sing_internal(state).await;
+
+    if let Err(cache_err) = restore_config_from_cache(old_config).await {
+        warn!(error = %cache_err, "Failed to restore runtime config from cache for rollback; regenerating previous config");
+    } else {
+        match start_sing_internal(state).await {
+            Ok(()) => {
+                finalize_started_config(old_config, state, true).await;
+                return Ok(());
+            }
+            Err(start_err) => {
+                warn!(error = %start_err, "Failed to restart sing-box from cached config; regenerating previous config");
+            }
+        }
+    }
+
+    let has_sub_nodes = regenerate_without_restart_runtime(old_config, state).await?;
+    start_sing_internal(state)
+        .await
+        .map_err(|e| AppError::context("Failed to restart sing-box with previous config", e))?;
+    finalize_started_config(old_config, state, has_sub_nodes).await;
+    Ok(())
+}
+
+async fn restore_previous_stopped_config(
+    old_config: &Config,
+    state: &Arc<AppState>,
+) -> AppResult<()> {
+    let has_sub_nodes = regenerate_without_restart_runtime(old_config, state).await?;
+    update_config_warning(old_config, state, has_sub_nodes).await;
+    Ok(())
 }
 
 /// Returns `true` if at least one subscription node was fetched successfully.
@@ -476,6 +599,79 @@ fn collect_manual_outbounds(config: &Config) -> (Vec<serde_json::Value>, Vec<Str
     (my_outbounds, my_names)
 }
 
+fn make_unique_tag(tag: &str, used: &mut HashSet<String>) -> String {
+    let base = if tag.trim().is_empty() { "node" } else { tag };
+    if used.insert(base.to_string()) {
+        return base.to_string();
+    }
+
+    for index in 2.. {
+        let candidate = format!("{base} ({index})");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+
+    unreachable!("unbounded duplicate tag search should always find a value")
+}
+
+fn normalize_outbound_tags(
+    node_names: Vec<String>,
+    outbounds: Vec<serde_json::Value>,
+) -> (Vec<String>, Vec<serde_json::Value>) {
+    let names_len = node_names.len();
+    let mut used = HashSet::new();
+    // Built-in outbounds from the template already reserve these tags.
+    used.insert("proxy".to_string());
+    used.insert("direct".to_string());
+    let mut unique_names = Vec::with_capacity(outbounds.len());
+    let mut unique_outbounds = Vec::with_capacity(outbounds.len());
+
+    for (idx, mut outbound) in outbounds.into_iter().enumerate() {
+        let original_name = node_names
+            .get(idx)
+            .cloned()
+            .or_else(|| {
+                outbound
+                    .get("tag")
+                    .and_then(|tag| tag.as_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| format!("node-{}", idx + 1));
+        let unique_name = make_unique_tag(&original_name, &mut used);
+
+        if unique_name != original_name {
+            warn!(
+                from = %original_name,
+                to = %unique_name,
+                "Renamed duplicate outbound tag to avoid sing-box conflict"
+            );
+        }
+
+        if let Some(obj) = outbound.as_object_mut() {
+            obj.insert(
+                "tag".to_string(),
+                serde_json::Value::String(unique_name.clone()),
+            );
+        } else {
+            warn!(tag = %unique_name, "Outbound is not a JSON object; cannot set tag");
+        }
+
+        unique_names.push(unique_name);
+        unique_outbounds.push(outbound);
+    }
+
+    if names_len != unique_outbounds.len() {
+        warn!(
+            names = names_len,
+            outbounds = unique_outbounds.len(),
+            "Outbound name count did not match outbound config count"
+        );
+    }
+
+    (unique_names, unique_outbounds)
+}
+
 fn build_sing_box_config(
     config: &Config,
     my_names: Vec<String>,
@@ -490,8 +686,6 @@ fn build_sing_box_config(
         ));
     }
 
-    let route_mode = config.route_mode.clone().unwrap_or_default();
-    let mut sing_box_config = get_config_template(&route_mode);
     let socks_port = config.socks_port.unwrap_or(DEFAULT_SOCKS_PORT);
     if socks_port == 0 {
         return Err(AppError::message(
@@ -508,6 +702,13 @@ fn build_sing_box_config(
             "Invalid socks_listen: must be an IP address",
         ));
     }
+
+    let (node_names, outbounds) = normalize_outbound_tags(
+        my_names.into_iter().chain(final_node_names).collect(),
+        my_outbounds.into_iter().chain(final_outbounds).collect(),
+    );
+
+    let mut sing_box_config = get_config_template(&config.route_mode);
     if let Some(inbounds) = sing_box_config["inbounds"].as_array_mut() {
         inbounds.push(serde_json::json!({
             "type": "socks",
@@ -516,32 +717,53 @@ fn build_sing_box_config(
             "listen_port": socks_port
         }));
     }
-
-    if let Some(outbounds) = sing_box_config["outbounds"][0].get_mut("outbounds") {
-        if let Some(arr) = outbounds.as_array_mut() {
-            arr.extend(
-                my_names
-                    .into_iter()
-                    .chain(final_node_names.into_iter())
-                    .map(serde_json::Value::String),
-            );
+    if let Some(selector_outbounds) = sing_box_config["outbounds"][0].get_mut("outbounds") {
+        if let Some(arr) = selector_outbounds.as_array_mut() {
+            arr.extend(node_names.into_iter().map(serde_json::Value::String));
         }
     }
     if let Some(arr) = sing_box_config["outbounds"].as_array_mut() {
-        arr.extend(my_outbounds.into_iter().chain(final_outbounds.into_iter()));
+        arr.extend(outbounds);
     }
 
+    apply_route_mode(
+        &mut sing_box_config,
+        config.route_mode,
+        &config.custom_rules,
+    );
+
+    Ok(sing_box_config)
+}
+
+fn parse_custom_rules(custom_rules: &[String]) -> Vec<serde_json::Value> {
+    let mut parsed = Vec::new();
+    for rule_str in custom_rules {
+        if let Ok(rule_json) = serde_json::from_str::<serde_json::Value>(rule_str) {
+            parsed.push(rule_json);
+        } else {
+            warn!("Failed to parse custom rule: {}", rule_str);
+        }
+    }
+    parsed
+}
+
+fn apply_route_mode(
+    sing_box_config: &mut serde_json::Value,
+    route_mode: RouteMode,
+    custom_rules: &[String],
+) {
     if let Some(rules) = sing_box_config["route"]["rules"].as_array_mut() {
-        for rule_str in &config.custom_rules {
-            if let Ok(rule_json) = serde_json::from_str::<serde_json::Value>(rule_str) {
-                rules.push(rule_json);
-            } else {
-                warn!("Failed to parse custom rule: {}", rule_str);
+        match route_mode {
+            RouteMode::Tunnel | RouteMode::Global => {}
+            RouteMode::Rule => {
+                let custom_rules = parse_custom_rules(custom_rules);
+                // Preserve the mandatory pre-routing actions, then let user rules take
+                // precedence over the built-in direct/proxy split rules.
+                let insertion_index = rules.len().min(2);
+                rules.splice(insertion_index..insertion_index, custom_rules);
             }
         }
     }
-
-    Ok(sing_box_config)
 }
 
 fn get_config_template(route_mode: &RouteMode) -> serde_json::Value {
@@ -592,7 +814,7 @@ fn get_config_template(route_mode: &RouteMode) -> serde_json::Value {
 
     serde_json::json!({
         "log": {"disabled": false, "timestamp": true, "level": "info"},
-        "experimental": {"clash_api": {"external_controller": "0.0.0.0:6262", "access_control_allow_origin": ["*"]}},
+        "experimental": {"clash_api": {"external_controller": "127.0.0.1:6262"}},
         "dns": {
             "final": "cfdns",
             "strategy": "ipv4_only",
@@ -627,7 +849,7 @@ fn get_config_template(route_mode: &RouteMode) -> serde_json::Value {
 mod tests {
     use super::{
         build_sing_box_config, collect_manual_outbounds, config_cache_fingerprint,
-        normalize_cached_sing_box_config,
+        config_with_route_override, normalize_cached_sing_box_config, save_config_to,
     };
     use crate::models::{Config, RouteMode};
     use serde_json::json;
@@ -638,13 +860,14 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: None,
             subs: vec![],
             nodes: vec![
                 r#"{"type":"hysteria2","tag":"manual-a","server":"a.example.com","server_port":443,"password":"p","up_mbps":40,"down_mbps":350,"tls":{"enabled":true,"insecure":true}}"#.to_string(),
                 "{invalid-json".to_string(),
             ],
             custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
         };
 
         let (outbounds, names) = collect_manual_outbounds(&config);
@@ -661,13 +884,14 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: None,
             subs: vec![],
             nodes: vec![
                 // 不包含 up_mbps/down_mbps 的节点
                 r#"{"type":"hysteria2","tag":"no-bandwidth","server":"example.com","server_port":443,"password":"secret","tls":{"enabled":true}}"#.to_string(),
             ],
             custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
         };
 
         let (outbounds, names) = collect_manual_outbounds(&config);
@@ -685,13 +909,14 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: None,
             subs: vec![],
             nodes: vec![
                 r#"{"type":"socks","tag":"socks-a","server":"socks.example.com","server_port":1080}"#.to_string(),
                 r#"{"type":"http","tag":"http-a","server":"http.example.com","server_port":8080,"username":"user","password":"pass"}"#.to_string(),
             ],
             custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
         };
 
         let (outbounds, names) = collect_manual_outbounds(&config);
@@ -711,7 +936,6 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: Some(1080),
-            route_mode: None,
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![
@@ -719,6 +943,8 @@ mod tests {
                     .to_string(),
                 "not-json".to_string(),
             ],
+            route_mode: RouteMode::Rule,
+            vps_ip: None,
         };
 
         let my_outbounds = vec![json!({
@@ -765,8 +991,187 @@ mod tests {
         assert_eq!(all_outbounds[3]["tag"], "sub-a");
 
         let rules = built["route"]["rules"].as_array().unwrap();
-        assert_eq!(rules.len(), 4);
-        assert_eq!(rules[3]["domain_suffix"][0], "example.com");
+        assert_eq!(rules.len(), 5);
+        assert_eq!(rules[0]["action"], "sniff");
+        assert_eq!(rules[1]["action"], "hijack-dns");
+        assert_eq!(rules[2]["domain_suffix"][0], "example.com");
+        assert_eq!(rules[3]["ip_is_private"], true);
+    }
+
+    #[test]
+    fn build_sing_box_config_global_mode_removes_split_rules() {
+        let config = Config {
+            port: None,
+            socks_listen: None,
+            socks_port: None,
+            subs: vec![],
+            nodes: vec![],
+            custom_rules: vec![
+                r#"{"domain_suffix":["example.com"],"action":"route","outbound":"direct"}"#
+                    .to_string(),
+            ],
+            route_mode: RouteMode::Global,
+            vps_ip: None,
+        };
+
+        let my_outbounds = vec![json!({
+            "type": "hysteria2",
+            "tag": "manual-a",
+            "server": "manual.example.com",
+            "server_port": 443,
+            "password": "secret"
+        })];
+
+        let built = build_sing_box_config(
+            &config,
+            vec!["manual-a".to_string()],
+            my_outbounds,
+            vec![],
+            vec![],
+        )
+        .unwrap();
+
+        let rules = built["route"]["rules"].as_array().unwrap();
+        assert_eq!(rules.len(), 3);
+        assert_eq!(rules[0]["action"], "sniff");
+        assert_eq!(rules[1]["action"], "hijack-dns");
+        assert_eq!(rules[2]["ip_is_private"], true);
+        assert_eq!(rules[2]["outbound"], "direct");
+
+        let dns_rules = built["dns"]["rules"].as_array().unwrap();
+        assert_eq!(dns_rules.len(), 1);
+        assert_eq!(built["route"]["final"], "proxy");
+    }
+
+    #[test]
+    fn config_with_route_override_defaults_to_tunnel_mode() {
+        let config = Config {
+            port: None,
+            socks_listen: None,
+            socks_port: None,
+            subs: vec![],
+            nodes: vec![],
+            custom_rules: vec![],
+            route_mode: RouteMode::Global,
+            vps_ip: None,
+        };
+
+        let runtime_config = config_with_route_override(&config, None);
+
+        assert_eq!(runtime_config.route_mode, RouteMode::Tunnel);
+    }
+
+    #[test]
+    fn build_sing_box_config_renames_duplicate_outbound_tags() {
+        let config = Config {
+            port: None,
+            socks_listen: None,
+            socks_port: None,
+            subs: vec![],
+            nodes: vec![],
+            custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
+        };
+
+        let my_outbounds = vec![json!({
+            "type": "hysteria2",
+            "tag": "dup",
+            "server": "manual.example.com",
+            "server_port": 443,
+            "password": "manual-secret"
+        })];
+        let final_outbounds = vec![
+            json!({
+                "type": "hysteria2",
+                "tag": "dup",
+                "server": "sub1.example.com",
+                "server_port": 443,
+                "password": "sub-secret-1"
+            }),
+            json!({
+                "type": "shadowsocks",
+                "tag": "dup",
+                "server": "sub2.example.com",
+                "server_port": 8388,
+                "method": "2022-blake3-aes-128-gcm",
+                "password": "sub-secret-2"
+            }),
+        ];
+
+        let built = build_sing_box_config(
+            &config,
+            vec!["dup".to_string()],
+            my_outbounds,
+            vec!["dup".to_string(), "dup".to_string()],
+            final_outbounds,
+        )
+        .unwrap();
+
+        let selector = built["outbounds"][0]["outbounds"].as_array().unwrap();
+        let selector_tags: Vec<_> = selector
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect();
+        assert_eq!(selector_tags, vec!["dup", "dup (2)", "dup (3)"]);
+
+        let all_outbounds = built["outbounds"].as_array().unwrap();
+        assert_eq!(all_outbounds[2]["tag"], "dup");
+        assert_eq!(all_outbounds[3]["tag"], "dup (2)");
+        assert_eq!(all_outbounds[4]["tag"], "dup (3)");
+    }
+
+    #[test]
+    fn build_sing_box_config_renames_tags_reserved_by_template() {
+        let config = Config {
+            port: None,
+            socks_listen: None,
+            socks_port: None,
+            subs: vec![],
+            nodes: vec![],
+            custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
+        };
+
+        let my_outbounds = vec![
+            json!({
+                "type": "hysteria2",
+                "tag": "proxy",
+                "server": "proxy.example.com",
+                "server_port": 443,
+                "password": "proxy-secret"
+            }),
+            json!({
+                "type": "hysteria2",
+                "tag": "direct",
+                "server": "direct.example.com",
+                "server_port": 443,
+                "password": "direct-secret"
+            }),
+        ];
+
+        let built = build_sing_box_config(
+            &config,
+            vec!["proxy".to_string(), "direct".to_string()],
+            my_outbounds,
+            vec![],
+            vec![],
+        )
+        .unwrap();
+
+        let selector = built["outbounds"][0]["outbounds"].as_array().unwrap();
+        let selector_tags: Vec<_> = selector
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect();
+        assert_eq!(selector_tags, vec!["proxy (2)", "direct (2)"]);
+
+        let all_outbounds = built["outbounds"].as_array().unwrap();
+        assert_eq!(all_outbounds[0]["tag"], "proxy");
+        assert_eq!(all_outbounds[1]["tag"], "direct");
+        assert_eq!(all_outbounds[2]["tag"], "proxy (2)");
+        assert_eq!(all_outbounds[3]["tag"], "direct (2)");
     }
 
     #[test]
@@ -775,10 +1180,11 @@ mod tests {
             port: None,
             socks_listen: Some("0.0.0.0".to_string()),
             socks_port: Some(2080),
-            route_mode: None,
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
         };
         let my_outbounds = vec![json!({
             "type": "hysteria2",
@@ -809,10 +1215,11 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: None,
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
         };
 
         let built = build_sing_box_config(
@@ -854,10 +1261,11 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: Some(RouteMode::Global),
+            route_mode: RouteMode::Global,
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            vps_ip: None,
         };
 
         let built = build_sing_box_config(
@@ -892,10 +1300,11 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: Some(RouteMode::Rule),
+            route_mode: RouteMode::Rule,
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            vps_ip: None,
         };
 
         let built = build_sing_box_config(
@@ -931,10 +1340,11 @@ mod tests {
             port: Some(6161),
             socks_listen: None,
             socks_port: Some(1080),
-            route_mode: Some(RouteMode::Tunnel),
+            route_mode: RouteMode::Tunnel,
             subs: vec!["https://example.com/sub".to_string()],
             nodes: vec![],
             custom_rules: vec![],
+            vps_ip: None,
         };
         let mut second = first.clone();
         second.port = Some(7777);
@@ -970,10 +1380,11 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: None,
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
         };
 
         let err = build_sing_box_config(&config, vec![], vec![], vec![], vec![]).unwrap_err();
@@ -989,30 +1400,33 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: None,
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
         }));
 
         assert!(!super::config_has_no_nodes(&Config {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: None,
             subs: vec!["https://example.com/sub".to_string()],
             nodes: vec![],
             custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
         }));
 
         assert!(!super::config_has_no_nodes(&Config {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: None,
             subs: vec![],
             nodes: vec![r#"{"tag":"manual"}"#.to_string()],
             custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
         }));
     }
 
@@ -1022,10 +1436,11 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: None,
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
         };
 
         let (outbounds, names) = collect_manual_outbounds(&config);
@@ -1040,7 +1455,6 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: None,
             subs: vec![],
             nodes: vec![
                 "not-json".to_string(),
@@ -1048,6 +1462,8 @@ mod tests {
                 r#"{"type":"hysteria2"}"#.to_string(), // Valid JSON but no tag
             ],
             custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
         };
 
         let (outbounds, names) = collect_manual_outbounds(&config);
@@ -1063,10 +1479,11 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: None,
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
         };
 
         let my_outbounds = vec![
@@ -1101,10 +1518,11 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: None,
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
         };
 
         let my_outbounds = vec![json!({
@@ -1130,12 +1548,107 @@ mod tests {
     }
 
     #[test]
+    fn build_sing_box_config_splits_direct_route_rules() {
+        let config = Config {
+            port: None,
+            socks_listen: None,
+            socks_port: None,
+            subs: vec![],
+            nodes: vec![],
+            custom_rules: vec![],
+            route_mode: RouteMode::Rule,
+            vps_ip: None,
+        };
+
+        let my_outbounds = vec![json!({
+            "type": "hysteria2",
+            "tag": "manual-a",
+            "server": "manual.example.com",
+            "server_port": 443,
+            "password": "secret"
+        })];
+
+        let built = build_sing_box_config(
+            &config,
+            vec!["manual-a".to_string()],
+            my_outbounds,
+            vec![],
+            vec![],
+        )
+        .unwrap();
+
+        let rules = built["route"]["rules"].as_array().unwrap();
+
+        assert_eq!(rules[2]["ip_is_private"], true);
+        assert_eq!(rules[2]["outbound"], "direct");
+        assert!(rules[2].get("rule_set").is_none());
+
+        assert_eq!(rules[3]["rule_set"], json!(["chinaip", "chinasite"]));
+        assert_eq!(rules[3]["outbound"], "direct");
+
+        let dns_rules = built["dns"]["rules"].as_array().unwrap();
+        assert!(!dns_rules.is_empty());
+
+        assert_eq!(built["dns"]["disable_cache"], false);
+        assert!(built["dns"].get("cache_capacity").is_none());
+        assert!(built["dns"].get("optimistic").is_none());
+
+        let dns_servers = built["dns"]["servers"].as_array().unwrap();
+        let cfdns = dns_servers
+            .iter()
+            .find(|server| server["tag"] == "cfdns")
+            .unwrap();
+        assert_eq!(cfdns["type"], "udp");
+        assert_eq!(cfdns["server"], "1.1.1.1");
+        assert_eq!(cfdns["detour"], "proxy");
+
+        assert!(dns_servers
+            .iter()
+            .all(|server| server["type"] != "fakeip" && server["tag"] != "fakeip"));
+
+        assert!(built["experimental"].get("cache_file").is_none());
+    }
+
+    #[test]
+    fn build_sing_box_config_binds_clash_api_to_localhost() {
+        let config = Config {
+            port: None,
+            socks_listen: None,
+            socks_port: None,
+            subs: vec![],
+            nodes: vec![],
+            custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
+        };
+
+        let built = build_sing_box_config(
+            &config,
+            vec!["manual-a".to_string()],
+            vec![json!({
+                "type": "hysteria2",
+                "tag": "manual-a",
+                "server": "manual.example.com",
+                "server_port": 443,
+                "password": "secret"
+            })],
+            vec![],
+            vec![],
+        )
+        .unwrap();
+
+        assert_eq!(
+            built["experimental"]["clash_api"]["external_controller"],
+            "127.0.0.1:6262"
+        );
+    }
+
+    #[test]
     fn build_sing_box_config_ignores_all_invalid_custom_rules() {
         let config = Config {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: None,
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![
@@ -1143,6 +1656,8 @@ mod tests {
                 "{invalid".to_string(),
                 "".to_string(),
             ],
+            route_mode: Default::default(),
+            vps_ip: None,
         };
 
         let my_outbounds = vec![json!({
@@ -1169,35 +1684,32 @@ mod tests {
 
     #[tokio::test]
     async fn save_config_performs_atomic_write() {
-        let temp_dir = std::env::temp_dir().join(format!("miao-test-{}", std::process::id()));
-        tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "miao-test-save-{}-{}",
+            std::process::id(),
+            "atomic"
+        ));
+        let config_path = temp_dir.join("nested").join("config.yaml");
 
         let config = Config {
             port: Some(8080),
             socks_listen: None,
             socks_port: Some(1080),
-            route_mode: Some(RouteMode::Rule),
             subs: vec!["https://example.com/sub".to_string()],
             nodes: vec![],
             custom_rules: vec![],
+            route_mode: RouteMode::Rule,
+            vps_ip: None,
         };
 
-        // 使用绝对路径保存配置
-        let config_path = temp_dir.join("config.yaml");
-        let temp_config_path = temp_dir.join("config.yaml.tmp");
-        let yaml = serde_yaml::to_string(&config).unwrap();
+        save_config_to(&config_path, &config).await.unwrap();
 
-        tokio::fs::write(&temp_config_path, yaml).await.unwrap();
-        tokio::fs::rename(&temp_config_path, &config_path)
-            .await
-            .unwrap();
-
-        // 验证文件存在且格式正确
         let content = tokio::fs::read_to_string(&config_path).await.unwrap();
         let parsed: Config = serde_yaml::from_str(&content).unwrap();
         assert_eq!(parsed.port, Some(8080));
         assert_eq!(parsed.socks_port, Some(1080));
-        assert_eq!(parsed.route_mode, Some(RouteMode::Rule));
+        // route_mode is runtime-only and not persisted, parsed value is the default
+        assert_eq!(parsed.route_mode, RouteMode::default());
         assert_eq!(parsed.subs.len(), 1);
 
         // 清理
@@ -1206,8 +1718,11 @@ mod tests {
 
     #[tokio::test]
     async fn save_config_overwrites_existing_file() {
-        let temp_dir =
-            std::env::temp_dir().join(format!("miao-test-overwrite-{}", std::process::id()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "miao-test-save-{}-{}",
+            std::process::id(),
+            "overwrite"
+        ));
         tokio::fs::create_dir_all(&temp_dir).await.unwrap();
 
         let config_path = temp_dir.join("config.yaml");
@@ -1225,26 +1740,58 @@ mod tests {
             port: Some(7777),
             socks_listen: None,
             socks_port: Some(2080),
-            route_mode: Some(RouteMode::Rule),
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            route_mode: RouteMode::Rule,
+            vps_ip: None,
         };
-        let yaml = serde_yaml::to_string(&config).unwrap();
-        let temp_config_path = temp_dir.join("config.yaml.tmp");
-        tokio::fs::write(&temp_config_path, yaml).await.unwrap();
-        tokio::fs::rename(&temp_config_path, &config_path)
-            .await
-            .unwrap();
+        save_config_to(&config_path, &config).await.unwrap();
 
-        // 验证被覆盖
         let content = tokio::fs::read_to_string(&config_path).await.unwrap();
         let parsed: Config = serde_yaml::from_str(&content).unwrap();
         assert_eq!(parsed.port, Some(7777));
         assert_eq!(parsed.socks_port, Some(2080));
-        assert_eq!(parsed.route_mode, Some(RouteMode::Rule));
 
         // 清理
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[tokio::test]
+    async fn save_config_skips_identical_content() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("miao-test-save-{}-{}", std::process::id(), "skip"));
+        tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+
+        let config_path = temp_dir.join("config.yaml");
+        let config = Config {
+            port: Some(6161),
+            socks_listen: None,
+            socks_port: None,
+            subs: vec![],
+            nodes: vec![],
+            custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
+        };
+
+        save_config_to(&config_path, &config).await.unwrap();
+        let before = tokio::fs::metadata(&config_path)
+            .await
+            .unwrap()
+            .modified()
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        save_config_to(&config_path, &config).await.unwrap();
+
+        let after = tokio::fs::metadata(&config_path)
+            .await
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(before, after);
+
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;
     }
 }

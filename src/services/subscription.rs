@@ -3,6 +3,7 @@ use crate::services::node_parser::{parse_clash_proxies, parse_uri_subscription};
 use std::path::Path;
 
 /// 订阅获取结果，包含节点和解析错误信息
+#[derive(Debug)]
 pub struct FetchResult {
     pub node_names: Vec<String>,
     pub outbounds: Vec<serde_json::Value>,
@@ -45,6 +46,16 @@ async fn read_subscription_text(link: &str, client: &reqwest::Client) -> AppResu
             AppError::context(
                 format!(
                     "Failed to fetch subscription from {}",
+                    redact_subscription_link(link)
+                ),
+                e,
+            )
+        })?
+        .error_for_status()
+        .map_err(|e| {
+            AppError::context(
+                format!(
+                    "Subscription server returned HTTP error for {}",
                     redact_subscription_link(link)
                 ),
                 e,
@@ -129,6 +140,30 @@ mod tests {
     use super::*;
     use base64::{engine::general_purpose, Engine as _};
 
+    #[tokio::test]
+    async fn fetch_sub_rejects_http_error_status() {
+        use axum::{http::StatusCode, routing::get, Router};
+
+        let app = Router::new().route(
+            "/sub",
+            get(|| async { (StatusCode::INTERNAL_SERVER_ERROR, "boom") }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let client = reqwest::Client::new();
+        let err = fetch_sub(&format!("http://{addr}/sub"), &client)
+            .await
+            .unwrap_err();
+        let message = err.to_string();
+
+        assert!(message.contains("Subscription server returned HTTP error"));
+        assert!(message.contains("500"));
+    }
+
     #[test]
     fn parse_clash_proxies_extracts_supported_nodes() {
         let yaml = r#"
@@ -139,6 +174,8 @@ proxies:
     port: 443
     password: pass-hy
     sni: hy.example.com
+    obfs: salamander
+    obfs-password: obfs-pass
   - name: anytls-node
     type: anytls
     server: any.example.com
@@ -167,24 +204,33 @@ proxies:
     type: vmess
     server: vmess.example.com
     port: 443
-    uuid: xxx
+    uuid: 123e4567-e89b-12d3-a456-426614174000
+    cipher: auto
 "#;
 
         let result = parse_clash_proxies(yaml).unwrap();
 
-        // 4 valid nodes + 1 unsupported type (vmess) silently skipped
+        // 4 valid ss/hy2/anytls nodes + 1 vmess (now supported)
         let names: Vec<String> = result.nodes.iter().map(|(n, _)| n.clone()).collect();
         assert_eq!(
             names,
-            vec!["hy2-node", "anytls-node", "ss-node", "ss-inline-obfs-node"]
+            vec![
+                "hy2-node",
+                "anytls-node",
+                "ss-node",
+                "ss-inline-obfs-node",
+                "ignored-node",
+            ]
         );
-        assert_eq!(result.nodes.len(), 4);
-        assert!(result.errors.is_empty()); // vmess is silently skipped, not reported as error
+        assert_eq!(result.nodes.len(), 5);
+        assert!(result.errors.is_empty());
 
         let outbounds: Vec<serde_json::Value> = result.nodes.into_iter().map(|(_, o)| o).collect();
         assert_eq!(outbounds[0]["type"], "hysteria2");
         assert_eq!(outbounds[0]["tag"], "hy2-node");
         assert_eq!(outbounds[0]["tls"]["server_name"], "hy.example.com");
+        assert_eq!(outbounds[0]["obfs"]["type"], "salamander");
+        assert_eq!(outbounds[0]["obfs"]["password"], "obfs-pass");
         assert_eq!(outbounds[1]["type"], "anytls");
         assert_eq!(outbounds[1]["tls"]["insecure"], true);
         assert_eq!(outbounds[2]["type"], "shadowsocks");
@@ -199,6 +245,8 @@ proxies:
             outbounds[3]["plugin_opts"],
             "obfs=http;obfs-host=inline.example.com"
         );
+        assert_eq!(outbounds[4]["type"], "vmess");
+        assert_eq!(outbounds[4]["security"], "auto");
     }
 
     #[test]
@@ -342,7 +390,7 @@ proxies:
 
         let result = parse_clash_proxies(yaml).unwrap();
 
-        // Both nodes should be parsed (sing-box will handle duplicate tags)
+        // Both nodes should be parsed; config generation will de-duplicate tags later.
         assert_eq!(result.nodes.len(), 2);
         assert!(result.errors.is_empty());
     }

@@ -9,7 +9,7 @@ use crate::handlers::{
     clash::{get_proxies, switch_proxy, test_proxy_delay, traffic_ws},
     nodes::{add_node, delete_node, get_nodes},
     proxy::set_last_proxy,
-    service::{get_status, start_service, stop_service, test_connectivity},
+    service::{get_status, set_route_mode, start_service, stop_service, test_connectivity},
     static_assets::{serve_favicon, serve_index},
     subs::{add_sub, delete_sub, get_subs, refresh_subs},
     version::{get_version, upgrade},
@@ -23,6 +23,7 @@ pub fn build_router(app_state: Arc<AppState>) -> Router {
         .route("/api/status", get(get_status))
         .route("/api/service/start", post(start_service))
         .route("/api/service/stop", post(stop_service))
+        .route("/api/route-mode", post(set_route_mode))
         .route("/api/connectivity", post(test_connectivity))
         .route("/api/version", get(get_version))
         .route("/api/upgrade", post(upgrade))
@@ -58,10 +59,11 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: None,
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
         })
         .await;
 
@@ -78,10 +80,11 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: None,
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
         })
         .await;
 
@@ -105,10 +108,11 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: None,
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
         })
         .await;
 
@@ -130,10 +134,11 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: None,
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
         })
         .await;
 
@@ -157,12 +162,13 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: None,
             subs: vec![],
             nodes: vec![
                 r#"{"type":"hysteria2","tag":"router-node","server":"node.example.com","server_port":443,"password":"secret","up_mbps":40,"down_mbps":350,"tls":{"enabled":true,"server_name":"sni.example.com","insecure":true}}"#.to_string(),
             ],
             custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
         })
         .await;
 
@@ -186,10 +192,11 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: None,
             subs: vec!["https://example.com/subscription".to_string()],
             nodes: vec![],
             custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
         })
         .await;
 
@@ -212,10 +219,11 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: None,
             subs: vec!["https://example.com/subscription".to_string()],
             nodes: vec![],
             custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
         })
         .await;
 
@@ -240,10 +248,11 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: None,
             subs: vec!["https://example.com/subscription".to_string()],
             nodes: vec![],
             custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
         })
         .await;
 
@@ -268,12 +277,13 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: None,
             subs: vec![],
             nodes: vec![
                 r#"{"type":"hysteria2","tag":"router-node","server":"node.example.com","server_port":443,"password":"password123","up_mbps":40,"down_mbps":350,"tls":{"enabled":true,"insecure":true}}"#.to_string(),
             ],
             custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
         })
         .await;
 
@@ -303,12 +313,13 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: None,
             subs: vec![],
             nodes: vec![
                 r#"{"type":"hysteria2","tag":"router-node","server":"node.example.com","server_port":443,"password":"secret","up_mbps":40,"down_mbps":350,"tls":{"enabled":true,"insecure":true}}"#.to_string(),
             ],
             custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
         })
         .await;
 

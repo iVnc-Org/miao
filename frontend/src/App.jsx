@@ -7,6 +7,7 @@ import {
   SubsCard,
   ConnectivityCard,
   ConfirmModal,
+  ConnectionsModal,
   NodeModal,
   ToastStack,
   OnboardingScreen
@@ -19,6 +20,7 @@ import {
   useNodes,
   useProxies,
   useTraffic,
+  useConnections,
   useVersion,
   useDelays,
   useConnectivity,
@@ -26,14 +28,22 @@ import {
 } from './hooks/index.js'
 import {
   EMPTY_NODE_FORM,
+  nodeTypeDefaults,
   validateSubscriptionUrl,
   validateNodeTag,
   validateServer,
   validatePort,
   validatePassword,
   validateOptionalCredential,
+  validateHysteria2Obfs,
+  validateTransport,
+  buildTransportPayload,
+  validateUuid,
+  validateVlessFlow,
   CONNECTIVITY_SITES
 } from './utils.js'
+
+const CONNECTIONS_MODAL_MIN_WIDTH = 841
 
 export default function App() {
   const [firstLoadDone, setFirstLoadDone] = useState(false)
@@ -43,15 +53,26 @@ export default function App() {
   const [nodeForm, setNodeForm] = useState(EMPTY_NODE_FORM)
   const [nodeType, setNodeType] = useState('hysteria2')
   const [showNodeModal, setShowNodeModal] = useState(false)
+  const [showConnectionsModal, setShowConnectionsModal] = useState(false)
   const [confirmState, setConfirmState] = useState({ open: false, title: '', message: '', onConfirm: null })
+
+  const clashApiBase = useMemo(() => '/api/clash', [])
 
   const { toasts, showToast } = useToast()
   const { apiCall } = useApi({ loadingAction, setLoadingAction })
   const { status, fetchStatus } = useStatus()
-  const { subs, setSubs, fetchSubs } = useSubs()
-  const { nodes, setNodes, fetchNodes } = useNodes()
+  const { subs, fetchSubs } = useSubs()
+  const { nodes, fetchNodes } = useNodes()
   const { primaryGroupName, primaryGroup, fetchProxies } = useProxies(status)
   const { traffic, closeSockets } = useTraffic(status)
+  const {
+    connectionsInfo,
+    connectionsLoading,
+    connectionsError,
+    fetchConnections,
+    closeConnection,
+    closeAllConnections,
+  } = useConnections(status, clashApiBase)
   const { versionInfo, fetchVersion } = useVersion()
   const { delays, testingNodes, testingGroup, testDelay, testGroupDelays, clearDelays } = useDelays()
   const { 
@@ -84,8 +105,6 @@ export default function App() {
       root.removeAttribute('data-embed-mode')
     }
   }, [])
-
-  const clashApiBase = useMemo(() => '/api/clash', [])
 
   const nodeMetaMap = useMemo(() => {
     const map = new Map()
@@ -133,8 +152,11 @@ export default function App() {
     return tasks
   }, [fetchStatus, fetchSubs, fetchNodes, fetchProxies, status.running])
 
+  const connectionPollingTasks = useMemo(() => [fetchConnections], [fetchConnections])
+
   // 使用统一的轮询管理（始终启用，由 tasks 数组内部决定是否执行）
   usePolling(pollingTasks, true)
+  usePolling(connectionPollingTasks, showConnectionsModal && status.running)
 
   // 始终获取版本信息；后端会在服务停止时仅返回当前版本而不检测更新
   useEffect(() => {
@@ -161,6 +183,17 @@ export default function App() {
     }
   }, [status.running, clearDelays, clearConnectivity])
 
+  useEffect(() => {
+    const mediaQuery = window.matchMedia(`(max-width: ${CONNECTIONS_MODAL_MIN_WIDTH - 1}px)`)
+    const handleChange = () => {
+      if (mediaQuery.matches) setShowConnectionsModal(false)
+    }
+
+    handleChange()
+    mediaQuery.addEventListener('change', handleChange)
+    return () => mediaQuery.removeEventListener('change', handleChange)
+  }, [])
+
   const handleToggleService = useCallback(async () => {
     try {
       if (status.running) {
@@ -177,6 +210,33 @@ export default function App() {
       showToast(error.message, 'error')
     }
   }, [status.running, apiCall, clearDelays, clearConnectivity, fetchStatus, showToast])
+
+  const handleSetRouteMode = useCallback(async (nextMode) => {
+    if (nextMode === status.route_mode) return
+
+    try {
+      await apiCall(
+        'route-mode',
+        { method: 'POST', body: JSON.stringify({ route_mode: nextMode }) },
+        'routeMode'
+      )
+      clearDelays()
+      clearConnectivity()
+      await fetchStatus()
+      await fetchProxies()
+      showToast(nextMode === 'global' ? '已切换为全局代理' : '已切换为分流模式', 'success')
+    } catch (error) {
+      showToast(error.message, 'error')
+    }
+  }, [
+    status.route_mode,
+    apiCall,
+    clearDelays,
+    clearConnectivity,
+    fetchStatus,
+    fetchProxies,
+    showToast
+  ])
 
   const handleSwitchProxy = useCallback(async (groupName, nodeName) => {
     try {
@@ -254,6 +314,10 @@ export default function App() {
 
   const handleAddNode = useCallback(async () => {
     const isSimpleProxy = nodeType === 'socks' || nodeType === 'http'
+    const requiresPassword = ['hysteria2', 'anytls', 'ss', 'trojan', 'tuic'].includes(nodeType)
+    const requiresUuid = ['vmess', 'vless', 'tuic'].includes(nodeType)
+    const supportsTransport = ['vmess', 'vless', 'trojan'].includes(nodeType)
+
     const tagError = validateNodeTag(nodeForm.tag)
     if (tagError) {
       showToast(tagError, 'error')
@@ -269,19 +333,61 @@ export default function App() {
       showToast(portError, 'error')
       return
     }
-    const passwordError = isSimpleProxy
-      ? validateOptionalCredential(nodeForm.password, '密码')
-      : validatePassword(nodeForm.password)
-    if (passwordError) {
-      showToast(passwordError, 'error')
-      return
-    }
     if (isSimpleProxy) {
+      const passwordError = validateOptionalCredential(nodeForm.password, '密码')
+      if (passwordError) {
+        showToast(passwordError, 'error')
+        return
+      }
       const usernameError = validateOptionalCredential(nodeForm.username, '用户名')
       if (usernameError) {
         showToast(usernameError, 'error')
         return
       }
+    } else if (requiresPassword) {
+      const passwordError = validatePassword(nodeForm.password)
+      if (passwordError) {
+        showToast(passwordError, 'error')
+        return
+      }
+    }
+    if (requiresUuid) {
+      const uuidError = validateUuid(nodeForm.uuid)
+      if (uuidError) {
+        showToast(uuidError, 'error')
+        return
+      }
+    }
+    if (supportsTransport) {
+      const transportError = validateTransport(
+        nodeForm.transport_type,
+        nodeForm.transport_path,
+        nodeForm.transport_host,
+        nodeForm.grpc_service_name,
+      )
+      if (transportError) {
+        showToast(transportError, 'error')
+        return
+      }
+    }
+    if (nodeType === 'vless') {
+      const flowError = validateVlessFlow(nodeForm.flow)
+      if (flowError) {
+        showToast(flowError, 'error')
+        return
+      }
+      const hasRealityConfig = nodeForm.reality_public_key?.trim() || nodeForm.reality_short_id?.trim()
+      if (hasRealityConfig && !nodeForm.client_fingerprint?.trim()) {
+        showToast('Reality 节点必须配置 TLS 指纹（uTLS）', 'error')
+        return
+      }
+    }
+    const obfsError = nodeType === 'hysteria2'
+      ? validateHysteria2Obfs(nodeForm.obfs_type, nodeForm.obfs_password)
+      : null
+    if (obfsError) {
+      showToast(obfsError, 'error')
+      return
     }
 
     const payload = {
@@ -294,21 +400,48 @@ export default function App() {
     if (isSimpleProxy) {
       if (nodeForm.username?.trim()) payload.username = nodeForm.username.trim()
       if (nodeForm.password?.trim()) payload.password = nodeForm.password.trim()
-    } else {
+    } else if (requiresPassword) {
       payload.password = nodeForm.password.trim()
     }
+    if (requiresUuid) payload.uuid = nodeForm.uuid.trim()
 
     if (nodeType === 'ss') {
       payload.cipher = nodeForm.cipher
     } else if (!isSimpleProxy) {
       if (nodeForm.sni?.trim()) payload.sni = nodeForm.sni.trim()
       payload.skip_cert_verify = nodeForm.skip_cert_verify
+      if (nodeForm.client_fingerprint?.trim()) payload.client_fingerprint = nodeForm.client_fingerprint.trim()
+      if (nodeType === 'hysteria2' && nodeForm.obfs_type) {
+        payload.obfs_type = nodeForm.obfs_type
+        payload.obfs_password = nodeForm.obfs_password.trim()
+      }
+    }
+    if (nodeType === 'vmess') {
+      payload.cipher = nodeForm.vmess_cipher
+      payload.alter_id = Number(nodeForm.alter_id || 0)
+      payload.tls_enabled = Boolean(nodeForm.tls_enabled)
+      if (nodeForm.packet_encoding) payload.packet_encoding = nodeForm.packet_encoding
+    }
+    if (nodeType === 'vless') {
+      payload.tls_enabled = Boolean(nodeForm.tls_enabled)
+      if (nodeForm.flow) payload.flow = nodeForm.flow
+      if (nodeForm.packet_encoding) payload.packet_encoding = nodeForm.packet_encoding
+      if (nodeForm.reality_public_key?.trim()) payload.reality_public_key = nodeForm.reality_public_key.trim()
+      if (nodeForm.reality_short_id?.trim()) payload.reality_short_id = nodeForm.reality_short_id.trim()
+    }
+    if (supportsTransport) {
+      Object.assign(payload, buildTransportPayload(nodeForm))
+    }
+    if (nodeType === 'tuic') {
+      payload.tuic_congestion_control = nodeForm.tuic_congestion_control
+      payload.tuic_udp_relay_mode = nodeForm.tuic_udp_relay_mode
+      payload.tuic_zero_rtt = Boolean(nodeForm.tuic_zero_rtt)
     }
 
     try {
       await apiCall('nodes', { method: 'POST', body: JSON.stringify(payload) }, 'addNode')
       setShowNodeModal(false)
-      setNodeForm(EMPTY_NODE_FORM)
+      setNodeForm({ ...EMPTY_NODE_FORM, ...nodeTypeDefaults(nodeType) })
       await fetchNodes()
       clearDelays()
       showToast('节点已添加', 'success')
@@ -343,6 +476,16 @@ export default function App() {
   const handleTestAllConnectivity = useCallback(() => {
     testAllConnectivity(CONNECTIVITY_SITES)
   }, [testAllConnectivity])
+
+  const handleOpenConnections = useCallback(() => {
+    if (window.matchMedia(`(max-width: ${CONNECTIONS_MODAL_MIN_WIDTH - 1}px)`).matches) {
+      showToast('移动端暂不支持连接统计面板', 'info')
+      return
+    }
+
+    setShowConnectionsModal(true)
+    fetchConnections()
+  }, [fetchConnections, showToast])
 
   const handleUpgradeClick = useCallback(async () => {
     if (!status.running) {
@@ -445,6 +588,8 @@ export default function App() {
           traffic={traffic} 
           loadingAction={loadingAction} 
           onToggleService={handleToggleService} 
+          onSetRouteMode={handleSetRouteMode}
+          onOpenConnections={handleOpenConnections}
         />
 
         <div className="content-grid">
@@ -507,6 +652,19 @@ export default function App() {
         loading={loadingAction === 'addNode'} 
         onClose={() => setShowNodeModal(false)} 
         onSubmit={handleAddNode} 
+      />
+
+      <ConnectionsModal
+        open={showConnectionsModal}
+        status={status}
+        data={connectionsInfo}
+        loading={connectionsLoading}
+        error={connectionsError}
+        onClose={() => setShowConnectionsModal(false)}
+        onRefresh={fetchConnections}
+        onCloseConnection={closeConnection}
+        onCloseAllConnections={closeAllConnections}
+        showToast={showToast}
       />
 
       <ConfirmModal

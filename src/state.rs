@@ -1,16 +1,19 @@
 use arc_swap::ArcSwap;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock};
 
-use crate::models::{Config, GitHubRelease, SubStatus};
+use crate::models::{Config, GitHubRelease, RouteMode, SubStatus};
 
 /// 应用状态容器 - 包含所有运行时状态
 /// 通过依赖注入传递，避免全局静态变量
 pub struct AppState {
     pub config: RwLock<Config>, // 使用 RwLock 支持并发读
+    pub route_mode_override: RwLock<Option<RouteMode>>,
+    pub config_path: PathBuf,
     pub config_update: Mutex<()>,
     pub sing_process: Mutex<Option<SingBoxProcess>>,
     pub sub_status: Mutex<HashMap<String, SubStatus>>,
@@ -24,13 +27,20 @@ pub struct AppState {
 
 impl AppState {
     /// 创建新的应用状态实例
+    #[cfg(test)]
     pub fn new(config: Config) -> Result<Self, reqwest::Error> {
+        Self::with_config_path(config, PathBuf::from("config.yaml"))
+    }
+
+    pub fn with_config_path(config: Config, config_path: PathBuf) -> Result<Self, reqwest::Error> {
         let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
 
         Ok(Self {
             config: RwLock::new(config),
+            route_mode_override: RwLock::new(None),
+            config_path,
             config_update: Mutex::new(()),
             sing_process: Mutex::new(None),
             sub_status: Mutex::new(HashMap::new()),
@@ -62,7 +72,6 @@ pub struct VersionCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::RouteMode;
 
     #[test]
     fn app_state_new_creates_valid_instance() {
@@ -70,10 +79,11 @@ mod tests {
             port: Some(8080),
             socks_listen: None,
             socks_port: Some(1080),
-            route_mode: Some(RouteMode::Rule),
             subs: vec!["https://example.com/sub".to_string()],
             nodes: vec![],
             custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
         };
 
         let state = AppState::new(config.clone()).unwrap();
@@ -89,6 +99,7 @@ mod tests {
             .block_on(async { state.config.read().await.clone() });
         assert_eq!(locked_config.port, Some(8080));
         assert_eq!(locked_config.subs.len(), 1);
+        assert_eq!(state.config_path, PathBuf::from("config.yaml"));
     }
 
     #[test]
@@ -97,10 +108,11 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: None,
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
         };
 
         let state = AppState::new(config).unwrap();

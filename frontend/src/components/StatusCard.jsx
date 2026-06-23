@@ -1,19 +1,30 @@
 import { 
   ArrowUp, 
   ArrowDown, 
+  Globe2,
   Power,
-  LoaderCircle 
+  Route
 } from 'lucide-react'
 import { Button, SectionCard } from './ui.jsx'
 import { classNames, formatUptime, formatSpeed } from '../utils.js'
 
-export function StatusCard({ status, traffic, loadingAction, onToggleService }) {
+export function StatusCard({
+  status,
+  traffic,
+  loadingAction,
+  onToggleService,
+  onSetRouteMode,
+  onOpenConnections
+}) {
   const sourceText = status.config_source === 'cache'
     ? '缓存配置'
     : status.config_source === 'generated'
       ? '最新配置'
       : null
   const runningText = `PID: ${status.pid ?? '--'} · 运行时长: ${formatUptime(status.uptime_secs)}${sourceText ? ` · ${sourceText}` : ''}`
+  const isGlobalMode = status.route_mode === 'global'
+  const modeSwitching = loadingAction === 'routeMode'
+  const modeControlDisabled = modeSwitching || status.initializing
 
   return (
     <SectionCard className="status-card" bodyClassName="status-card-body" header={null}>
@@ -33,7 +44,7 @@ export function StatusCard({ status, traffic, loadingAction, onToggleService }) 
         </div>
       </div>
 
-      <div className="traffic-chip">
+      <button type="button" className="traffic-chip" onClick={onOpenConnections} title="查看连接统计">
         <div className="traffic-item">
           <ArrowUp size={14} className="traffic-icon up" />
           <span>{formatSpeed(traffic.up)}</span>
@@ -42,9 +53,35 @@ export function StatusCard({ status, traffic, loadingAction, onToggleService }) 
           <ArrowDown size={14} className="traffic-icon down" />
           <span>{formatSpeed(traffic.down)}</span>
         </div>
-      </div>
+      </button>
 
       <div className="status-card-spacer" />
+      <div className="route-mode-segment" role="group" aria-label="代理模式">
+        <button
+          type="button"
+          className={classNames('route-mode-option', !isGlobalMode && 'active')}
+          disabled={modeControlDisabled}
+          aria-pressed={!isGlobalMode}
+          onClick={() => {
+            if (isGlobalMode) onSetRouteMode('rule')
+          }}
+        >
+          <Route size={13} />
+          <span>分流模式</span>
+        </button>
+        <button
+          type="button"
+          className={classNames('route-mode-option', isGlobalMode && 'active')}
+          disabled={modeControlDisabled}
+          aria-pressed={isGlobalMode}
+          onClick={() => {
+            if (!isGlobalMode) onSetRouteMode('global')
+          }}
+        >
+          <Globe2 size={13} />
+          <span>{modeSwitching ? '切换中' : '全局代理'}</span>
+        </button>
+      </div>
       <Button 
         tone={status.running ? 'danger' : 'success'} 
         icon={<Power size={14} />} 

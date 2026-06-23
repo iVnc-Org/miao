@@ -5,11 +5,12 @@ use tokio::time::Duration;
 
 use crate::error::AppError;
 use crate::models::{
-    ApiResponse, ConnectivityResult, StatusData, DEFAULT_SOCKS_LISTEN, DEFAULT_SOCKS_PORT,
+    ApiResponse, ConnectivityResult, RouteMode, RouteModeRequest, StatusData,
+    DEFAULT_SOCKS_LISTEN, DEFAULT_SOCKS_PORT,
 };
 use crate::responses::{status_error, success, success_no_data, HandlerResult};
 use crate::services::{
-    config::{gen_config, restore_config_from_cache, save_config_cache},
+    config::{apply_runtime_config_change, gen_config, restore_config_from_cache, save_config_cache},
     proxy::restore_last_proxy,
     singbox::{get_sing_box_home, start_sing_internal, stop_sing_internal},
 };
@@ -20,7 +21,7 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> Json<ApiResponse<
     let (running, pid, uptime_secs) = {
         let mut lock = state.sing_process.lock().await;
 
-        let result = if let Some(ref mut proc) = *lock {
+        if let Some(ref mut proc) = *lock {
             match proc.child.try_wait() {
                 Ok(Some(_)) => {
                     *lock = None;
@@ -34,8 +35,7 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> Json<ApiResponse<
             }
         } else {
             (false, None, None)
-        };
-        result
+        }
     }; // sing_process 锁在此处释放
 
     let initializing = state
@@ -43,12 +43,18 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> Json<ApiResponse<
         .load(std::sync::atomic::Ordering::Relaxed);
     let warning = state.config_warning.lock().await.clone();
     let config_source = state.config_source.lock().await.clone();
+    let route_mode = state
+        .route_mode_override
+        .read()
+        .await
+        .unwrap_or(RouteMode::default());
 
     success(
         if running { "running" } else { "stopped" },
         StatusData {
             running,
             initializing,
+            route_mode,
             pid,
             uptime_secs,
             warning,
@@ -113,6 +119,61 @@ pub async fn start_service(State(state): State<Arc<AppState>>) -> HandlerResult 
 pub async fn stop_service(State(state): State<Arc<AppState>>) -> Json<ApiResponse<()>> {
     stop_sing_internal(&state).await;
     success_no_data("sing-box stopped")
+}
+
+async fn sing_box_is_running(state: &Arc<AppState>) -> bool {
+    let mut lock = state.sing_process.lock().await;
+
+    match &mut *lock {
+        Some(proc) => match proc.child.try_wait() {
+            Ok(Some(_)) => {
+                *lock = None;
+                false
+            }
+            Ok(None) => true,
+            Err(_) => false,
+        },
+        None => false,
+    }
+}
+
+pub async fn set_route_mode(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RouteModeRequest>,
+) -> HandlerResult {
+    let _config_update = state.config_update.lock().await;
+    let was_running = sing_box_is_running(&state).await;
+    let old_config = state.config.read().await.clone();
+    let current_route_mode = state
+        .route_mode_override
+        .read()
+        .await
+        .unwrap_or(RouteMode::default());
+
+    if current_route_mode == req.route_mode {
+        return Ok(success_no_data("Route mode unchanged"));
+    }
+
+    let mut old_runtime_config = old_config.clone();
+    old_runtime_config.route_mode = current_route_mode;
+    let mut new_runtime_config = old_config.clone();
+    new_runtime_config.route_mode = req.route_mode;
+
+    let result = apply_runtime_config_change(
+        &state,
+        &old_runtime_config,
+        &new_runtime_config,
+        was_running,
+    )
+    .await;
+
+    match result {
+        Ok(_) if was_running => Ok(success_no_data(
+            "Route mode updated for current session and sing-box restarted",
+        )),
+        Ok(_) => Ok(success_no_data("Route mode updated for current session")),
+        Err(e) => Err(status_error(StatusCode::INTERNAL_SERVER_ERROR, e)),
+    }
 }
 
 #[derive(Deserialize)]
@@ -192,7 +253,7 @@ mod tests {
     use axum::extract::State;
 
     use super::{get_status, socks_proxy_url};
-    use crate::models::Config;
+    use crate::models::{Config, RouteMode};
     use crate::test_support::app_state;
 
     #[tokio::test]
@@ -201,10 +262,11 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: None,
-            route_mode: None,
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            route_mode: Default::default(),
+            vps_ip: None,
         });
 
         let axum::response::Json(response) = get_status(State(state)).await;
@@ -222,5 +284,45 @@ mod tests {
         assert_eq!(socks_proxy_url("0.0.0.0", 1080), "socks5h://127.0.0.1:1080");
         assert_eq!(socks_proxy_url("::", 1080), "socks5h://[::1]:1080");
         assert_eq!(socks_proxy_url("::1", 1080), "socks5h://[::1]:1080");
+    }
+
+    #[tokio::test]
+    async fn get_status_reports_route_mode_override_without_mutating_config() {
+        let state = app_state(Config {
+            port: None,
+            socks_listen: None,
+            socks_port: None,
+            subs: vec![],
+            nodes: vec![],
+            custom_rules: vec![],
+            route_mode: RouteMode::Rule,
+            vps_ip: None,
+        });
+        *state.route_mode_override.write().await = Some(RouteMode::Global);
+
+        let axum::response::Json(response) = get_status(State(state.clone())).await;
+
+        let data = response.data.unwrap();
+        assert_eq!(data.route_mode, RouteMode::Global);
+        assert_eq!(state.config.read().await.route_mode, RouteMode::Rule);
+    }
+
+    #[tokio::test]
+    async fn get_status_ignores_persisted_route_mode_without_override() {
+        let state = app_state(Config {
+            port: None,
+            socks_listen: None,
+            socks_port: None,
+            subs: vec![],
+            nodes: vec![],
+            custom_rules: vec![],
+            route_mode: RouteMode::Global,
+            vps_ip: None,
+        });
+
+        let axum::response::Json(response) = get_status(State(state)).await;
+
+        let data = response.data.unwrap();
+        assert_eq!(data.route_mode, RouteMode::Tunnel);
     }
 }

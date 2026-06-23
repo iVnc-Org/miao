@@ -16,10 +16,46 @@ export const EMPTY_NODE_FORM = {
   server_port: 443,
   password: '',
   username: '',
+  uuid: '',
+  alter_id: 0,
   sni: '',
   cipher: '2022-blake3-aes-128-gcm',
+  vmess_cipher: 'auto',
   skip_cert_verify: false,
+  tls_enabled: true,
+  transport_type: 'tcp',
+  transport_path: '',
+  transport_host: '',
+  grpc_service_name: '',
+  client_fingerprint: '',
+  reality_public_key: '',
+  reality_short_id: '',
+  flow: '',
+  packet_encoding: '',
+  tuic_congestion_control: 'cubic',
+  tuic_udp_relay_mode: 'native',
+  tuic_zero_rtt: false,
+  obfs_type: '',
+  obfs_password: '',
 }
+
+export const NODE_TYPE_OPTIONS = [
+  { value: 'hysteria2', label: 'Hysteria2' },
+  { value: 'anytls', label: 'AnyTLS' },
+  { value: 'ss', label: 'Shadowsocks' },
+  { value: 'socks', label: 'SOCKS' },
+  { value: 'http', label: 'HTTP' },
+  { value: 'vmess', label: 'VMess' },
+  { value: 'vless', label: 'VLESS' },
+  { value: 'trojan', label: 'Trojan' },
+  { value: 'tuic', label: 'TUIC' },
+]
+
+export const HYSTERIA2_OBFS_OPTIONS = [
+  { value: '', label: '禁用混淆' },
+  { value: 'salamander', label: 'Salamander' },
+  { value: 'gecko', label: 'Gecko' },
+]
 
 export const CIPHER_OPTIONS = [
   '2022-blake3-aes-128-gcm',
@@ -29,6 +65,69 @@ export const CIPHER_OPTIONS = [
   'aes-256-gcm',
   'chacha20-ietf-poly1305',
 ]
+
+export const VMESS_CIPHER_OPTIONS = ['auto', 'none', 'zero', 'aes-128-gcm', 'chacha20-poly1305']
+
+export const TRANSPORT_OPTIONS = [
+  { value: 'tcp', label: 'TCP' },
+  { value: 'ws', label: 'WebSocket' },
+  { value: 'http', label: 'HTTP' },
+  { value: 'h2', label: 'HTTP/2' },
+  { value: 'grpc', label: 'gRPC' },
+]
+
+export const CLIENT_FINGERPRINT_OPTIONS = [
+  { value: '', label: '默认' },
+  { value: 'chrome', label: 'Chrome' },
+  { value: 'firefox', label: 'Firefox' },
+  { value: 'edge', label: 'Edge' },
+  { value: 'safari', label: 'Safari' },
+  { value: 'ios', label: 'iOS' },
+  { value: 'android', label: 'Android' },
+  { value: 'random', label: 'Random' },
+  { value: 'randomized', label: 'Randomized' },
+]
+
+export const PACKET_ENCODING_OPTIONS = [
+  { value: '', label: '默认' },
+  { value: 'xudp', label: 'xudp' },
+  { value: 'packetaddr', label: 'packetaddr' },
+]
+
+export const TUIC_CONGESTION_OPTIONS = [
+  { value: 'cubic', label: 'cubic' },
+  { value: 'new_reno', label: 'new_reno' },
+  { value: 'bbr', label: 'bbr' },
+]
+
+export const TUIC_UDP_RELAY_OPTIONS = [
+  { value: 'native', label: 'native' },
+  { value: 'quic', label: 'quic' },
+]
+
+export function nodeTypeDefaults(type) {
+  return {
+    tls_enabled: !['ss', 'vmess'].includes(type),
+    cipher: '2022-blake3-aes-128-gcm',
+    vmess_cipher: 'auto',
+    sni: '',
+    skip_cert_verify: false,
+    transport_type: 'tcp',
+    transport_path: '',
+    transport_host: '',
+    grpc_service_name: '',
+    client_fingerprint: '',
+    reality_public_key: '',
+    reality_short_id: '',
+    flow: '',
+    packet_encoding: '',
+    tuic_congestion_control: 'cubic',
+    tuic_udp_relay_mode: 'native',
+    tuic_zero_rtt: false,
+    obfs_type: '',
+    obfs_password: '',
+  }
+}
 
 export function classNames(...items) {
   return items.filter(Boolean).join(' ')
@@ -52,6 +151,14 @@ export function formatSpeed(bytes) {
   return `${value.toFixed(value >= 100 ? 0 : 1)} ${units[index]}`
 }
 
+export function formatBytes(bytes) {
+  if (!bytes) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
+  const value = bytes / 1024 ** index
+  return `${value.toFixed(value >= 100 ? 0 : 1)} ${units[index]}`
+}
+
 export function getDelayTone(delay) {
   if (delay === undefined || delay === null) return 'neutral'
   if (delay < 0) return 'timeout'
@@ -70,6 +177,10 @@ export function protocolLabel(type) {
   const map = {
     hysteria2: 'hysteria2',
     anytls: 'anytls',
+    vmess: 'vmess',
+    vless: 'vless',
+    trojan: 'trojan',
+    tuic: 'tuic',
     shadowsocks: 'shadowsocks',
     ss: 'shadowsocks',
     socks: 'SOCKS',
@@ -106,8 +217,8 @@ export function validateSubscriptionUrl(url) {
 
 export function validateNodeTag(tag) {
   if (!tag || !tag.trim()) return '节点名称不能为空'
-  if (tag.length > 64) return '节点名称不能超过 64 个字符'
-  if (!/^[a-zA-Z0-9\-_\s]+$/.test(tag)) return '节点名称只能包含字母、数字、空格、下划线和连字符'
+  if (Array.from(tag).length > 64) return '节点名称不能超过 64 个字符'
+  if (!/^[\p{L}\p{N}\-_\s]+$/u.test(tag)) return '节点名称只能包含字母、数字、空格、下划线和连字符'
   return null
 }
 
@@ -158,5 +269,55 @@ export function validatePassword(password) {
 export function validateOptionalCredential(value, label) {
   if (!value) return null
   if (value.length > 256) return `${label}过长（最多 256 个字符）`
+  return null
+}
+
+export function validateUuid(uuid) {
+  if (!uuid || !uuid.trim()) return 'UUID 不能为空'
+  if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(uuid.trim())) {
+    return 'UUID 格式无效'
+  }
+  return null
+}
+
+export function validateTransport(type, path, host, serviceName) {
+  if (!['tcp', 'ws', 'http', 'h2', 'grpc'].includes(type)) return '不支持的传输层类型'
+  if (['ws', 'http', 'h2'].includes(type)) {
+    if (path?.trim() && !path.trim().startsWith('/')) return '传输层路径必须以 / 开头'
+    if (host?.trim() && /\s/.test(host.trim())) return 'Host 不能包含空白字符'
+  }
+  if (type === 'grpc' && serviceName?.length > 256) return 'gRPC service name 过长'
+  return null
+}
+
+export function buildTransportPayload(form) {
+  const payload = { transport_type: form.transport_type }
+
+  if (['ws', 'http', 'h2'].includes(form.transport_type)) {
+    if (form.transport_path?.trim()) payload.transport_path = form.transport_path.trim()
+    if (form.transport_host?.trim()) payload.transport_host = form.transport_host.trim()
+  }
+
+  if (form.transport_type === 'grpc' && form.grpc_service_name?.trim()) {
+    payload.grpc_service_name = form.grpc_service_name.trim()
+  }
+
+  return payload
+}
+
+export function validateVlessFlow(flow) {
+  if (!flow) return null
+  if (flow !== 'xtls-rprx-vision') return '不支持的 VLESS flow'
+  return null
+}
+
+export function validateHysteria2Obfs(type, password) {
+  if (!type) {
+    if (password?.trim()) return '请先选择混淆类型'
+    return null
+  }
+  if (!['salamander', 'gecko'].includes(type)) return '不支持的 Hysteria2 混淆类型'
+  if (!password || !password.trim()) return '混淆密码不能为空'
+  if (password.length > 256) return '混淆密码过长（最多 256 个字符）'
   return null
 }

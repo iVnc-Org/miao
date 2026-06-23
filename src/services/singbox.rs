@@ -57,7 +57,6 @@ pub fn extract_sing_box() -> AppResult<PathBuf> {
         fs::write(&site_rule_path, SITE_RULE_BINARY)
             .map_err(|e| AppError::context("Failed to write geosite rule file", e))?;
     }
-
     let dashboard_dir = sing_box_home.join("dashboard");
     if !dashboard_dir.exists() {
         fs::create_dir_all(&dashboard_dir)
