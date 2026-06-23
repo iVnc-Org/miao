@@ -654,8 +654,86 @@ html[data-embed-mode='true'] .right-column {
 }
 .subscription-add-row input:focus,
 .field input:focus,
-.field select:focus {
+.field select:focus,
+.field textarea:focus {
     border-color: var(--accent);
+}
+.field textarea {
+    width: 100%;
+    min-height: 76px;
+    padding: 8px 10px;
+    border-radius: 5px;
+    border: 1px solid var(--border);
+    background: var(--surface-soft);
+    color: var(--text);
+    outline: none;
+    resize: vertical;
+}
+.tun-process-body {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 12px 16px;
+}
+.tun-process-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 500;
+}
+.tun-process-toggle input {
+    width: 15px;
+    height: 15px;
+    accent-color: var(--accent);
+}
+.tun-process-segment {
+    display: inline-flex;
+    align-self: flex-start;
+    align-items: center;
+    gap: 2px;
+    padding: 3px;
+    border: 1px solid var(--border-soft);
+    border-radius: 8px;
+    background: var(--surface-soft);
+}
+.tun-process-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.tun-process-field span {
+    color: var(--text-muted);
+    font-size: 11px;
+}
+.tun-process-suggestions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+}
+.process-chip {
+    min-height: 24px;
+    padding: 3px 7px;
+    border-radius: 4px;
+    border: 1px solid var(--border-soft);
+    background: var(--surface-soft);
+    color: var(--text-muted);
+    font-size: 11px;
+}
+.process-chip:hover:not(:disabled) {
+    color: var(--text);
+    border-color: var(--border);
+}
+.process-chip:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+}
+.tun-process-note {
+    color: var(--text-muted);
+    font-size: 11px;
+    line-height: 1.5;
 }
 .status-icon-badge {
     width: 28px;

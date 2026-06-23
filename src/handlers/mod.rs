@@ -4,4 +4,5 @@ pub mod proxy;
 pub mod service;
 pub mod static_assets;
 pub mod subs;
+pub mod tun_process;
 pub mod version;

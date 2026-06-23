@@ -1,7 +1,7 @@
 import { memo } from 'react'
 import { Plus, Shield, Trash2 } from 'lucide-react'
 import { Button, SectionCard } from './ui.jsx'
-import { classNames, protocolLabel } from '../utils.js'
+import { protocolLabel } from '../utils.js'
 
 const NodeRow = memo(function NodeRow({ node, onDelete }) {
   return (

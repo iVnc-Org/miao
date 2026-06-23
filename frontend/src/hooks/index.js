@@ -4,6 +4,7 @@ export {
   useStatus,
   useSubs,
   useNodes,
+  useTunProcess,
   useProxies,
   useTraffic,
   useConnections,

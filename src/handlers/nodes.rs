@@ -133,7 +133,10 @@ fn build_node_value(req: &NodeRequest, node_type: &str) -> JsonValue {
     match node_type {
         "anytls" => {
             let mut obj = base_outbound("anytls", req);
-            obj.insert("password".to_string(), json!(non_empty(&req.password).unwrap_or_default()));
+            obj.insert(
+                "password".to_string(),
+                json!(non_empty(&req.password).unwrap_or_default()),
+            );
             obj.insert(
                 "tls".to_string(),
                 build_tls(req, true, true).expect("AnyTLS TLS is always enabled"),
@@ -146,7 +149,10 @@ fn build_node_value(req: &NodeRequest, node_type: &str) -> JsonValue {
                 "method".to_string(),
                 json!(non_empty(&req.cipher).unwrap_or("2022-blake3-aes-128-gcm")),
             );
-            obj.insert("password".to_string(), json!(non_empty(&req.password).unwrap_or_default()));
+            obj.insert(
+                "password".to_string(),
+                json!(non_empty(&req.password).unwrap_or_default()),
+            );
             JsonValue::Object(obj)
         }
         "vmess" => {
@@ -187,7 +193,10 @@ fn build_node_value(req: &NodeRequest, node_type: &str) -> JsonValue {
         }
         "trojan" => {
             let mut obj = base_outbound("trojan", req);
-            obj.insert("password".to_string(), json!(non_empty(&req.password).unwrap_or_default()));
+            obj.insert(
+                "password".to_string(),
+                json!(non_empty(&req.password).unwrap_or_default()),
+            );
             if let Some(tls) = build_tls(req, true, true) {
                 obj.insert("tls".to_string(), tls);
             }
@@ -202,7 +211,10 @@ fn build_node_value(req: &NodeRequest, node_type: &str) -> JsonValue {
                 "uuid".to_string(),
                 json!(non_empty(&req.uuid).unwrap_or_default()),
             );
-            obj.insert("password".to_string(), json!(non_empty(&req.password).unwrap_or_default()));
+            obj.insert(
+                "password".to_string(),
+                json!(non_empty(&req.password).unwrap_or_default()),
+            );
             obj.insert(
                 "congestion_control".to_string(),
                 json!(non_empty(&req.tuic_congestion_control).unwrap_or("cubic")),
@@ -234,7 +246,10 @@ fn build_node_value(req: &NodeRequest, node_type: &str) -> JsonValue {
         }
         _ => {
             let mut obj = base_outbound("hysteria2", req);
-            obj.insert("password".to_string(), json!(non_empty(&req.password).unwrap_or_default()));
+            obj.insert(
+                "password".to_string(),
+                json!(non_empty(&req.password).unwrap_or_default()),
+            );
             obj.insert(
                 "tls".to_string(),
                 build_tls(req, true, true).expect("Hysteria2 TLS is always enabled"),
@@ -393,6 +408,7 @@ mod tests {
                 "not-json".to_string(),
             ],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         });
@@ -475,6 +491,7 @@ mod tests {
                 r#"{"type":"hysteria2","tag":"no-bw-node","server":"example.com","server_port":443,"password":"secret","tls":{"enabled":true}}"#.to_string(),
             ],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         });
@@ -507,6 +524,7 @@ mod tests {
                 r#"{"type":"hysteria2","tag":"invalid-server","server_port":443,"password":"secret"}"#.to_string(),
             ],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         });
@@ -528,6 +546,7 @@ mod tests {
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         });
@@ -553,6 +572,7 @@ mod tests {
                 r#"{"type":"hysteria2"}"#.to_string(),
             ],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         });
@@ -579,6 +599,7 @@ mod tests {
                 r#"{"type":"http","tag":"http-node","server":"http.example.com","server_port":8080,"username":"u","password":"p"}"#.to_string(),
             ],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         });
@@ -610,6 +631,7 @@ mod tests {
                 r#"{"type":"hysteria2","tag":"third","server":"third.example.com","server_port":443,"password":"secret"}"#.to_string(),
             ],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         });
@@ -636,6 +658,7 @@ mod tests {
                 r#"{"type":"hysteria2","tag":"localhost-ipv6","server":"::1","server_port":443,"password":"secret"}"#.to_string(),
             ],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         });
@@ -661,6 +684,7 @@ mod tests {
                 r#"{"type":"hysteria2","tag":"日本サーバー","server":"jp.example.com","server_port":443,"password":"secret"}"#.to_string(),
             ],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         });

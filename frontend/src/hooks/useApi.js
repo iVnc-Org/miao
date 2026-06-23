@@ -93,6 +93,50 @@ export function useNodes() {
   return { nodes, setNodes, fetchNodes }
 }
 
+export const DEFAULT_TUN_PROCESS = {
+  enabled: false,
+  mode: 'global_bypass',
+  match: {
+    names: [],
+    paths: [],
+    path_regex: [],
+  },
+  dns_follow_process: true,
+  bypass_action: 'bypass',
+}
+
+export function normalizeTunProcessConfig(config) {
+  return {
+    ...DEFAULT_TUN_PROCESS,
+    ...(config || {}),
+    match: {
+      ...DEFAULT_TUN_PROCESS.match,
+      ...((config && config.match) || {}),
+    },
+  }
+}
+
+export function useTunProcess() {
+  const [tunProcess, setTunProcess] = useState(DEFAULT_TUN_PROCESS)
+
+  const fetchTunProcess = useCallback(async () => {
+    try {
+      const response = await fetch('/api/tun-process')
+      const payload = await response.json()
+      if (payload.success && payload.data) {
+        const config = normalizeTunProcessConfig(payload.data)
+        setTunProcess(config)
+        return config
+      }
+    } catch {
+      // ignore
+    }
+    return null
+  }, [])
+
+  return { tunProcess, setTunProcess, fetchTunProcess }
+}
+
 export function useProxies(status) {
   const [proxies, setProxies] = useState({})
 

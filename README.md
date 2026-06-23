@@ -50,7 +50,7 @@ Miao 会按以下顺序选择配置文件：
 
 如果启动时没有找到配置文件，Miao 只会使用内存中的默认配置并进入引导页面，不会主动写入空配置文件。只有通过面板添加订阅、添加节点、自动初始化 VPS，或其它需要持久化的配置变更时，才会写入配置文件。
 
-运行时文件（sing-box、生成的 `config.json`、缓存、最后选择的节点）仍放在 `/tmp/miao-sing-box`，避免频繁写入闪存。通过面板切换“分流/全局”只更新当前运行会话，不会写入配置文件；配置文件中的 `route_mode` 会被忽略，启动默认使用分流模式。
+sing-box 二进制和生成的 `config.json` 放在 `/tmp/miao-sing-box`；缓存、最后选择的节点和运行状态放在运行目录下的 `data/cache`。通过面板切换“分流/全局”不写入 `config.yaml`，但会写入运行状态；Miao 重启后会恢复上次的启动/停止状态和代理模式。配置文件中的 `route_mode` 会被忽略。
 
 ### 进阶：手动编写配置文件
 
@@ -77,11 +77,38 @@ miao 默认会开启一个仅本机可访问的 SOCKS5 入站，监听 `127.0.0.
 
 `route_mode` 默认是 `tunnel`：公网流量和 DNS 默认都经代理转发，不做国内外分流；`127.0.0.1`、`localhost` 和其他私网地址仍保持直连。设置为 `global` 时保留私网直连和本地 DNS 兼容性；设置为 `rule` 时恢复原先的国内直连、国外代理策略。
 
+### TUN 进程代理
+
+面板中的“进程代理”是基于 sing-box TUN route rule 的高级选项，支持两种模式：
+
+- 清单绕过：默认仍接管全局 TUN 流量，清单内进程绕过代理。
+- 仅清单代理：默认不接管，只有清单内进程走 TUN 代理；这就是局部代理模式。
+
+进程清单填写真实可执行文件名，不是完整命令行参数。例如 `curl`、`git`、`git-remote-https`、`ssh`。`git clone https://...` 实际联网进程可能是 `git-remote-https`；`git clone git@...` 实际联网进程可能是 `ssh`。
+
+也可以手动写入配置：
+
+```yaml
+tun_process:
+  enabled: true
+  mode: process_only   # global_bypass | process_only
+  match:
+    names:
+      - curl
+      - git
+      - git-remote-https
+      - ssh
+  dns_follow_process: true
+  bypass_action: bypass
+```
+
+进程匹配主要适用于本机进程。部分系统的 DNS 可能由 `systemd-resolved`、`dnsmasq` 或浏览器网络服务代发，这种情况下 DNS 是否能完全跟随原始进程取决于系统行为。
+
 ### 订阅缓存
 
 miao 会把上一次成功生成的 sing-box 配置持久化到 `data/cache/config.json`，并在 `data/cache/config.meta.json` 记录当前配置指纹。重启时如果缓存和当前 `config.yaml` 匹配，会优先使用缓存启动，不会自动刷新订阅；只有没有匹配缓存、手动刷新订阅、或通过面板修改订阅/节点时才会重新拉取订阅。
 
-节点选择会持久化到 `data/cache/last_proxy.json`。重启后 sing-box 启动成功时，miao 会自动恢复上次选择的节点；如果订阅刷新后该节点不存在，则跳过恢复并保留默认选择。
+节点选择会持久化到 `data/cache/last_proxy.json`，启动/停止状态和上次运行的代理模式会持久化到 `data/cache/runtime.json`。重启后 sing-box 启动成功时，miao 会自动恢复上次选择的节点；如果订阅刷新后该节点不存在，则跳过恢复并保留默认选择。
 
 如果订阅链接是短时效链接，建议在链接有效期内完成首次添加或手动刷新。之后只要 `data/cache` 被持久化，重启不会依赖订阅链接仍然有效。容器部署时需要把运行目录或至少 `data/cache` 挂载到持久卷。
 

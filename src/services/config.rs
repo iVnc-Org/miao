@@ -10,7 +10,10 @@ use tokio::time::Duration;
 use tracing::{error, info, warn};
 
 use crate::error::{AppError, AppResult};
-use crate::models::{Config, RouteMode, SubStatus, DEFAULT_SOCKS_LISTEN, DEFAULT_SOCKS_PORT};
+use crate::models::{
+    BypassAction, Config, RouteMode, SubStatus, TunProcessConfig, TunProcessMatch, TunProcessMode,
+    DEFAULT_SOCKS_LISTEN, DEFAULT_SOCKS_PORT,
+};
 use crate::services::{
     proxy::restore_last_proxy,
     singbox::{
@@ -23,7 +26,7 @@ use crate::state::AppState;
 const CONFIG_CACHE_DIR: &str = "data/cache";
 const CONFIG_CACHE_FILE: &str = "config.json";
 const CONFIG_CACHE_META_FILE: &str = "config.meta.json";
-const CONFIG_CACHE_SCHEMA_VERSION: u32 = 2;
+const CONFIG_CACHE_SCHEMA_VERSION: u32 = 3;
 const MAX_CONCURRENT_SUBS: usize = 5;
 
 #[derive(Serialize, Deserialize)]
@@ -48,6 +51,7 @@ fn config_cache_fingerprint(config: &Config) -> AppResult<String> {
         "subs": &config.subs,
         "nodes": &config.nodes,
         "custom_rules": &config.custom_rules,
+        "tun_process": &config.tun_process,
     });
     let bytes = serde_json::to_vec(&value)?;
     let mut hasher = Sha256::new();
@@ -324,6 +328,57 @@ pub async fn apply_config_change(
                     apply_err, rollback_err
                 ))),
             }
+        }
+    }
+}
+
+pub async fn apply_persistent_config_change(
+    state: &Arc<AppState>,
+    old_config: &Config,
+    new_config: &Config,
+    restart_if_running: bool,
+) -> AppResult<()> {
+    if restart_if_running {
+        return apply_config_change(state, old_config, new_config).await;
+    }
+
+    let route_override = *state.route_mode_override.read().await;
+    let runtime_old_config = config_with_route_override(old_config, route_override);
+    let runtime_new_config = config_with_route_override(new_config, route_override);
+    let persisted_new_config = config_with_route_override(new_config, None);
+
+    if config_has_no_nodes(new_config) {
+        save_config_to(&state.config_path, &persisted_new_config).await?;
+        clear_generated_config_state().await;
+        *state.config.write().await = persisted_new_config;
+        *state.config_source.lock().await = None;
+        *state.config_warning.lock().await = None;
+        return Ok(());
+    }
+
+    match regenerate_without_restart_runtime(&runtime_new_config, state).await {
+        Ok(has_sub_nodes) => {
+            match save_config_to(&state.config_path, &persisted_new_config).await {
+                Ok(()) => {
+                    *state.config.write().await = persisted_new_config;
+                    update_config_warning(&runtime_new_config, state, has_sub_nodes).await;
+                    Ok(())
+                }
+                Err(save_err) => {
+                    let _ = restore_previous_stopped_config(&runtime_old_config, state).await;
+                    Err(AppError::context(
+                        "Failed to persist config change; restored previous stopped config",
+                        save_err,
+                    ))
+                }
+            }
+        }
+        Err(apply_err) => {
+            let _ = restore_previous_stopped_config(&runtime_old_config, state).await;
+            Err(AppError::context(
+                "Failed to apply config change; restored previous stopped config",
+                apply_err,
+            ))
         }
     }
 }
@@ -708,7 +763,9 @@ fn build_sing_box_config(
         my_outbounds.into_iter().chain(final_outbounds).collect(),
     );
 
-    let mut sing_box_config = get_config_template(&config.route_mode);
+    let tun_process = config.tun_process.normalized().map_err(AppError::message)?;
+    let mut sing_box_config =
+        get_config_template(config.route_mode, &tun_process, &config.custom_rules)?;
     if let Some(inbounds) = sing_box_config["inbounds"].as_array_mut() {
         inbounds.push(serde_json::json!({
             "type": "socks",
@@ -726,12 +783,6 @@ fn build_sing_box_config(
         arr.extend(outbounds);
     }
 
-    apply_route_mode(
-        &mut sing_box_config,
-        config.route_mode,
-        &config.custom_rules,
-    );
-
     Ok(sing_box_config)
 }
 
@@ -747,72 +798,229 @@ fn parse_custom_rules(custom_rules: &[String]) -> Vec<serde_json::Value> {
     parsed
 }
 
-fn apply_route_mode(
-    sing_box_config: &mut serde_json::Value,
-    route_mode: RouteMode,
-    custom_rules: &[String],
-) {
-    if let Some(rules) = sing_box_config["route"]["rules"].as_array_mut() {
-        match route_mode {
-            RouteMode::Tunnel | RouteMode::Global => {}
-            RouteMode::Rule => {
-                let custom_rules = parse_custom_rules(custom_rules);
-                // Preserve the mandatory pre-routing actions, then let user rules take
-                // precedence over the built-in direct/proxy split rules.
-                let insertion_index = rules.len().min(2);
-                rules.splice(insertion_index..insertion_index, custom_rules);
-            }
+fn process_match_fields(
+    process_match: &TunProcessMatch,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut fields = serde_json::Map::new();
+    if !process_match.names.is_empty() {
+        fields.insert(
+            "process_name".to_string(),
+            serde_json::json!(process_match.names),
+        );
+    }
+    if !process_match.paths.is_empty() {
+        fields.insert(
+            "process_path".to_string(),
+            serde_json::json!(process_match.paths),
+        );
+    }
+    if !process_match.path_regex.is_empty() {
+        fields.insert(
+            "process_path_regex".to_string(),
+            serde_json::json!(process_match.path_regex),
+        );
+    }
+    fields
+}
+
+fn process_rule(process_match: &TunProcessMatch, extras: serde_json::Value) -> serde_json::Value {
+    let mut rule = process_match_fields(process_match);
+    if let Some(extras) = extras.as_object() {
+        for (key, value) in extras {
+            rule.insert(key.clone(), value.clone());
+        }
+    }
+    serde_json::Value::Object(rule)
+}
+
+fn bypass_or_direct_rule(
+    process_match: &TunProcessMatch,
+    bypass_action: BypassAction,
+    protocol: Option<&str>,
+) -> serde_json::Value {
+    let extras = match (bypass_action, protocol) {
+        (BypassAction::Bypass, Some(protocol)) => {
+            serde_json::json!({"protocol": protocol, "action": "bypass"})
+        }
+        (BypassAction::Bypass, None) => serde_json::json!({"action": "bypass"}),
+        (BypassAction::Direct, Some(protocol)) => serde_json::json!({
+            "protocol": protocol,
+            "action": "route",
+            "outbound": "direct"
+        }),
+        (BypassAction::Direct, None) => serde_json::json!({
+            "action": "route",
+            "outbound": "direct"
+        }),
+    };
+    process_rule(process_match, extras)
+}
+
+fn merge_process_match_into_rule(
+    mut rule: serde_json::Value,
+    process_match: &TunProcessMatch,
+) -> AppResult<serde_json::Value> {
+    let Some(obj) = rule.as_object_mut() else {
+        return Ok(rule);
+    };
+
+    for key in ["process_name", "process_path", "process_path_regex"] {
+        if obj.contains_key(key) {
+            return Err(AppError::message(format!(
+                "process_only 模式下 custom_rules 不能包含 {key}，请使用进程代理清单统一控制"
+            )));
+        }
+    }
+
+    for (key, value) in process_match_fields(process_match) {
+        obj.insert(key, value);
+    }
+    Ok(rule)
+}
+
+fn build_dns_rules(route_mode: RouteMode) -> Vec<serde_json::Value> {
+    match route_mode {
+        RouteMode::Tunnel => Vec::new(),
+        RouteMode::Global | RouteMode::Rule => {
+            vec![serde_json::json!({
+                "rule_set": ["chinasite"],
+                "action": "route",
+                "server": "local"
+            })]
         }
     }
 }
 
-fn get_config_template(route_mode: &RouteMode) -> serde_json::Value {
+fn build_default_route_rules(
+    route_mode: RouteMode,
+    custom_rules: &[String],
+) -> Vec<serde_json::Value> {
     let mut route_rules = vec![
         serde_json::json!({"action": "sniff"}),
         serde_json::json!({"protocol": "dns", "action": "hijack-dns"}),
     ];
 
-    let (dns_rules, default_domain_resolver) = match route_mode {
-        RouteMode::Tunnel => {
-            route_rules.push(
-                serde_json::json!({"ip_is_private": true, "action": "route", "outbound": "direct"}),
-            );
-            (Vec::new(), "local")
+    if route_mode == RouteMode::Rule {
+        route_rules.extend(parse_custom_rules(custom_rules));
+    }
+
+    route_rules
+        .push(serde_json::json!({"ip_is_private": true, "action": "route", "outbound": "direct"}));
+
+    if route_mode == RouteMode::Rule {
+        route_rules.push(serde_json::json!({
+            "rule_set": ["chinaip", "chinasite"],
+            "action": "route",
+            "outbound": "direct"
+        }));
+    }
+
+    route_rules
+}
+
+fn build_global_bypass_route_rules(
+    route_mode: RouteMode,
+    tun_process: &TunProcessConfig,
+    custom_rules: &[String],
+) -> Vec<serde_json::Value> {
+    let mut route_rules = Vec::new();
+
+    if tun_process.dns_follow_process {
+        route_rules.push(bypass_or_direct_rule(
+            &tun_process.r#match,
+            tun_process.bypass_action,
+            Some("dns"),
+        ));
+    }
+    route_rules.push(bypass_or_direct_rule(
+        &tun_process.r#match,
+        tun_process.bypass_action,
+        None,
+    ));
+    route_rules.extend(build_default_route_rules(route_mode, custom_rules));
+
+    route_rules
+}
+
+fn build_process_only_route_rules(
+    route_mode: RouteMode,
+    tun_process: &TunProcessConfig,
+    custom_rules: &[String],
+) -> AppResult<Vec<serde_json::Value>> {
+    let mut route_rules = vec![serde_json::json!({"action": "sniff"})];
+
+    if tun_process.dns_follow_process {
+        route_rules.push(process_rule(
+            &tun_process.r#match,
+            serde_json::json!({"protocol": "dns", "action": "hijack-dns"}),
+        ));
+    }
+
+    if route_mode == RouteMode::Rule {
+        for custom_rule in parse_custom_rules(custom_rules) {
+            route_rules.push(merge_process_match_into_rule(
+                custom_rule,
+                &tun_process.r#match,
+            )?);
         }
-        RouteMode::Global => {
-            route_rules.push(
-                serde_json::json!({"ip_is_private": true, "action": "route", "outbound": "direct"}),
-            );
-            (
-                vec![serde_json::json!({
-                    "rule_set": ["chinasite"],
-                    "action": "route",
-                    "server": "local"
-                })],
-                "local",
-            )
-        }
-        RouteMode::Rule => {
-            route_rules.push(
-                serde_json::json!({"ip_is_private": true, "action": "route", "outbound": "direct"}),
-            );
-            route_rules.push(serde_json::json!({
+    }
+
+    route_rules.push(process_rule(
+        &tun_process.r#match,
+        serde_json::json!({"ip_is_private": true, "action": "route", "outbound": "direct"}),
+    ));
+
+    if route_mode == RouteMode::Rule {
+        route_rules.push(process_rule(
+            &tun_process.r#match,
+            serde_json::json!({
                 "rule_set": ["chinaip", "chinasite"],
                 "action": "route",
                 "outbound": "direct"
-            }));
-            (
-                vec![serde_json::json!({
-                    "rule_set": ["chinasite"],
-                    "action": "route",
-                    "server": "local"
-                })],
-                "local",
-            )
-        }
-    };
+            }),
+        ));
+    }
 
-    serde_json::json!({
+    route_rules.push(process_rule(
+        &tun_process.r#match,
+        serde_json::json!({"action": "route", "outbound": "proxy"}),
+    ));
+    route_rules.push(serde_json::json!({"action": "bypass"}));
+
+    Ok(route_rules)
+}
+
+fn build_route_rules(
+    route_mode: RouteMode,
+    tun_process: &TunProcessConfig,
+    custom_rules: &[String],
+) -> AppResult<Vec<serde_json::Value>> {
+    if !tun_process.enabled {
+        return Ok(build_default_route_rules(route_mode, custom_rules));
+    }
+
+    match tun_process.mode {
+        TunProcessMode::GlobalBypass => Ok(build_global_bypass_route_rules(
+            route_mode,
+            tun_process,
+            custom_rules,
+        )),
+        TunProcessMode::ProcessOnly => {
+            build_process_only_route_rules(route_mode, tun_process, custom_rules)
+        }
+    }
+}
+
+fn get_config_template(
+    route_mode: RouteMode,
+    tun_process: &TunProcessConfig,
+    custom_rules: &[String],
+) -> AppResult<serde_json::Value> {
+    let route_rules = build_route_rules(route_mode, tun_process, custom_rules)?;
+    let dns_rules = build_dns_rules(route_mode);
+    let default_domain_resolver = "local";
+
+    Ok(serde_json::json!({
         "log": {"disabled": false, "timestamp": true, "level": "info"},
         "experimental": {"clash_api": {"external_controller": "127.0.0.1:6262"}},
         "dns": {
@@ -842,7 +1050,7 @@ fn get_config_template(route_mode: &RouteMode) -> serde_json::Value {
                 {"type": "local", "tag": "chinaip", "format": "binary", "path": "./chinaip.srs"}
             ]
         }
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -851,8 +1059,32 @@ mod tests {
         build_sing_box_config, collect_manual_outbounds, config_cache_fingerprint,
         config_with_route_override, normalize_cached_sing_box_config, save_config_to,
     };
-    use crate::models::{Config, RouteMode};
+    use crate::models::{Config, RouteMode, TunProcessConfig, TunProcessMatch, TunProcessMode};
     use serde_json::json;
+
+    fn manual_outbound() -> serde_json::Value {
+        json!({
+            "type": "hysteria2",
+            "tag": "manual-a",
+            "server": "manual.example.com",
+            "server_port": 443,
+            "password": "secret"
+        })
+    }
+
+    fn tun_process(mode: TunProcessMode) -> TunProcessConfig {
+        TunProcessConfig {
+            enabled: true,
+            mode,
+            r#match: TunProcessMatch {
+                names: vec!["curl".to_string(), "git-remote-https".to_string()],
+                paths: vec![],
+                path_regex: vec![],
+            },
+            dns_follow_process: true,
+            bypass_action: Default::default(),
+        }
+    }
 
     #[test]
     fn collect_manual_outbounds_ignores_invalid_json_nodes() {
@@ -866,6 +1098,7 @@ mod tests {
                 "{invalid-json".to_string(),
             ],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         };
@@ -890,6 +1123,7 @@ mod tests {
                 r#"{"type":"hysteria2","tag":"no-bandwidth","server":"example.com","server_port":443,"password":"secret","tls":{"enabled":true}}"#.to_string(),
             ],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         };
@@ -915,6 +1149,7 @@ mod tests {
                 r#"{"type":"http","tag":"http-a","server":"http.example.com","server_port":8080,"username":"user","password":"pass"}"#.to_string(),
             ],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         };
@@ -943,6 +1178,7 @@ mod tests {
                     .to_string(),
                 "not-json".to_string(),
             ],
+            tun_process: Default::default(),
             route_mode: RouteMode::Rule,
             vps_ip: None,
         };
@@ -999,6 +1235,152 @@ mod tests {
     }
 
     #[test]
+    fn build_sing_box_config_global_bypass_adds_process_rules_before_dns_hijack() {
+        let config = Config {
+            port: None,
+            socks_listen: None,
+            socks_port: None,
+            subs: vec![],
+            nodes: vec![],
+            custom_rules: vec![],
+            tun_process: tun_process(TunProcessMode::GlobalBypass),
+            route_mode: RouteMode::Global,
+            vps_ip: None,
+        };
+
+        let built = build_sing_box_config(
+            &config,
+            vec!["manual-a".to_string()],
+            vec![manual_outbound()],
+            vec![],
+            vec![],
+        )
+        .unwrap();
+
+        let rules = built["route"]["rules"].as_array().unwrap();
+        assert_eq!(
+            rules[0]["process_name"],
+            json!(["curl", "git-remote-https"])
+        );
+        assert_eq!(rules[0]["protocol"], "dns");
+        assert_eq!(rules[0]["action"], "bypass");
+        assert_eq!(
+            rules[1]["process_name"],
+            json!(["curl", "git-remote-https"])
+        );
+        assert_eq!(rules[1]["action"], "bypass");
+        assert_eq!(rules[2]["action"], "sniff");
+        assert_eq!(rules[3]["action"], "hijack-dns");
+    }
+
+    #[test]
+    fn build_sing_box_config_process_only_scopes_dns_and_ends_with_bypass() {
+        let config = Config {
+            port: None,
+            socks_listen: None,
+            socks_port: None,
+            subs: vec![],
+            nodes: vec![],
+            custom_rules: vec![],
+            tun_process: tun_process(TunProcessMode::ProcessOnly),
+            route_mode: RouteMode::Rule,
+            vps_ip: None,
+        };
+
+        let built = build_sing_box_config(
+            &config,
+            vec!["manual-a".to_string()],
+            vec![manual_outbound()],
+            vec![],
+            vec![],
+        )
+        .unwrap();
+
+        let rules = built["route"]["rules"].as_array().unwrap();
+        assert_eq!(rules[0]["action"], "sniff");
+        assert_eq!(rules[1]["protocol"], "dns");
+        assert_eq!(
+            rules[1]["process_name"],
+            json!(["curl", "git-remote-https"])
+        );
+        assert!(!rules.iter().any(|rule| {
+            rule["protocol"] == "dns"
+                && rule.get("process_name").is_none()
+                && rule["action"] == "hijack-dns"
+        }));
+        assert_eq!(rules.last().unwrap()["action"], "bypass");
+    }
+
+    #[test]
+    fn build_sing_box_config_process_only_scopes_custom_rules_to_processes() {
+        let config = Config {
+            port: None,
+            socks_listen: None,
+            socks_port: None,
+            subs: vec![],
+            nodes: vec![],
+            custom_rules: vec![
+                r#"{"domain_suffix":["example.com"],"action":"route","outbound":"direct"}"#
+                    .to_string(),
+            ],
+            tun_process: tun_process(TunProcessMode::ProcessOnly),
+            route_mode: RouteMode::Rule,
+            vps_ip: None,
+        };
+
+        let built = build_sing_box_config(
+            &config,
+            vec!["manual-a".to_string()],
+            vec![manual_outbound()],
+            vec![],
+            vec![],
+        )
+        .unwrap();
+
+        let rules = built["route"]["rules"].as_array().unwrap();
+        let custom_rule = rules
+            .iter()
+            .find(|rule| rule.get("domain_suffix").is_some())
+            .unwrap();
+        assert_eq!(
+            custom_rule["process_name"],
+            json!(["curl", "git-remote-https"])
+        );
+    }
+
+    #[test]
+    fn build_sing_box_config_errors_when_enabled_tun_process_has_empty_match() {
+        let config = Config {
+            port: None,
+            socks_listen: None,
+            socks_port: None,
+            subs: vec![],
+            nodes: vec![],
+            custom_rules: vec![],
+            tun_process: TunProcessConfig {
+                enabled: true,
+                mode: TunProcessMode::ProcessOnly,
+                r#match: TunProcessMatch::default(),
+                dns_follow_process: true,
+                bypass_action: Default::default(),
+            },
+            route_mode: RouteMode::Rule,
+            vps_ip: None,
+        };
+
+        let err = build_sing_box_config(
+            &config,
+            vec!["manual-a".to_string()],
+            vec![manual_outbound()],
+            vec![],
+            vec![],
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("至少需要填写"));
+    }
+
+    #[test]
     fn build_sing_box_config_global_mode_removes_split_rules() {
         let config = Config {
             port: None,
@@ -1010,6 +1392,7 @@ mod tests {
                 r#"{"domain_suffix":["example.com"],"action":"route","outbound":"direct"}"#
                     .to_string(),
             ],
+            tun_process: Default::default(),
             route_mode: RouteMode::Global,
             vps_ip: None,
         };
@@ -1052,6 +1435,7 @@ mod tests {
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: RouteMode::Global,
             vps_ip: None,
         };
@@ -1070,6 +1454,7 @@ mod tests {
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         };
@@ -1130,6 +1515,7 @@ mod tests {
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         };
@@ -1183,6 +1569,7 @@ mod tests {
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         };
@@ -1218,6 +1605,7 @@ mod tests {
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         };
@@ -1261,6 +1649,7 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: None,
+            tun_process: Default::default(),
             route_mode: RouteMode::Global,
             subs: vec![],
             nodes: vec![],
@@ -1300,6 +1689,7 @@ mod tests {
             port: None,
             socks_listen: None,
             socks_port: None,
+            tun_process: Default::default(),
             route_mode: RouteMode::Rule,
             subs: vec![],
             nodes: vec![],
@@ -1340,6 +1730,7 @@ mod tests {
             port: Some(6161),
             socks_listen: None,
             socks_port: Some(1080),
+            tun_process: Default::default(),
             route_mode: RouteMode::Tunnel,
             subs: vec!["https://example.com/sub".to_string()],
             nodes: vec![],
@@ -1383,6 +1774,7 @@ mod tests {
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         };
@@ -1403,6 +1795,7 @@ mod tests {
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         }));
@@ -1414,6 +1807,7 @@ mod tests {
             subs: vec!["https://example.com/sub".to_string()],
             nodes: vec![],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         }));
@@ -1425,6 +1819,7 @@ mod tests {
             subs: vec![],
             nodes: vec![r#"{"tag":"manual"}"#.to_string()],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         }));
@@ -1439,6 +1834,7 @@ mod tests {
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         };
@@ -1462,6 +1858,7 @@ mod tests {
                 r#"{"type":"hysteria2"}"#.to_string(), // Valid JSON but no tag
             ],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         };
@@ -1482,6 +1879,7 @@ mod tests {
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         };
@@ -1521,6 +1919,7 @@ mod tests {
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         };
@@ -1556,6 +1955,7 @@ mod tests {
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: RouteMode::Rule,
             vps_ip: None,
         };
@@ -1618,6 +2018,7 @@ mod tests {
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         };
@@ -1656,6 +2057,7 @@ mod tests {
                 "{invalid".to_string(),
                 "".to_string(),
             ],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         };
@@ -1698,6 +2100,7 @@ mod tests {
             subs: vec!["https://example.com/sub".to_string()],
             nodes: vec![],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: RouteMode::Rule,
             vps_ip: None,
         };
@@ -1743,6 +2146,7 @@ mod tests {
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: RouteMode::Rule,
             vps_ip: None,
         };
@@ -1771,6 +2175,7 @@ mod tests {
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         };

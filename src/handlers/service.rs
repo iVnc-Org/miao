@@ -5,13 +5,16 @@ use tokio::time::Duration;
 
 use crate::error::AppError;
 use crate::models::{
-    ApiResponse, ConnectivityResult, RouteMode, RouteModeRequest, StatusData,
-    DEFAULT_SOCKS_LISTEN, DEFAULT_SOCKS_PORT,
+    ApiResponse, ConnectivityResult, RouteMode, RouteModeRequest, StatusData, DEFAULT_SOCKS_LISTEN,
+    DEFAULT_SOCKS_PORT,
 };
 use crate::responses::{status_error, success, success_no_data, HandlerResult};
 use crate::services::{
-    config::{apply_runtime_config_change, gen_config, restore_config_from_cache, save_config_cache},
+    config::{
+        apply_runtime_config_change, gen_config, restore_config_from_cache, save_config_cache,
+    },
     proxy::restore_last_proxy,
+    runtime::save_running_state,
     singbox::{get_sing_box_home, start_sing_internal, stop_sing_internal},
 };
 use crate::state::AppState;
@@ -66,7 +69,12 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> Json<ApiResponse<
 pub async fn start_service(State(state): State<Arc<AppState>>) -> HandlerResult {
     let config_path = get_sing_box_home().join("config.json");
     if !config_path.exists() {
-        let config = state.config.read().await.clone();
+        let mut config = state.config.read().await.clone();
+        config.route_mode = state
+            .route_mode_override
+            .read()
+            .await
+            .unwrap_or(RouteMode::default());
         match restore_config_from_cache(&config).await {
             Ok(_) => {
                 *state.config_source.lock().await = Some("cache".to_string());
@@ -99,6 +107,17 @@ pub async fn start_service(State(state): State<Arc<AppState>>) -> HandlerResult 
 
     match start_sing_internal(&state).await {
         Ok(_) => {
+            let route_mode = state
+                .route_mode_override
+                .read()
+                .await
+                .unwrap_or(RouteMode::default());
+            if let Err(e) = save_running_state(true, route_mode).await {
+                return Err(status_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to save runtime state: {}", e),
+                ));
+            }
             let state_for_proxy = state.clone();
             tokio::spawn(async move {
                 restore_last_proxy(&state_for_proxy).await;
@@ -116,9 +135,20 @@ pub async fn start_service(State(state): State<Arc<AppState>>) -> HandlerResult 
     }
 }
 
-pub async fn stop_service(State(state): State<Arc<AppState>>) -> Json<ApiResponse<()>> {
+pub async fn stop_service(State(state): State<Arc<AppState>>) -> HandlerResult {
     stop_sing_internal(&state).await;
-    success_no_data("sing-box stopped")
+    let route_mode = state
+        .route_mode_override
+        .read()
+        .await
+        .unwrap_or(RouteMode::default());
+    if let Err(e) = save_running_state(false, route_mode).await {
+        return Err(status_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to save runtime state: {}", e),
+        ));
+    }
+    Ok(success_no_data("sing-box stopped"))
 }
 
 async fn sing_box_is_running(state: &Arc<AppState>) -> bool {
@@ -168,10 +198,26 @@ pub async fn set_route_mode(
     .await;
 
     match result {
-        Ok(_) if was_running => Ok(success_no_data(
-            "Route mode updated for current session and sing-box restarted",
-        )),
-        Ok(_) => Ok(success_no_data("Route mode updated for current session")),
+        Ok(_) if was_running => {
+            if let Err(e) = save_running_state(true, req.route_mode).await {
+                return Err(status_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to save runtime state: {}", e),
+                ));
+            }
+            Ok(success_no_data(
+                "Route mode updated for current session and sing-box restarted",
+            ))
+        }
+        Ok(_) => {
+            if let Err(e) = save_running_state(false, req.route_mode).await {
+                return Err(status_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to save runtime state: {}", e),
+                ));
+            }
+            Ok(success_no_data("Route mode updated for current session"))
+        }
         Err(e) => Err(status_error(StatusCode::INTERNAL_SERVER_ERROR, e)),
     }
 }
@@ -265,6 +311,7 @@ mod tests {
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         });
@@ -295,6 +342,7 @@ mod tests {
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: RouteMode::Rule,
             vps_ip: None,
         });
@@ -316,6 +364,7 @@ mod tests {
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: RouteMode::Global,
             vps_ip: None,
         });

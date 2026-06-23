@@ -5,6 +5,7 @@ import {
   ProxyCard,
   NodesCard,
   SubsCard,
+  TunProcessCard,
   ConnectivityCard,
   ConfirmModal,
   ConnectionsModal,
@@ -18,6 +19,7 @@ import {
   useStatus,
   useSubs,
   useNodes,
+  useTunProcess,
   useProxies,
   useTraffic,
   useConnections,
@@ -63,6 +65,7 @@ export default function App() {
   const { status, fetchStatus } = useStatus()
   const { subs, fetchSubs } = useSubs()
   const { nodes, fetchNodes } = useNodes()
+  const { tunProcess, setTunProcess, fetchTunProcess } = useTunProcess()
   const { primaryGroupName, primaryGroup, fetchProxies } = useProxies(status)
   const { traffic, closeSockets } = useTraffic(status)
   const {
@@ -132,7 +135,7 @@ export default function App() {
 
   // 首次加载：获取初始状态后再决定显示 onboarding 还是 dashboard
   useEffect(() => {
-    Promise.all([fetchStatus(), fetchSubs(), fetchNodes()])
+    Promise.all([fetchStatus(), fetchSubs(), fetchNodes(), fetchTunProcess()])
       .finally(() => setFirstLoadDone(true))
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -236,6 +239,34 @@ export default function App() {
     fetchStatus,
     fetchProxies,
     showToast
+  ])
+
+  const handleSaveTunProcess = useCallback(async (nextConfig) => {
+    try {
+      const response = await apiCall(
+        'tun-process',
+        { method: 'POST', body: JSON.stringify(nextConfig) },
+        'tunProcess'
+      )
+      setTunProcess(nextConfig)
+      clearDelays()
+      clearConnectivity()
+      await fetchTunProcess()
+      await fetchStatus()
+      await fetchProxies()
+      showToast(response.message || '进程代理设置已保存', 'success')
+    } catch (error) {
+      showToast(error.message, 'error')
+    }
+  }, [
+    apiCall,
+    setTunProcess,
+    clearDelays,
+    clearConnectivity,
+    fetchTunProcess,
+    fetchStatus,
+    fetchProxies,
+    showToast,
   ])
 
   const handleSwitchProxy = useCallback(async (groupName, nodeName) => {
@@ -625,6 +656,14 @@ export default function App() {
               onDeleteSub={handleOpenDeleteSubConfirm}
               onRefreshSubs={handleRefreshSubscriptions}
               isInitializing={status.initializing}
+            />
+
+            <TunProcessCard
+              config={tunProcess}
+              loading={loadingAction === 'tunProcess'}
+              disabled={status.initializing}
+              onSave={handleSaveTunProcess}
+              showToast={showToast}
             />
 
             <ConnectivityCard

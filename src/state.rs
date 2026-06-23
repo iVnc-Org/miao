@@ -82,6 +82,7 @@ mod tests {
             subs: vec!["https://example.com/sub".to_string()],
             nodes: vec![],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         };
@@ -111,6 +112,7 @@ mod tests {
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         };

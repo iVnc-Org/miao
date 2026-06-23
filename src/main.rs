@@ -22,6 +22,7 @@ use services::{
     config::{gen_config, restore_config_from_cache, save_config_cache},
     openwrt::check_and_install_openwrt_dependencies,
     proxy::restore_last_proxy,
+    runtime::{load_runtime_state, save_running_state},
     singbox::{extract_sing_box, start_sing_internal, stop_sing_internal},
     vps::ensure_vps_hysteria_node,
 };
@@ -284,6 +285,8 @@ async fn main() -> AppResult<()> {
         Err(e) => return Err(e.into()),
     };
     apply_cli_overrides(&mut config, &cli_options);
+    let runtime_state = load_runtime_state().await;
+    config.route_mode = runtime_state.route_mode;
     let port = config.port.unwrap_or(DEFAULT_PORT);
     let socks_listen = config
         .socks_listen
@@ -309,6 +312,7 @@ async fn main() -> AppResult<()> {
         AppState::with_config_path(config.clone(), config_path)
             .map_err(|e| AppError::context("Failed to create HTTP client", e))?,
     );
+    *app_state.route_mode_override.write().await = Some(runtime_state.route_mode);
     let state_for_init = app_state.clone();
 
     // Start web server immediately so the panel is accessible during initialization
@@ -341,6 +345,14 @@ async fn main() -> AppResult<()> {
 
         if config.subs.is_empty() && config.nodes.is_empty() {
             info!("No subscriptions or nodes configured, waiting for onboarding");
+            state_for_init
+                .initializing
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            return;
+        }
+
+        if !runtime_state.running {
+            info!("Previous runtime state was stopped, not starting sing-box");
             state_for_init
                 .initializing
                 .store(false, std::sync::atomic::Ordering::Relaxed);
@@ -391,6 +403,9 @@ async fn main() -> AppResult<()> {
         match start_sing_internal(&state_for_init).await {
             Ok(_) => {
                 info!("sing-box started successfully");
+                if let Err(e) = save_running_state(true, config.route_mode).await {
+                    error!(error = %e, "Failed to save runtime state after startup");
+                }
                 save_config_cache(&config).await;
                 if all_subs_failed {
                     warn!("所有订阅获取失败，请检查当前订阅");

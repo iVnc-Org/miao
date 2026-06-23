@@ -12,6 +12,7 @@ use crate::handlers::{
     service::{get_status, set_route_mode, start_service, stop_service, test_connectivity},
     static_assets::{serve_favicon, serve_index},
     subs::{add_sub, delete_sub, get_subs, refresh_subs},
+    tun_process::{get_tun_process, set_tun_process},
     version::{get_version, upgrade},
 };
 use crate::state::AppState;
@@ -24,6 +25,8 @@ pub fn build_router(app_state: Arc<AppState>) -> Router {
         .route("/api/service/start", post(start_service))
         .route("/api/service/stop", post(stop_service))
         .route("/api/route-mode", post(set_route_mode))
+        .route("/api/tun-process", get(get_tun_process))
+        .route("/api/tun-process", post(set_tun_process))
         .route("/api/connectivity", post(test_connectivity))
         .route("/api/version", get(get_version))
         .route("/api/upgrade", post(upgrade))
@@ -62,6 +65,7 @@ mod tests {
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         })
@@ -83,6 +87,7 @@ mod tests {
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         })
@@ -111,6 +116,7 @@ mod tests {
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         })
@@ -137,6 +143,7 @@ mod tests {
             subs: vec![],
             nodes: vec![],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         })
@@ -167,6 +174,7 @@ mod tests {
                 r#"{"type":"hysteria2","tag":"router-node","server":"node.example.com","server_port":443,"password":"secret","up_mbps":40,"down_mbps":350,"tls":{"enabled":true,"server_name":"sni.example.com","insecure":true}}"#.to_string(),
             ],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         })
@@ -195,6 +203,7 @@ mod tests {
             subs: vec!["https://example.com/subscription".to_string()],
             nodes: vec![],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         })
@@ -222,6 +231,7 @@ mod tests {
             subs: vec!["https://example.com/subscription".to_string()],
             nodes: vec![],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         })
@@ -251,6 +261,7 @@ mod tests {
             subs: vec!["https://example.com/subscription".to_string()],
             nodes: vec![],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         })
@@ -282,6 +293,7 @@ mod tests {
                 r#"{"type":"hysteria2","tag":"router-node","server":"node.example.com","server_port":443,"password":"password123","up_mbps":40,"down_mbps":350,"tls":{"enabled":true,"insecure":true}}"#.to_string(),
             ],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         })
@@ -318,6 +330,7 @@ mod tests {
                 r#"{"type":"hysteria2","tag":"router-node","server":"node.example.com","server_port":443,"password":"secret","up_mbps":40,"down_mbps":350,"tls":{"enabled":true,"insecure":true}}"#.to_string(),
             ],
             custom_rules: vec![],
+            tun_process: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         })
