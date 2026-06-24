@@ -26,7 +26,7 @@ use crate::state::AppState;
 const CONFIG_CACHE_DIR: &str = "data/cache";
 const CONFIG_CACHE_FILE: &str = "config.json";
 const CONFIG_CACHE_META_FILE: &str = "config.meta.json";
-const CONFIG_CACHE_SCHEMA_VERSION: u32 = 3;
+const CONFIG_CACHE_SCHEMA_VERSION: u32 = 4;
 const MAX_CONCURRENT_SUBS: usize = 5;
 
 #[derive(Serialize, Deserialize)]
@@ -172,7 +172,9 @@ pub async fn restore_config_from_cache(config: &Config) -> AppResult<()> {
         .map_err(|e| AppError::context("Failed to read cached config", e))?;
     let cached_config: serde_json::Value = serde_json::from_str(&cached_config)
         .map_err(|e| AppError::context("Failed to parse cached config", e))?;
-    let cached_config = normalize_cached_sing_box_config(cached_config);
+    let mut cached_config = normalize_cached_sing_box_config(cached_config);
+    apply_routing_to_sing_box_config(&mut cached_config, config)
+        .map_err(|e| AppError::context("Failed to update cached routing config", e))?;
     let cached_config = serde_json::to_string(&cached_config)?;
 
     let config_path = get_sing_box_home().join("config.json");
