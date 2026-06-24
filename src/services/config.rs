@@ -26,7 +26,7 @@ use crate::state::AppState;
 const CONFIG_CACHE_DIR: &str = "data/cache";
 const CONFIG_CACHE_FILE: &str = "config.json";
 const CONFIG_CACHE_META_FILE: &str = "config.meta.json";
-const CONFIG_CACHE_SCHEMA_VERSION: u32 = 4;
+const CONFIG_CACHE_SCHEMA_VERSION: u32 = 5;
 const MAX_CONCURRENT_SUBS: usize = 5;
 
 #[derive(Serialize, Deserialize)]
@@ -982,6 +982,17 @@ fn process_rule(process_match: &TunProcessMatch, extras: serde_json::Value) -> s
     serde_json::Value::Object(rule)
 }
 
+fn socks_in_proxy_rule() -> serde_json::Value {
+    serde_json::json!({"inbound": ["socks-in"], "action": "route", "outbound": "proxy"})
+}
+
+fn route_prelude_rules() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({"action": "sniff"}),
+        socks_in_proxy_rule(),
+    ]
+}
+
 fn bypass_or_direct_rule(
     process_match: &TunProcessMatch,
     bypass_action: BypassAction,
@@ -1044,10 +1055,18 @@ fn build_default_route_rules(
     route_mode: RouteMode,
     custom_rules: &[String],
 ) -> Vec<serde_json::Value> {
-    let mut route_rules = vec![
-        serde_json::json!({"action": "sniff"}),
-        serde_json::json!({"protocol": "dns", "action": "hijack-dns"}),
-    ];
+    let mut route_rules = route_prelude_rules();
+    append_default_route_tail(&mut route_rules, route_mode, custom_rules);
+
+    route_rules
+}
+
+fn append_default_route_tail(
+    route_rules: &mut Vec<serde_json::Value>,
+    route_mode: RouteMode,
+    custom_rules: &[String],
+) {
+    route_rules.push(serde_json::json!({"protocol": "dns", "action": "hijack-dns"}));
 
     if route_mode == RouteMode::Rule {
         route_rules.extend(parse_custom_rules(custom_rules));
@@ -1063,8 +1082,6 @@ fn build_default_route_rules(
             "outbound": "direct"
         }));
     }
-
-    route_rules
 }
 
 fn build_global_bypass_route_rules(
@@ -1072,7 +1089,7 @@ fn build_global_bypass_route_rules(
     tun_process: &TunProcessConfig,
     custom_rules: &[String],
 ) -> Vec<serde_json::Value> {
-    let mut route_rules = Vec::new();
+    let mut route_rules = route_prelude_rules();
 
     if tun_process.dns_follow_process {
         route_rules.push(bypass_or_direct_rule(
@@ -1086,7 +1103,7 @@ fn build_global_bypass_route_rules(
         tun_process.bypass_action,
         None,
     ));
-    route_rules.extend(build_default_route_rules(route_mode, custom_rules));
+    append_default_route_tail(&mut route_rules, route_mode, custom_rules);
 
     route_rules
 }
@@ -1096,7 +1113,7 @@ fn build_process_only_route_rules(
     tun_process: &TunProcessConfig,
     custom_rules: &[String],
 ) -> AppResult<Vec<serde_json::Value>> {
-    let mut route_rules = vec![serde_json::json!({"action": "sniff"})];
+    let mut route_rules = route_prelude_rules();
 
     if tun_process.dns_follow_process {
         route_rules.push(process_rule(
@@ -1385,11 +1402,13 @@ mod tests {
         assert_eq!(all_outbounds[3]["tag"], "sub-a");
 
         let rules = built["route"]["rules"].as_array().unwrap();
-        assert_eq!(rules.len(), 5);
+        assert_eq!(rules.len(), 6);
         assert_eq!(rules[0]["action"], "sniff");
-        assert_eq!(rules[1]["action"], "hijack-dns");
-        assert_eq!(rules[2]["domain_suffix"][0], "example.com");
-        assert_eq!(rules[3]["ip_is_private"], true);
+        assert_eq!(rules[1]["inbound"], json!(["socks-in"]));
+        assert_eq!(rules[1]["outbound"], "proxy");
+        assert_eq!(rules[2]["action"], "hijack-dns");
+        assert_eq!(rules[3]["domain_suffix"][0], "example.com");
+        assert_eq!(rules[4]["ip_is_private"], true);
     }
 
     #[test]
@@ -1416,19 +1435,21 @@ mod tests {
         .unwrap();
 
         let rules = built["route"]["rules"].as_array().unwrap();
+        assert_eq!(rules[0]["action"], "sniff");
+        assert_eq!(rules[1]["inbound"], json!(["socks-in"]));
+        assert_eq!(rules[1]["outbound"], "proxy");
         assert_eq!(
-            rules[0]["process_name"],
+            rules[2]["process_name"],
             json!(["curl", "git-remote-https"])
         );
-        assert_eq!(rules[0]["protocol"], "dns");
-        assert_eq!(rules[0]["action"], "bypass");
+        assert_eq!(rules[2]["protocol"], "dns");
+        assert_eq!(rules[2]["action"], "bypass");
         assert_eq!(
-            rules[1]["process_name"],
+            rules[3]["process_name"],
             json!(["curl", "git-remote-https"])
         );
-        assert_eq!(rules[1]["action"], "bypass");
-        assert_eq!(rules[2]["action"], "sniff");
-        assert_eq!(rules[3]["action"], "hijack-dns");
+        assert_eq!(rules[3]["action"], "bypass");
+        assert_eq!(rules[4]["action"], "hijack-dns");
     }
 
     #[test]
@@ -1456,9 +1477,12 @@ mod tests {
 
         let rules = built["route"]["rules"].as_array().unwrap();
         assert_eq!(rules[0]["action"], "sniff");
-        assert_eq!(rules[1]["protocol"], "dns");
+        assert_eq!(rules[1]["inbound"], json!(["socks-in"]));
+        assert_eq!(rules[1]["action"], "route");
+        assert_eq!(rules[1]["outbound"], "proxy");
+        assert_eq!(rules[2]["protocol"], "dns");
         assert_eq!(
-            rules[1]["process_name"],
+            rules[2]["process_name"],
             json!(["curl", "git-remote-https"])
         );
         assert!(!rules.iter().any(|rule| {
@@ -1468,6 +1492,38 @@ mod tests {
         }));
         assert_eq!(rules.last().unwrap()["action"], "route");
         assert_eq!(rules.last().unwrap()["outbound"], "proxy");
+        assert_eq!(built["route"]["final"], "direct");
+    }
+
+    #[test]
+    fn build_sing_box_config_process_only_forces_socks_in_to_proxy() {
+        let config = Config {
+            port: None,
+            socks_listen: None,
+            socks_port: None,
+            subs: vec![],
+            nodes: vec![],
+            custom_rules: vec![],
+            tun_process: tun_process(TunProcessMode::ProcessOnly),
+            route_mode: RouteMode::Global,
+            vps_ip: None,
+        };
+
+        let built = build_sing_box_config(
+            &config,
+            vec!["manual-a".to_string()],
+            vec![manual_outbound()],
+            vec![],
+            vec![],
+        )
+        .unwrap();
+
+        let rules = built["route"]["rules"].as_array().unwrap();
+        assert_eq!(rules[0]["action"], "sniff");
+        assert_eq!(
+            rules[1],
+            json!({"inbound": ["socks-in"], "action": "route", "outbound": "proxy"})
+        );
         assert_eq!(built["route"]["final"], "direct");
     }
 
@@ -1576,7 +1632,11 @@ mod tests {
         assert_eq!(sing_box_config["outbounds"][2]["tag"], "node-a");
         let rules = sing_box_config["route"]["rules"].as_array().unwrap();
         assert_eq!(
-            rules[1]["process_name"],
+            rules[1],
+            json!({"inbound": ["socks-in"], "action": "route", "outbound": "proxy"})
+        );
+        assert_eq!(
+            rules[2]["process_name"],
             json!(["curl", "git-remote-https"])
         );
         assert_eq!(rules.last().unwrap()["action"], "route");
@@ -1647,11 +1707,13 @@ mod tests {
         .unwrap();
 
         let rules = built["route"]["rules"].as_array().unwrap();
-        assert_eq!(rules.len(), 3);
+        assert_eq!(rules.len(), 4);
         assert_eq!(rules[0]["action"], "sniff");
-        assert_eq!(rules[1]["action"], "hijack-dns");
-        assert_eq!(rules[2]["ip_is_private"], true);
-        assert_eq!(rules[2]["outbound"], "direct");
+        assert_eq!(rules[1]["inbound"], json!(["socks-in"]));
+        assert_eq!(rules[1]["outbound"], "proxy");
+        assert_eq!(rules[2]["action"], "hijack-dns");
+        assert_eq!(rules[3]["ip_is_private"], true);
+        assert_eq!(rules[3]["outbound"], "direct");
 
         let dns_rules = built["dns"]["rules"].as_array().unwrap();
         assert_eq!(dns_rules.len(), 1);
@@ -1869,11 +1931,13 @@ mod tests {
         assert_eq!(dns_rules[0]["server"], "local");
 
         let route_rules = built["route"]["rules"].as_array().unwrap();
-        assert_eq!(route_rules.len(), 3);
+        assert_eq!(route_rules.len(), 4);
         assert_eq!(route_rules[0]["action"], "sniff");
-        assert_eq!(route_rules[1]["action"], "hijack-dns");
-        assert_eq!(route_rules[2]["ip_is_private"], true);
-        assert_eq!(route_rules[2]["outbound"], "direct");
+        assert_eq!(route_rules[1]["inbound"], json!(["socks-in"]));
+        assert_eq!(route_rules[1]["outbound"], "proxy");
+        assert_eq!(route_rules[2]["action"], "hijack-dns");
+        assert_eq!(route_rules[3]["ip_is_private"], true);
+        assert_eq!(route_rules[3]["outbound"], "direct");
         assert_eq!(built["route"]["default_domain_resolver"], "local");
     }
 
@@ -1911,9 +1975,11 @@ mod tests {
         assert_eq!(dns_rules[0]["server"], "local");
 
         let route_rules = built["route"]["rules"].as_array().unwrap();
-        assert_eq!(route_rules.len(), 3);
-        assert_eq!(route_rules[2]["ip_is_private"], true);
-        assert_eq!(route_rules[2]["outbound"], "direct");
+        assert_eq!(route_rules.len(), 4);
+        assert_eq!(route_rules[1]["inbound"], json!(["socks-in"]));
+        assert_eq!(route_rules[1]["outbound"], "proxy");
+        assert_eq!(route_rules[3]["ip_is_private"], true);
+        assert_eq!(route_rules[3]["outbound"], "direct");
         assert_eq!(built["route"]["default_domain_resolver"], "local");
     }
 
@@ -1951,10 +2017,12 @@ mod tests {
         assert_eq!(dns_rules[0]["server"], "local");
 
         let route_rules = built["route"]["rules"].as_array().unwrap();
-        assert_eq!(route_rules.len(), 4);
-        assert_eq!(route_rules[2]["ip_is_private"], true);
-        assert_eq!(route_rules[3]["outbound"], "direct");
-        assert_eq!(route_rules[3]["rule_set"][0], "chinaip");
+        assert_eq!(route_rules.len(), 5);
+        assert_eq!(route_rules[1]["inbound"], json!(["socks-in"]));
+        assert_eq!(route_rules[1]["outbound"], "proxy");
+        assert_eq!(route_rules[3]["ip_is_private"], true);
+        assert_eq!(route_rules[4]["outbound"], "direct");
+        assert_eq!(route_rules[4]["rule_set"][0], "chinaip");
         assert_eq!(built["route"]["default_domain_resolver"], "local");
     }
 
@@ -2176,8 +2244,10 @@ mod tests {
         .unwrap();
 
         let rules = built["route"]["rules"].as_array().unwrap();
-        // Tunnel mode defaults to sniff + hijack-dns + private direct
-        assert_eq!(rules.len(), 3);
+        // Tunnel mode defaults to sniff + explicit SOCKS proxy + hijack-dns + private direct.
+        assert_eq!(rules.len(), 4);
+        assert_eq!(rules[1]["inbound"], json!(["socks-in"]));
+        assert_eq!(rules[1]["outbound"], "proxy");
     }
 
     #[test]
@@ -2213,12 +2283,15 @@ mod tests {
 
         let rules = built["route"]["rules"].as_array().unwrap();
 
-        assert_eq!(rules[2]["ip_is_private"], true);
-        assert_eq!(rules[2]["outbound"], "direct");
-        assert!(rules[2].get("rule_set").is_none());
+        assert_eq!(rules[1]["inbound"], json!(["socks-in"]));
+        assert_eq!(rules[1]["outbound"], "proxy");
 
-        assert_eq!(rules[3]["rule_set"], json!(["chinaip", "chinasite"]));
+        assert_eq!(rules[3]["ip_is_private"], true);
         assert_eq!(rules[3]["outbound"], "direct");
+        assert!(rules[3].get("rule_set").is_none());
+
+        assert_eq!(rules[4]["rule_set"], json!(["chinaip", "chinasite"]));
+        assert_eq!(rules[4]["outbound"], "direct");
 
         let dns_rules = built["dns"]["rules"].as_array().unwrap();
         assert!(!dns_rules.is_empty());
@@ -2314,8 +2387,10 @@ mod tests {
         .unwrap();
 
         let rules = built["route"]["rules"].as_array().unwrap();
-        // Tunnel mode defaults to sniff + hijack-dns + private direct
-        assert_eq!(rules.len(), 3);
+        // Tunnel mode defaults to sniff + explicit SOCKS proxy + hijack-dns + private direct.
+        assert_eq!(rules.len(), 4);
+        assert_eq!(rules[1]["inbound"], json!(["socks-in"]));
+        assert_eq!(rules[1]["outbound"], "proxy");
     }
 
     #[tokio::test]
