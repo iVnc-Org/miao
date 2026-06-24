@@ -263,6 +263,66 @@ pub async fn regenerate_without_restart_runtime(
     Ok(has_sub_nodes)
 }
 
+async fn read_existing_sing_box_config() -> AppResult<serde_json::Value> {
+    let config_path = get_sing_box_home().join("config.json");
+    let source_path = if config_path.exists() {
+        config_path
+    } else {
+        get_config_cache_path()
+    };
+
+    let content = tokio::fs::read_to_string(&source_path)
+        .await
+        .map_err(|e| AppError::context("Failed to read existing sing-box config", e))?;
+    serde_json::from_str(&content)
+        .map(normalize_cached_sing_box_config)
+        .map_err(|e| AppError::context("Failed to parse existing sing-box config", e))
+}
+
+fn apply_routing_to_sing_box_config(
+    sing_box_config: &mut serde_json::Value,
+    config: &Config,
+) -> AppResult<()> {
+    let tun_process = config.tun_process.normalized().map_err(AppError::message)?;
+    let route_rules = build_route_rules(config.route_mode, &tun_process, &config.custom_rules)?;
+    let dns_rules = build_dns_rules(config.route_mode);
+
+    let Some(route) = sing_box_config["route"].as_object_mut() else {
+        return Err(AppError::message(
+            "Existing sing-box config missing route section",
+        ));
+    };
+    route.insert("rules".to_string(), serde_json::Value::Array(route_rules));
+    route.insert(
+        "final".to_string(),
+        serde_json::Value::String("proxy".to_string()),
+    );
+    route.insert(
+        "default_domain_resolver".to_string(),
+        serde_json::Value::String("local".to_string()),
+    );
+
+    let Some(dns) = sing_box_config["dns"].as_object_mut() else {
+        return Err(AppError::message(
+            "Existing sing-box config missing dns section",
+        ));
+    };
+    dns.insert("rules".to_string(), serde_json::Value::Array(dns_rules));
+
+    Ok(())
+}
+
+async fn rewrite_existing_sing_box_routing(config: &Config) -> AppResult<()> {
+    let mut sing_box_config = read_existing_sing_box_config().await?;
+    apply_routing_to_sing_box_config(&mut sing_box_config, config)?;
+    let config_path = get_sing_box_home().join("config.json");
+    write_file_atomic(&config_path, &serde_json::to_string(&sing_box_config)?).await?;
+    validate_sing_box_config()
+        .await
+        .map_err(|e| AppError::context("Config validation failed", e))?;
+    Ok(())
+}
+
 fn config_with_route_override(config: &Config, route_mode: Option<RouteMode>) -> Config {
     let mut config = config.clone();
     config.route_mode = route_mode.unwrap_or_default();
@@ -338,6 +398,11 @@ pub async fn apply_persistent_config_change(
     new_config: &Config,
     restart_if_running: bool,
 ) -> AppResult<()> {
+    if routing_only_change(old_config, new_config) {
+        return apply_routing_config_change(state, old_config, new_config, restart_if_running)
+            .await;
+    }
+
     if restart_if_running {
         return apply_config_change(state, old_config, new_config).await;
     }
@@ -387,12 +452,94 @@ fn config_has_no_nodes(config: &Config) -> bool {
     config.subs.is_empty() && config.nodes.is_empty()
 }
 
+fn routing_only_change(old_config: &Config, new_config: &Config) -> bool {
+    old_config.port == new_config.port
+        && old_config.socks_listen == new_config.socks_listen
+        && old_config.socks_port == new_config.socks_port
+        && old_config.subs == new_config.subs
+        && old_config.vps_ip == new_config.vps_ip
+        && old_config.nodes == new_config.nodes
+        && old_config.custom_rules == new_config.custom_rules
+        && (old_config.route_mode != new_config.route_mode
+            || old_config.tun_process != new_config.tun_process)
+}
+
+pub async fn apply_routing_config_change(
+    state: &Arc<AppState>,
+    old_config: &Config,
+    new_config: &Config,
+    restart: bool,
+) -> AppResult<()> {
+    if config_has_no_nodes(new_config) {
+        return Err(AppError::message(
+            "No nodes available: add a subscription or manual node before changing routing",
+        ));
+    }
+
+    let persisted_new_config = config_with_route_override(new_config, None);
+
+    match rewrite_existing_sing_box_routing(new_config).await {
+        Ok(()) => {
+            if let Err(save_err) = save_config_to(&state.config_path, &persisted_new_config).await {
+                let _ = if restart {
+                    restart_with_previous_config(old_config, state).await
+                } else {
+                    restore_previous_stopped_config(old_config, state).await
+                };
+                return Err(AppError::context(
+                    "Failed to persist routing change; restored previous runtime config",
+                    save_err,
+                ));
+            }
+
+            if restart {
+                stop_sing_internal(state).await;
+                if let Err(start_err) = start_sing_internal(state).await {
+                    let _ = restart_with_previous_config(old_config, state).await;
+                    return Err(AppError::context(
+                        "Failed to restart sing-box after routing change",
+                        start_err,
+                    ));
+                }
+                finalize_started_config(new_config, state, true).await;
+            } else {
+                update_config_warning(new_config, state, true).await;
+            }
+
+            *state.config.write().await = persisted_new_config;
+            *state.route_mode_override.write().await = Some(new_config.route_mode);
+            Ok(())
+        }
+        Err(apply_err) => {
+            let rollback = if restart {
+                restart_with_previous_config(old_config, state).await
+            } else {
+                restore_previous_stopped_config(old_config, state).await
+            };
+            match rollback {
+                Ok(()) => Err(AppError::context(
+                    "Failed to apply routing change; restored previous runtime config",
+                    apply_err,
+                )),
+                Err(rollback_err) => Err(AppError::message(format!(
+                    "Failed to apply routing change: {}. Runtime rollback failed: {}",
+                    apply_err, rollback_err
+                ))),
+            }
+        }
+    }
+}
+
 pub async fn apply_runtime_config_change(
     state: &Arc<AppState>,
     old_config: &Config,
     new_config: &Config,
     restart: bool,
 ) -> AppResult<()> {
+    if routing_only_change(old_config, new_config) {
+        return apply_routing_config_change(state, old_config, new_config, restart).await;
+    }
+
     if restart {
         match regenerate_and_restart_runtime(new_config, state).await {
             Ok(has_sub_nodes) => {
@@ -1056,8 +1203,9 @@ fn get_config_template(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_sing_box_config, collect_manual_outbounds, config_cache_fingerprint,
-        config_with_route_override, normalize_cached_sing_box_config, save_config_to,
+        apply_routing_to_sing_box_config, build_sing_box_config, collect_manual_outbounds,
+        config_cache_fingerprint, config_with_route_override, normalize_cached_sing_box_config,
+        routing_only_change, save_config_to,
     };
     use crate::models::{Config, RouteMode, TunProcessConfig, TunProcessMatch, TunProcessMode};
     use serde_json::json;
@@ -1378,6 +1526,76 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("至少需要填写"));
+    }
+
+    #[test]
+    fn apply_routing_to_sing_box_config_replaces_rules_without_touching_outbounds() {
+        let mut sing_box_config = json!({
+            "dns": {
+                "servers": [{"tag": "local", "type": "udp", "server": "223.5.5.5"}],
+                "rules": []
+            },
+            "route": {
+                "final": "proxy",
+                "default_domain_resolver": "local",
+                "rules": [{"action": "sniff"}],
+                "rule_set": []
+            },
+            "outbounds": [
+                {"type": "selector", "tag": "proxy", "outbounds": ["node-a"]},
+                {"type": "direct", "tag": "direct"},
+                {"type": "hysteria2", "tag": "node-a", "server": "node.example.com", "server_port": 443}
+            ]
+        });
+        let config = Config {
+            port: None,
+            socks_listen: None,
+            socks_port: None,
+            subs: vec!["https://example.com/sub".to_string()],
+            nodes: vec![],
+            custom_rules: vec![],
+            tun_process: tun_process(TunProcessMode::ProcessOnly),
+            route_mode: RouteMode::Rule,
+            vps_ip: None,
+        };
+
+        apply_routing_to_sing_box_config(&mut sing_box_config, &config).unwrap();
+
+        assert_eq!(sing_box_config["outbounds"][2]["tag"], "node-a");
+        let rules = sing_box_config["route"]["rules"].as_array().unwrap();
+        assert_eq!(
+            rules[1]["process_name"],
+            json!(["curl", "git-remote-https"])
+        );
+        assert_eq!(rules.last().unwrap()["action"], "bypass");
+    }
+
+    #[test]
+    fn routing_only_change_detects_route_mode_and_tun_process_changes() {
+        let mut old_config = Config {
+            port: None,
+            socks_listen: None,
+            socks_port: None,
+            subs: vec!["https://example.com/sub".to_string()],
+            nodes: vec![],
+            custom_rules: vec![],
+            tun_process: Default::default(),
+            route_mode: RouteMode::Global,
+            vps_ip: None,
+        };
+        let mut new_config = old_config.clone();
+        new_config.route_mode = RouteMode::Rule;
+
+        assert!(routing_only_change(&old_config, &new_config));
+
+        old_config.route_mode = RouteMode::Rule;
+        new_config.tun_process = tun_process(TunProcessMode::ProcessOnly);
+        assert!(routing_only_change(&old_config, &new_config));
+
+        new_config
+            .subs
+            .push("https://example.com/other".to_string());
+        assert!(!routing_only_change(&old_config, &new_config));
     }
 
     #[test]
