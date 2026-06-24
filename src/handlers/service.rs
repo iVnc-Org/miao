@@ -356,7 +356,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_status_ignores_persisted_route_mode_without_override() {
+    async fn get_status_defaults_to_global_without_override() {
         let state = app_state(Config {
             port: None,
             socks_listen: None,
@@ -372,6 +372,6 @@ mod tests {
         let axum::response::Json(response) = get_status(State(state)).await;
 
         let data = response.data.unwrap();
-        assert_eq!(data.route_mode, RouteMode::Tunnel);
+        assert_eq!(data.route_mode, RouteMode::Global);
     }
 }

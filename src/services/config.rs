@@ -295,7 +295,7 @@ fn apply_routing_to_sing_box_config(
     route.insert("rules".to_string(), serde_json::Value::Array(route_rules));
     route.insert(
         "final".to_string(),
-        serde_json::Value::String("proxy".to_string()),
+        serde_json::Value::String(route_final(&tun_process).to_string()),
     );
     route.insert(
         "default_domain_resolver".to_string(),
@@ -1132,9 +1132,16 @@ fn build_process_only_route_rules(
         &tun_process.r#match,
         serde_json::json!({"action": "route", "outbound": "proxy"}),
     ));
-    route_rules.push(serde_json::json!({"action": "bypass"}));
 
     Ok(route_rules)
+}
+
+fn route_final(tun_process: &TunProcessConfig) -> &'static str {
+    if tun_process.enabled && tun_process.mode == TunProcessMode::ProcessOnly {
+        "direct"
+    } else {
+        "proxy"
+    }
 }
 
 fn build_route_rules(
@@ -1166,6 +1173,7 @@ fn get_config_template(
     let route_rules = build_route_rules(route_mode, tun_process, custom_rules)?;
     let dns_rules = build_dns_rules(route_mode);
     let default_domain_resolver = "local";
+    let route_final = route_final(tun_process);
 
     Ok(serde_json::json!({
         "log": {"disabled": false, "timestamp": true, "level": "info"},
@@ -1188,7 +1196,7 @@ fn get_config_template(
             {"type": "direct", "tag": "direct"}
         ],
         "route": {
-            "final": "proxy",
+            "final": route_final,
             "auto_detect_interface": true,
             "default_domain_resolver": default_domain_resolver,
             "rules": route_rules,
@@ -1422,7 +1430,7 @@ mod tests {
     }
 
     #[test]
-    fn build_sing_box_config_process_only_scopes_dns_and_ends_with_bypass() {
+    fn build_sing_box_config_process_only_scopes_dns_and_uses_direct_final() {
         let config = Config {
             port: None,
             socks_listen: None,
@@ -1456,7 +1464,9 @@ mod tests {
                 && rule.get("process_name").is_none()
                 && rule["action"] == "hijack-dns"
         }));
-        assert_eq!(rules.last().unwrap()["action"], "bypass");
+        assert_eq!(rules.last().unwrap()["action"], "route");
+        assert_eq!(rules.last().unwrap()["outbound"], "proxy");
+        assert_eq!(built["route"]["final"], "direct");
     }
 
     #[test]
@@ -1567,7 +1577,9 @@ mod tests {
             rules[1]["process_name"],
             json!(["curl", "git-remote-https"])
         );
-        assert_eq!(rules.last().unwrap()["action"], "bypass");
+        assert_eq!(rules.last().unwrap()["action"], "route");
+        assert_eq!(rules.last().unwrap()["outbound"], "proxy");
+        assert_eq!(sing_box_config["route"]["final"], "direct");
     }
 
     #[test]
@@ -1645,7 +1657,7 @@ mod tests {
     }
 
     #[test]
-    fn config_with_route_override_defaults_to_tunnel_mode() {
+    fn config_with_route_override_defaults_to_global_mode() {
         let config = Config {
             port: None,
             socks_listen: None,
@@ -1660,7 +1672,7 @@ mod tests {
 
         let runtime_config = config_with_route_override(&config, None);
 
-        assert_eq!(runtime_config.route_mode, RouteMode::Tunnel);
+        assert_eq!(runtime_config.route_mode, RouteMode::Global);
     }
 
     #[test]
@@ -1815,7 +1827,7 @@ mod tests {
     }
 
     #[test]
-    fn build_sing_box_config_defaults_to_tunnel_mode_with_local_socks() {
+    fn build_sing_box_config_defaults_to_global_mode_with_local_socks() {
         let config = Config {
             port: None,
             socks_listen: None,
@@ -1850,7 +1862,9 @@ mod tests {
         assert_eq!(inbounds[1]["listen_port"], 1080);
 
         let dns_rules = built["dns"]["rules"].as_array().unwrap();
-        assert!(dns_rules.is_empty());
+        assert_eq!(dns_rules.len(), 1);
+        assert_eq!(dns_rules[0]["rule_set"][0], "chinasite");
+        assert_eq!(dns_rules[0]["server"], "local");
 
         let route_rules = built["route"]["rules"].as_array().unwrap();
         assert_eq!(route_rules.len(), 3);

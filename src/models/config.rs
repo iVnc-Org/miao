@@ -5,8 +5,8 @@ use std::collections::BTreeSet;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RouteMode {
-    #[default]
     Tunnel,
+    #[default]
     Global,
     Rule,
 }
@@ -263,7 +263,7 @@ custom_rules: []
 
         let config: Config = serde_yaml::from_str(yaml).unwrap();
 
-        assert_eq!(config.route_mode, super::RouteMode::Tunnel);
+        assert_eq!(config.route_mode, super::RouteMode::Global);
     }
 
     #[test]

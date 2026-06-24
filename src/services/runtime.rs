@@ -93,6 +93,6 @@ mod tests {
         let state = RuntimeState::default();
 
         assert!(state.running);
-        assert_eq!(state.route_mode, RouteMode::Tunnel);
+        assert_eq!(state.route_mode, RouteMode::Global);
     }
 }
