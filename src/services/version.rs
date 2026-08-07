@@ -15,7 +15,7 @@ use tracing::{error, info, warn};
 use crate::build_info::{current_version, git_commit_full, git_commit_short, git_commit_url};
 use crate::error::{AppError, AppResult};
 use crate::models::{GitHubAsset, GitHubRelease, VersionInfo};
-use crate::services::singbox::{get_sing_box_home, stop_sing_internal};
+use crate::services::singbox::{get_sing_box_home, sing_box_is_running, stop_sing_internal};
 use crate::state::{AppState, VersionCache};
 
 const CACHE_TTL: Duration = Duration::from_secs(300);
@@ -240,22 +240,6 @@ async fn invalidate_release_cache(state: &Arc<AppState>) {
         release: None,
         fetched_at: None,
     }));
-}
-
-async fn sing_box_is_running(state: &Arc<AppState>) -> bool {
-    let mut lock = state.sing_process.lock().await;
-
-    match &mut *lock {
-        Some(proc) => match proc.child.try_wait() {
-            Ok(Some(_)) => {
-                *lock = None;
-                false
-            }
-            Ok(None) => true,
-            Err(_) => false,
-        },
-        None => false,
-    }
 }
 
 pub async fn get_version_info(state: &Arc<AppState>) -> VersionInfo {

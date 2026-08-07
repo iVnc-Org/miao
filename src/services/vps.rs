@@ -537,6 +537,7 @@ mod tests {
             ],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: Some("203.0.113.10".to_string()),
         };
@@ -554,6 +555,7 @@ mod tests {
             nodes: vec!["not-json".to_string()],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: Some("203.0.113.10".to_string()),
         };

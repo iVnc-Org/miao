@@ -15,7 +15,7 @@ use crate::services::{
     },
     proxy::restore_last_proxy,
     runtime::save_running_state,
-    singbox::{get_sing_box_home, start_sing_internal, stop_sing_internal},
+    singbox::{get_sing_box_home, sing_box_is_running, start_sing_internal, stop_sing_internal},
 };
 use crate::state::AppState;
 
@@ -67,6 +67,9 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> Json<ApiResponse<
 }
 
 pub async fn start_service(State(state): State<Arc<AppState>>) -> HandlerResult {
+    // 与其它会重新生成配置的 handler 共用同一把锁：start 也可能走到 gen_config，
+    // 不持锁会和并发的配置变更互相覆盖生成产物与端口分配账本。
+    let _config_update = state.config_update.lock().await;
     let config_path = get_sing_box_home().join("config.json");
     if !config_path.exists() {
         let mut config = state.config.read().await.clone();
@@ -149,22 +152,6 @@ pub async fn stop_service(State(state): State<Arc<AppState>>) -> HandlerResult {
         ));
     }
     Ok(success_no_data("sing-box stopped"))
-}
-
-async fn sing_box_is_running(state: &Arc<AppState>) -> bool {
-    let mut lock = state.sing_process.lock().await;
-
-    match &mut *lock {
-        Some(proc) => match proc.child.try_wait() {
-            Ok(Some(_)) => {
-                *lock = None;
-                false
-            }
-            Ok(None) => true,
-            Err(_) => false,
-        },
-        None => false,
-    }
 }
 
 pub async fn set_route_mode(
@@ -312,6 +299,7 @@ mod tests {
             nodes: vec![],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         });
@@ -343,6 +331,7 @@ mod tests {
             nodes: vec![],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: RouteMode::Rule,
             vps_ip: None,
         });
@@ -365,6 +354,7 @@ mod tests {
             nodes: vec![],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: RouteMode::Global,
             vps_ip: None,
         });

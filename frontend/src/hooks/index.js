@@ -5,6 +5,7 @@ export {
   useSubs,
   useNodes,
   useTunProcess,
+  useShare,
   useProxies,
   useTraffic,
   useConnections,

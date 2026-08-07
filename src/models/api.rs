@@ -77,3 +77,11 @@ pub struct SubStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
+
+#[derive(Serialize, Clone)]
+pub struct ShareEndpoint {
+    pub tag: String,
+    pub port: u16,
+    pub listen: String,
+    pub url: String,
+}

@@ -1,11 +1,8 @@
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tracing::warn;
 
-use crate::{
-    error::{AppError, AppResult},
-    models::RouteMode,
-};
+use crate::{error::AppResult, models::RouteMode, services::write_file_atomic};
 
 const RUNTIME_STATE_DIR: &str = "data/cache";
 const RUNTIME_STATE_FILE: &str = "runtime.json";
@@ -35,26 +32,6 @@ fn runtime_state_path() -> PathBuf {
     PathBuf::from(RUNTIME_STATE_DIR).join(RUNTIME_STATE_FILE)
 }
 
-async fn write_file_atomic(path: &Path, content: &str) -> AppResult<()> {
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| AppError::context("Failed to create runtime state directory", e))?;
-    }
-
-    let temp_path = path.with_extension("tmp");
-    tokio::fs::write(&temp_path, content)
-        .await
-        .map_err(|e| AppError::context("Failed to write runtime state temp file", e))?;
-    tokio::fs::rename(&temp_path, path)
-        .await
-        .map_err(|e| AppError::context("Failed to atomically rename runtime state file", e))?;
-    Ok(())
-}
-
 pub async fn load_runtime_state() -> RuntimeState {
     let path = runtime_state_path();
     let Ok(content) = tokio::fs::read_to_string(&path).await else {
@@ -72,7 +49,7 @@ pub async fn load_runtime_state() -> RuntimeState {
 
 pub async fn save_runtime_state(state: RuntimeState) -> AppResult<()> {
     let content = serde_json::to_string(&state)?;
-    write_file_atomic(&runtime_state_path(), &content).await
+    write_file_atomic(&runtime_state_path(), &content, "runtime state").await
 }
 
 pub async fn save_running_state(running: bool, route_mode: RouteMode) -> AppResult<()> {

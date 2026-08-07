@@ -332,6 +332,12 @@ async fn main() -> AppResult<()> {
     tokio::spawn(async move {
         let mut config = config;
 
+        // 监听端口在 spawn 之前就已经绑定，面板在整个初始化窗口内都在接请求
+        // （VPS 探测 + 订阅抓取都可能是几十秒）。这里持锁是为了和 /api/subs、
+        // /api/nodes、/api/share 等 handler 的配置写入/生成串行化，
+        // 否则 ensure_vps_hysteria_node 收尾时的整份写回会盖掉用户刚提交的修改。
+        let config_update = state_for_init.config_update.lock().await;
+
         match ensure_vps_hysteria_node(&mut config, &state_for_init.config_path).await {
             Ok(_) => {
                 *state_for_init.config.write().await = config.clone();
@@ -395,10 +401,29 @@ async fn main() -> AppResult<()> {
             }
         }
 
+        // 依赖安装会跑 opkg/apk 且没有超时，软件源不可达时会一直卡着，
+        // 所以先放锁，别让整个面板的配置类接口陪着一起卡死。
+        drop(config_update);
+
         info!("Checking dependencies...");
         if let Err(e) = check_and_install_openwrt_dependencies().await {
             error!("Failed to check or install OpenWrt dependencies: {}", e);
         }
+
+        // 重新拿锁：下面还要写 runtime.json 和配置缓存，这两个都是从配置派生的持久状态。
+        // 放锁期间用户可能已经改过路由模式或订阅，所以快照也要重新取，
+        // 否则会用过期的 route_mode 覆盖 runtime.json，并给新的 config.json
+        // 配上旧配置的指纹。
+        let config_update = state_for_init.config_update.lock().await;
+        let config = {
+            let mut current = state_for_init.config.read().await.clone();
+            current.route_mode = state_for_init
+                .route_mode_override
+                .read()
+                .await
+                .unwrap_or(config.route_mode);
+            current
+        };
 
         match start_sing_internal(&state_for_init).await {
             Ok(_) => {
@@ -421,6 +446,7 @@ async fn main() -> AppResult<()> {
             }
             Err(e) => error!("Failed to start sing-box: {}", e),
         }
+        drop(config_update);
         state_for_init
             .initializing
             .store(false, std::sync::atomic::Ordering::Relaxed);

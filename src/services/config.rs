@@ -11,22 +11,28 @@ use tracing::{error, info, warn};
 
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    BypassAction, Config, RouteMode, SubStatus, TunProcessConfig, TunProcessMatch, TunProcessMode,
-    DEFAULT_SOCKS_LISTEN, DEFAULT_SOCKS_PORT,
+    BypassAction, Config, RouteMode, ShareConfig, SubStatus, TunProcessConfig, TunProcessMatch,
+    TunProcessMode, DEFAULT_SOCKS_LISTEN, DEFAULT_SOCKS_PORT,
 };
 use crate::services::{
     proxy::restore_last_proxy,
+    share_ports::{
+        allocate_share_ports, load_share_port_map, reserved_system_ports, save_share_port_map,
+        share_inbound_tag, SharePortMap,
+    },
     singbox::{
-        get_sing_box_home, start_sing_internal, stop_sing_internal, validate_sing_box_config,
+        get_sing_box_home, sing_box_is_running, start_sing_internal, stop_sing_internal,
+        validate_sing_box_config,
     },
     subscription::fetch_sub,
+    write_file_atomic,
 };
 use crate::state::AppState;
 
 const CONFIG_CACHE_DIR: &str = "data/cache";
 const CONFIG_CACHE_FILE: &str = "config.json";
 const CONFIG_CACHE_META_FILE: &str = "config.meta.json";
-const CONFIG_CACHE_SCHEMA_VERSION: u32 = 5;
+const CONFIG_CACHE_SCHEMA_VERSION: u32 = 6;
 const MAX_CONCURRENT_SUBS: usize = 5;
 
 #[derive(Serialize, Deserialize)]
@@ -52,6 +58,7 @@ fn config_cache_fingerprint(config: &Config) -> AppResult<String> {
         "nodes": &config.nodes,
         "custom_rules": &config.custom_rules,
         "tun_process": &config.tun_process,
+        "share": &config.share,
     });
     let bytes = serde_json::to_vec(&value)?;
     let mut hasher = Sha256::new();
@@ -66,32 +73,6 @@ fn normalize_cached_sing_box_config(mut config: serde_json::Value) -> serde_json
     config
 }
 
-/// 原子写入文件：先写入临时文件，再重命名为目标文件
-async fn write_file_atomic(path: &Path, content: &str) -> AppResult<()> {
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| AppError::context("Failed to create config directory", e))?;
-    }
-
-    let temp_path = path.with_extension("tmp");
-
-    // 先写入临时文件
-    tokio::fs::write(&temp_path, content)
-        .await
-        .map_err(|e| AppError::context("Failed to write temp file", e))?;
-
-    // 原子重命名为最终文件
-    tokio::fs::rename(&temp_path, path)
-        .await
-        .map_err(|e| AppError::context("Failed to atomically rename file", e))?;
-
-    Ok(())
-}
-
 pub async fn save_config_to(path: &Path, config: &Config) -> AppResult<()> {
     let yaml = serde_yaml::to_string(config)?;
     if let Ok(existing) = tokio::fs::read_to_string(path).await {
@@ -101,7 +82,7 @@ pub async fn save_config_to(path: &Path, config: &Config) -> AppResult<()> {
         }
     }
 
-    write_file_atomic(path, &yaml).await
+    write_file_atomic(path, &yaml, "config file").await
 }
 
 pub async fn save_config_cache(config: &Config) {
@@ -130,7 +111,7 @@ pub async fn save_config_cache(config: &Config) {
         }
     };
 
-    if let Err(e) = write_file_atomic(&meta_path, &meta).await {
+    if let Err(e) = write_file_atomic(&meta_path, &meta, "config cache meta").await {
         error!("Failed to save config cache metadata: {}", e);
         return;
     }
@@ -178,13 +159,13 @@ pub async fn restore_config_from_cache(config: &Config) -> AppResult<()> {
     let cached_config = serde_json::to_string(&cached_config)?;
 
     let config_path = get_sing_box_home().join("config.json");
-    write_file_atomic(&config_path, &cached_config)
+    write_file_atomic(&config_path, &cached_config, "sing-box config")
         .await
         .map_err(|e| AppError::context("Failed to restore config from cache", e))?;
     validate_sing_box_config()
         .await
         .map_err(|e| AppError::context("Cached config validation failed", e))?;
-    write_file_atomic(&cache, &cached_config)
+    write_file_atomic(&cache, &cached_config, "config cache")
         .await
         .map_err(|e| AppError::context("Failed to update normalized config cache", e))?;
     info!(cache = ?cache, "Restored config from cache");
@@ -265,7 +246,7 @@ pub async fn regenerate_without_restart_runtime(
     Ok(has_sub_nodes)
 }
 
-async fn read_existing_sing_box_config() -> AppResult<serde_json::Value> {
+pub(crate) async fn read_existing_sing_box_config() -> AppResult<serde_json::Value> {
     let config_path = get_sing_box_home().join("config.json");
     let source_path = if config_path.exists() {
         config_path
@@ -286,7 +267,20 @@ fn apply_routing_to_sing_box_config(
     config: &Config,
 ) -> AppResult<()> {
     let tun_process = config.tun_process.normalized().map_err(AppError::message)?;
-    let route_rules = build_route_rules(config.route_mode, &tun_process, &config.custom_rules)?;
+    // 这里只重写 route/dns 规则，inbounds 保持原样，所以分享端口必须以文档里
+    // 现有的 inbound 为准。分配账本不能当后备来源：账本可能领先于已部署的配置，
+    // 那样会写出引用不存在 outbound 的规则，让一次单纯的路由切换整个失败。
+    let share_bindings = if config.share.enabled {
+        extract_share_bindings_from_sing_box(sing_box_config)
+    } else {
+        Vec::new()
+    };
+    let route_rules = build_route_rules(
+        config.route_mode,
+        &tun_process,
+        &config.custom_rules,
+        &share_bindings,
+    )?;
     let dns_rules = build_dns_rules(config.route_mode);
 
     let Some(route) = sing_box_config["route"].as_object_mut() else {
@@ -314,11 +308,52 @@ fn apply_routing_to_sing_box_config(
     Ok(())
 }
 
+/// 从已生成的 sing-box 配置里读回 (节点 tag, 分享端口)。
+///
+/// 已部署的配置才是"实际在监听什么"的唯一真相；`SharePortMap` 只是分配账本。
+pub(crate) fn extract_share_bindings_from_sing_box(
+    sing_box_config: &serde_json::Value,
+) -> Vec<(String, u16)> {
+    let mut bindings = Vec::new();
+    let Some(rules) = sing_box_config["route"]["rules"].as_array() else {
+        return bindings;
+    };
+
+    for rule in rules {
+        let Some(inbounds) = rule.get("inbound").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        if inbounds.len() != 1 {
+            continue;
+        }
+        let Some(inbound) = inbounds[0].as_str() else {
+            continue;
+        };
+        let Some(port_str) = inbound.strip_prefix("share-") else {
+            continue;
+        };
+        let Ok(port) = port_str.parse::<u16>() else {
+            continue;
+        };
+        let Some(outbound) = rule.get("outbound").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        bindings.push((outbound.to_string(), port));
+    }
+
+    bindings
+}
+
 async fn rewrite_existing_sing_box_routing(config: &Config) -> AppResult<()> {
     let mut sing_box_config = read_existing_sing_box_config().await?;
     apply_routing_to_sing_box_config(&mut sing_box_config, config)?;
     let config_path = get_sing_box_home().join("config.json");
-    write_file_atomic(&config_path, &serde_json::to_string(&sing_box_config)?).await?;
+    write_file_atomic(
+        &config_path,
+        &serde_json::to_string(&sing_box_config)?,
+        "sing-box config",
+    )
+    .await?;
     validate_sing_box_config()
         .await
         .map_err(|e| AppError::context("Config validation failed", e))?;
@@ -462,6 +497,7 @@ fn routing_only_change(old_config: &Config, new_config: &Config) -> bool {
         && old_config.vps_ip == new_config.vps_ip
         && old_config.nodes == new_config.nodes
         && old_config.custom_rules == new_config.custom_rules
+        && old_config.share == new_config.share
         && (old_config.route_mode != new_config.route_mode
             || old_config.tun_process != new_config.tun_process)
 }
@@ -578,21 +614,6 @@ pub async fn apply_runtime_config_change(
                 ))
             }
         }
-    }
-}
-
-async fn sing_box_is_running(state: &Arc<AppState>) -> bool {
-    let mut lock = state.sing_process.lock().await;
-    match &mut *lock {
-        Some(proc) => match proc.child.try_wait() {
-            Ok(Some(_)) => {
-                *lock = None;
-                false
-            }
-            Ok(None) => true,
-            Err(_) => false,
-        },
-        None => false,
     }
 }
 
@@ -723,6 +744,15 @@ pub async fn gen_config(config: &Config, state: &Arc<AppState>) -> AppResult<boo
             .unwrap_or(usize::MAX)
     });
 
+    // 本轮节点列表是否完整——决定分享端口账本能不能回收失效条目。
+    //
+    // 判定刻意保守：抓取失败、解析丢节点、以及"订阅返回了 0 个节点"都算不完整。
+    // 最后一条是必须的：机场限额/过期时经常返回 HTTP 200 + 一个错误 JSON，
+    // 解析得到零节点且零错误，看起来和"订阅确实空了"一模一样。
+    // 两种误判的代价不对等——误判成不完整只会让账本多留几条废记录（真装满了
+    // 会在分配时明确报错），误判成完整则会把用户已经分发出去的端口收走。
+    let mut node_list_is_complete = true;
+
     for (url, result) in results {
         let status = match result {
             Ok(fetch_result) => {
@@ -731,6 +761,7 @@ pub async fn gen_config(config: &Config, state: &Arc<AppState>) -> AppResult<boo
                 final_outbounds.extend(fetch_result.outbounds);
 
                 let error_info = if !fetch_result.parse_errors.is_empty() {
+                    node_list_is_complete = false;
                     Some(format!(
                         "{} nodes skipped due to parse errors",
                         fetch_result.parse_errors.len()
@@ -743,6 +774,10 @@ pub async fn gen_config(config: &Config, state: &Arc<AppState>) -> AppResult<boo
                     None
                 };
 
+                if count == 0 {
+                    node_list_is_complete = false;
+                }
+
                 SubStatus {
                     url: url.clone(),
                     success: count > 0,
@@ -750,17 +785,27 @@ pub async fn gen_config(config: &Config, state: &Arc<AppState>) -> AppResult<boo
                     error: error_info,
                 }
             }
-            Err(e) => SubStatus {
-                url: url.clone(),
-                success: false,
-                node_count: 0,
-                error: Some(e),
-            },
+            Err(e) => {
+                node_list_is_complete = false;
+                SubStatus {
+                    url: url.clone(),
+                    success: false,
+                    node_count: 0,
+                    error: Some(e),
+                }
+            }
         };
         state.sub_status.lock().await.insert(url, status);
     }
 
     let has_sub_nodes = !final_node_names.is_empty();
+
+    let mut share_map = if config.share.enabled {
+        load_share_port_map().await
+    } else {
+        SharePortMap::default()
+    };
+    let share_map_before = share_map.clone();
 
     let sing_box_config = build_sing_box_config(
         config,
@@ -768,6 +813,8 @@ pub async fn gen_config(config: &Config, state: &Arc<AppState>) -> AppResult<boo
         my_outbounds,
         final_node_names,
         final_outbounds,
+        &mut share_map,
+        node_list_is_complete,
     )?;
 
     let sing_box_home = get_sing_box_home();
@@ -775,8 +822,13 @@ pub async fn gen_config(config: &Config, state: &Arc<AppState>) -> AppResult<boo
     write_file_atomic(
         &config_output_loc,
         &serde_json::to_string(&sing_box_config)?,
+        "sing-box config",
     )
     .await?;
+
+    if config.share.enabled && share_map != share_map_before {
+        save_share_port_map(&share_map).await?;
+    }
 
     Ok(has_sub_nodes)
 }
@@ -876,12 +928,19 @@ fn normalize_outbound_tags(
     (unique_names, unique_outbounds)
 }
 
+/// 构建 sing-box 配置。纯函数：不碰磁盘。
+///
+/// `share_map` 是分享端口的分配账本，就地更新；落盘由调用方在构建成功之后完成，
+/// 这样一次失败的构建不会留下已经改过的账本。`prune_share_ports` 表示本次传入的
+/// 节点列表是否完整（所有订阅都抓取成功），只有完整时才允许回收失效 tag 的端口。
 fn build_sing_box_config(
     config: &Config,
     my_names: Vec<String>,
     my_outbounds: Vec<serde_json::Value>,
     final_node_names: Vec<String>,
     final_outbounds: Vec<serde_json::Value>,
+    share_map: &mut SharePortMap,
+    prune_share_ports: bool,
 ) -> AppResult<serde_json::Value> {
     let total_nodes = my_outbounds.len() + final_outbounds.len();
     if total_nodes == 0 {
@@ -912,9 +971,34 @@ fn build_sing_box_config(
         my_outbounds.into_iter().chain(final_outbounds).collect(),
     );
 
+    // 只在启用时校验分享配置。关闭状态下的残留字段（比如手改过的 config.yaml 里
+    // base_port: 0）不该让整个配置生成失败——那会连带 start/添加节点/刷新订阅
+    // 一起挂掉，而用户根本没开这个功能。
+    let (share, share_bindings) = if config.share.enabled {
+        let share = config.share.normalized().map_err(AppError::message)?;
+        let reserved = reserved_system_ports(config.port, Some(socks_port));
+        let bindings = allocate_share_ports(
+            share_map,
+            &node_names,
+            share.base_port,
+            &reserved,
+            prune_share_ports,
+        )?;
+        (share, bindings)
+    } else {
+        // share_bindings 为空，下面那个循环不会执行，这个值读不到。
+        // 用 default 而不是 config.share.clone()，避免以后有人在循环外用到它时
+        // 拿到一份没经过 normalized() 的原始值。
+        (ShareConfig::default(), Vec::new())
+    };
+
     let tun_process = config.tun_process.normalized().map_err(AppError::message)?;
-    let mut sing_box_config =
-        get_config_template(config.route_mode, &tun_process, &config.custom_rules)?;
+    let mut sing_box_config = get_config_template(
+        config.route_mode,
+        &tun_process,
+        &config.custom_rules,
+        &share_bindings,
+    )?;
     if let Some(inbounds) = sing_box_config["inbounds"].as_array_mut() {
         inbounds.push(serde_json::json!({
             "type": "socks",
@@ -922,6 +1006,24 @@ fn build_sing_box_config(
             "listen": socks_listen,
             "listen_port": socks_port
         }));
+        for (_tag, port) in &share_bindings {
+            let mut inbound = serde_json::json!({
+                "type": "socks",
+                "tag": share_inbound_tag(*port),
+                "listen": share.listen,
+                "listen_port": port
+            });
+            if share.has_auth() {
+                inbound.as_object_mut().unwrap().insert(
+                    "users".to_string(),
+                    serde_json::json!([{
+                        "username": share.username,
+                        "password": share.password
+                    }]),
+                );
+            }
+            inbounds.push(inbound);
+        }
     }
     if let Some(selector_outbounds) = sing_box_config["outbounds"][0].get_mut("outbounds") {
         if let Some(arr) = selector_outbounds.as_array_mut() {
@@ -986,11 +1088,24 @@ fn socks_in_proxy_rule() -> serde_json::Value {
     serde_json::json!({"inbound": ["socks-in"], "action": "route", "outbound": "proxy"})
 }
 
-fn route_prelude_rules() -> Vec<serde_json::Value> {
-    vec![
-        serde_json::json!({"action": "sniff"}),
-        socks_in_proxy_rule(),
-    ]
+fn share_inbound_route_rules(share_bindings: &[(String, u16)]) -> Vec<serde_json::Value> {
+    share_bindings
+        .iter()
+        .map(|(tag, port)| {
+            serde_json::json!({
+                "inbound": [share_inbound_tag(*port)],
+                "action": "route",
+                "outbound": tag
+            })
+        })
+        .collect()
+}
+
+fn route_prelude_rules(share_bindings: &[(String, u16)]) -> Vec<serde_json::Value> {
+    let mut rules = vec![serde_json::json!({"action": "sniff"})];
+    rules.extend(share_inbound_route_rules(share_bindings));
+    rules.push(socks_in_proxy_rule());
+    rules
 }
 
 fn bypass_or_direct_rule(
@@ -1054,8 +1169,9 @@ fn build_dns_rules(route_mode: RouteMode) -> Vec<serde_json::Value> {
 fn build_default_route_rules(
     route_mode: RouteMode,
     custom_rules: &[String],
+    share_bindings: &[(String, u16)],
 ) -> Vec<serde_json::Value> {
-    let mut route_rules = route_prelude_rules();
+    let mut route_rules = route_prelude_rules(share_bindings);
     append_default_route_tail(&mut route_rules, route_mode, custom_rules);
 
     route_rules
@@ -1088,8 +1204,9 @@ fn build_global_bypass_route_rules(
     route_mode: RouteMode,
     tun_process: &TunProcessConfig,
     custom_rules: &[String],
+    share_bindings: &[(String, u16)],
 ) -> Vec<serde_json::Value> {
-    let mut route_rules = route_prelude_rules();
+    let mut route_rules = route_prelude_rules(share_bindings);
 
     if tun_process.dns_follow_process {
         route_rules.push(bypass_or_direct_rule(
@@ -1112,8 +1229,9 @@ fn build_process_only_route_rules(
     route_mode: RouteMode,
     tun_process: &TunProcessConfig,
     custom_rules: &[String],
+    share_bindings: &[(String, u16)],
 ) -> AppResult<Vec<serde_json::Value>> {
-    let mut route_rules = route_prelude_rules();
+    let mut route_rules = route_prelude_rules(share_bindings);
 
     if tun_process.dns_follow_process {
         route_rules.push(process_rule(
@@ -1167,9 +1285,14 @@ fn build_route_rules(
     route_mode: RouteMode,
     tun_process: &TunProcessConfig,
     custom_rules: &[String],
+    share_bindings: &[(String, u16)],
 ) -> AppResult<Vec<serde_json::Value>> {
     if !tun_process.enabled {
-        return Ok(build_default_route_rules(route_mode, custom_rules));
+        return Ok(build_default_route_rules(
+            route_mode,
+            custom_rules,
+            share_bindings,
+        ));
     }
 
     match tun_process.mode {
@@ -1177,9 +1300,10 @@ fn build_route_rules(
             route_mode,
             tun_process,
             custom_rules,
+            share_bindings,
         )),
         TunProcessMode::ProcessOnly => {
-            build_process_only_route_rules(route_mode, tun_process, custom_rules)
+            build_process_only_route_rules(route_mode, tun_process, custom_rules, share_bindings)
         }
     }
 }
@@ -1188,8 +1312,9 @@ fn get_config_template(
     route_mode: RouteMode,
     tun_process: &TunProcessConfig,
     custom_rules: &[String],
+    share_bindings: &[(String, u16)],
 ) -> AppResult<serde_json::Value> {
-    let route_rules = build_route_rules(route_mode, tun_process, custom_rules)?;
+    let route_rules = build_route_rules(route_mode, tun_process, custom_rules, share_bindings)?;
     let dns_rules = build_dns_rules(route_mode);
     let default_domain_resolver = "local";
     let route_final = route_final(tun_process);
@@ -1230,12 +1355,37 @@ fn get_config_template(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_routing_to_sing_box_config, build_sing_box_config, collect_manual_outbounds,
-        config_cache_fingerprint, config_with_route_override, normalize_cached_sing_box_config,
-        routing_only_change, save_config_to,
+        apply_routing_to_sing_box_config, collect_manual_outbounds, config_cache_fingerprint,
+        config_with_route_override, normalize_cached_sing_box_config, routing_only_change,
+        save_config_to,
     };
-    use crate::models::{Config, RouteMode, TunProcessConfig, TunProcessMatch, TunProcessMode};
+    use crate::error::AppResult;
+    use crate::models::{
+        Config, RouteMode, ShareConfig, TunProcessConfig, TunProcessMatch, TunProcessMode,
+    };
+    use crate::services::share_ports::SharePortMap;
     use serde_json::json;
+
+    /// 构建器现在是纯函数，账本由调用方持有。绝大多数用例不关心分享模式，
+    /// 给它们一本一次性的空账本即可——不再需要环境变量注入和全局测试锁。
+    fn build_sing_box_config(
+        config: &Config,
+        my_names: Vec<String>,
+        my_outbounds: Vec<serde_json::Value>,
+        final_node_names: Vec<String>,
+        final_outbounds: Vec<serde_json::Value>,
+    ) -> AppResult<serde_json::Value> {
+        let mut share_map = SharePortMap::default();
+        super::build_sing_box_config(
+            config,
+            my_names,
+            my_outbounds,
+            final_node_names,
+            final_outbounds,
+            &mut share_map,
+            true,
+        )
+    }
 
     fn manual_outbound() -> serde_json::Value {
         json!({
@@ -1274,6 +1424,7 @@ mod tests {
             ],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         };
@@ -1299,6 +1450,7 @@ mod tests {
             ],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         };
@@ -1325,6 +1477,7 @@ mod tests {
             ],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         };
@@ -1354,6 +1507,7 @@ mod tests {
                 "not-json".to_string(),
             ],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: RouteMode::Rule,
             vps_ip: None,
         };
@@ -1421,6 +1575,7 @@ mod tests {
             nodes: vec![],
             custom_rules: vec![],
             tun_process: tun_process(TunProcessMode::GlobalBypass),
+            share: Default::default(),
             route_mode: RouteMode::Global,
             vps_ip: None,
         };
@@ -1462,6 +1617,7 @@ mod tests {
             nodes: vec![],
             custom_rules: vec![],
             tun_process: tun_process(TunProcessMode::ProcessOnly),
+            share: Default::default(),
             route_mode: RouteMode::Rule,
             vps_ip: None,
         };
@@ -1505,6 +1661,7 @@ mod tests {
             nodes: vec![],
             custom_rules: vec![],
             tun_process: tun_process(TunProcessMode::ProcessOnly),
+            share: Default::default(),
             route_mode: RouteMode::Global,
             vps_ip: None,
         };
@@ -1540,6 +1697,7 @@ mod tests {
                     .to_string(),
             ],
             tun_process: tun_process(TunProcessMode::ProcessOnly),
+            share: Default::default(),
             route_mode: RouteMode::Rule,
             vps_ip: None,
         };
@@ -1580,6 +1738,7 @@ mod tests {
                 dns_follow_process: true,
                 bypass_action: Default::default(),
             },
+            share: Default::default(),
             route_mode: RouteMode::Rule,
             vps_ip: None,
         };
@@ -1623,6 +1782,7 @@ mod tests {
             nodes: vec![],
             custom_rules: vec![],
             tun_process: tun_process(TunProcessMode::ProcessOnly),
+            share: Default::default(),
             route_mode: RouteMode::Rule,
             vps_ip: None,
         };
@@ -1654,6 +1814,7 @@ mod tests {
             nodes: vec![],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: RouteMode::Global,
             vps_ip: None,
         };
@@ -1685,6 +1846,7 @@ mod tests {
                     .to_string(),
             ],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: RouteMode::Global,
             vps_ip: None,
         };
@@ -1730,6 +1892,7 @@ mod tests {
             nodes: vec![],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: RouteMode::Global,
             vps_ip: None,
         };
@@ -1749,6 +1912,7 @@ mod tests {
             nodes: vec![],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         };
@@ -1810,6 +1974,7 @@ mod tests {
             nodes: vec![],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         };
@@ -1864,6 +2029,7 @@ mod tests {
             nodes: vec![],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         };
@@ -1900,6 +2066,7 @@ mod tests {
             nodes: vec![],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         };
@@ -1948,6 +2115,7 @@ mod tests {
             socks_listen: None,
             socks_port: None,
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: RouteMode::Global,
             subs: vec![],
             nodes: vec![],
@@ -1990,6 +2158,7 @@ mod tests {
             socks_listen: None,
             socks_port: None,
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: RouteMode::Rule,
             subs: vec![],
             nodes: vec![],
@@ -2033,6 +2202,7 @@ mod tests {
             socks_listen: None,
             socks_port: Some(1080),
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: RouteMode::Tunnel,
             subs: vec!["https://example.com/sub".to_string()],
             nodes: vec![],
@@ -2077,6 +2247,7 @@ mod tests {
             nodes: vec![],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         };
@@ -2098,6 +2269,7 @@ mod tests {
             nodes: vec![],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         }));
@@ -2110,6 +2282,7 @@ mod tests {
             nodes: vec![],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         }));
@@ -2122,6 +2295,7 @@ mod tests {
             nodes: vec![r#"{"tag":"manual"}"#.to_string()],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         }));
@@ -2137,6 +2311,7 @@ mod tests {
             nodes: vec![],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         };
@@ -2161,6 +2336,7 @@ mod tests {
             ],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         };
@@ -2182,6 +2358,7 @@ mod tests {
             nodes: vec![],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         };
@@ -2222,6 +2399,7 @@ mod tests {
             nodes: vec![],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         };
@@ -2260,6 +2438,7 @@ mod tests {
             nodes: vec![],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: RouteMode::Rule,
             vps_ip: None,
         };
@@ -2326,6 +2505,7 @@ mod tests {
             nodes: vec![],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         };
@@ -2365,6 +2545,7 @@ mod tests {
                 "".to_string(),
             ],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         };
@@ -2410,6 +2591,7 @@ mod tests {
             nodes: vec![],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: RouteMode::Rule,
             vps_ip: None,
         };
@@ -2456,6 +2638,7 @@ mod tests {
             nodes: vec![],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: RouteMode::Rule,
             vps_ip: None,
         };
@@ -2485,6 +2668,7 @@ mod tests {
             nodes: vec![],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         };
@@ -2507,5 +2691,160 @@ mod tests {
         assert_eq!(before, after);
 
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[test]
+    fn build_sing_box_config_adds_share_inbounds_and_routes() {
+        let config = Config {
+            port: None,
+            socks_listen: None,
+            socks_port: Some(1080),
+            subs: vec![],
+            nodes: vec![],
+            custom_rules: vec![],
+            tun_process: Default::default(),
+            share: ShareConfig {
+                enabled: true,
+                listen: "0.0.0.0".to_string(),
+                base_port: 15000,
+                username: "user".to_string(),
+                password: "pass".to_string(),
+            },
+            route_mode: RouteMode::Global,
+            vps_ip: None,
+        };
+
+        let mut share_map = SharePortMap::default();
+        let built = super::build_sing_box_config(
+            &config,
+            vec!["node-a".to_string(), "node-b".to_string()],
+            vec![
+                json!({
+                    "type": "hysteria2",
+                    "tag": "node-a",
+                    "server": "a.example.com",
+                    "server_port": 443,
+                    "password": "secret"
+                }),
+                json!({
+                    "type": "hysteria2",
+                    "tag": "node-b",
+                    "server": "b.example.com",
+                    "server_port": 443,
+                    "password": "secret"
+                }),
+            ],
+            vec![],
+            vec![],
+            &mut share_map,
+            true,
+        )
+        .unwrap();
+
+        let inbounds = built["inbounds"].as_array().unwrap();
+        assert_eq!(inbounds.len(), 4);
+        assert_eq!(inbounds[2]["tag"], "share-15000");
+        assert_eq!(inbounds[2]["listen_port"], 15000);
+        assert_eq!(inbounds[2]["users"][0]["username"], "user");
+        assert_eq!(inbounds[3]["tag"], "share-15001");
+
+        let rules = built["route"]["rules"].as_array().unwrap();
+        assert_eq!(rules[0]["action"], "sniff");
+        assert_eq!(rules[1]["inbound"], json!(["share-15000"]));
+        assert_eq!(rules[1]["outbound"], "node-a");
+        assert_eq!(rules[2]["inbound"], json!(["share-15001"]));
+        assert_eq!(rules[2]["outbound"], "node-b");
+        assert_eq!(
+            rules[3],
+            json!({"inbound": ["socks-in"], "action": "route", "outbound": "proxy"})
+        );
+
+        // 账本落在调用方手里，构建本身没有碰过磁盘。
+        assert_eq!(share_map.base_port, 15000);
+        assert_eq!(share_map.ports.get("node-a"), Some(&15000));
+        assert_eq!(share_map.ports.get("node-b"), Some(&15001));
+    }
+
+    #[test]
+    fn build_sing_box_config_share_without_auth_omits_users() {
+        let config = Config {
+            port: None,
+            socks_listen: None,
+            socks_port: Some(1080),
+            subs: vec![],
+            nodes: vec![],
+            custom_rules: vec![],
+            tun_process: Default::default(),
+            share: ShareConfig {
+                enabled: true,
+                listen: "127.0.0.1".to_string(),
+                base_port: 16000,
+                username: String::new(),
+                password: String::new(),
+            },
+            route_mode: RouteMode::Global,
+            vps_ip: None,
+        };
+
+        let built = build_sing_box_config(
+            &config,
+            vec!["solo".to_string()],
+            vec![manual_outbound()],
+            vec![],
+            vec![],
+        )
+        .unwrap();
+
+        let inbound = &built["inbounds"].as_array().unwrap()[2];
+        assert_eq!(inbound["tag"], "share-16000");
+        assert!(inbound.get("users").is_none());
+    }
+
+    #[test]
+    fn config_cache_fingerprint_includes_share() {
+        let mut first = Config {
+            port: None,
+            socks_listen: None,
+            socks_port: None,
+            subs: vec![],
+            nodes: vec![],
+            custom_rules: vec![],
+            tun_process: Default::default(),
+            share: Default::default(),
+            route_mode: Default::default(),
+            vps_ip: None,
+        };
+        let second = first.clone();
+        assert_eq!(
+            config_cache_fingerprint(&first).unwrap(),
+            config_cache_fingerprint(&second).unwrap()
+        );
+
+        first.share.enabled = true;
+        assert_ne!(
+            config_cache_fingerprint(&first).unwrap(),
+            config_cache_fingerprint(&second).unwrap()
+        );
+    }
+
+    #[test]
+    fn routing_only_change_rejects_share_changes() {
+        let old_config = Config {
+            port: None,
+            socks_listen: None,
+            socks_port: None,
+            subs: vec!["https://example.com/sub".to_string()],
+            nodes: vec![],
+            custom_rules: vec![],
+            tun_process: Default::default(),
+            share: Default::default(),
+            route_mode: RouteMode::Global,
+            vps_ip: None,
+        };
+        let mut new_config = old_config.clone();
+        new_config.share.enabled = true;
+        new_config.route_mode = RouteMode::Rule;
+
+        assert!(!routing_only_change(&old_config, &new_config));
     }
 }

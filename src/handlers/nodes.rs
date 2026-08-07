@@ -409,6 +409,7 @@ mod tests {
             ],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         });
@@ -492,6 +493,7 @@ mod tests {
             ],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         });
@@ -525,6 +527,7 @@ mod tests {
             ],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         });
@@ -547,6 +550,7 @@ mod tests {
             nodes: vec![],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         });
@@ -573,6 +577,7 @@ mod tests {
             ],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         });
@@ -600,6 +605,7 @@ mod tests {
             ],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         });
@@ -632,6 +638,7 @@ mod tests {
             ],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         });
@@ -659,6 +666,7 @@ mod tests {
             ],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         });
@@ -685,6 +693,7 @@ mod tests {
             ],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         });

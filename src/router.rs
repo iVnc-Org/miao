@@ -10,6 +10,7 @@ use crate::handlers::{
     nodes::{add_node, delete_node, get_nodes},
     proxy::set_last_proxy,
     service::{get_status, set_route_mode, start_service, stop_service, test_connectivity},
+    share::{get_share, get_share_endpoints, set_share},
     static_assets::{serve_favicon, serve_index},
     subs::{add_sub, delete_sub, get_subs, refresh_subs},
     tun_process::{get_tun_process, set_tun_process},
@@ -27,6 +28,9 @@ pub fn build_router(app_state: Arc<AppState>) -> Router {
         .route("/api/route-mode", post(set_route_mode))
         .route("/api/tun-process", get(get_tun_process))
         .route("/api/tun-process", post(set_tun_process))
+        .route("/api/share", get(get_share))
+        .route("/api/share", post(set_share))
+        .route("/api/share/endpoints", get(get_share_endpoints))
         .route("/api/connectivity", post(test_connectivity))
         .route("/api/version", get(get_version))
         .route("/api/upgrade", post(upgrade))
@@ -66,6 +70,7 @@ mod tests {
             nodes: vec![],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         })
@@ -88,6 +93,7 @@ mod tests {
             nodes: vec![],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         })
@@ -117,6 +123,7 @@ mod tests {
             nodes: vec![],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         })
@@ -144,6 +151,7 @@ mod tests {
             nodes: vec![],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         })
@@ -175,6 +183,7 @@ mod tests {
             ],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         })
@@ -204,6 +213,7 @@ mod tests {
             nodes: vec![],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         })
@@ -232,6 +242,7 @@ mod tests {
             nodes: vec![],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         })
@@ -262,6 +273,7 @@ mod tests {
             nodes: vec![],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         })
@@ -294,6 +306,7 @@ mod tests {
             ],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         })
@@ -331,6 +344,7 @@ mod tests {
             ],
             custom_rules: vec![],
             tun_process: Default::default(),
+            share: Default::default(),
             route_mode: Default::default(),
             vps_ip: None,
         })

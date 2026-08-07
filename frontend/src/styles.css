@@ -735,6 +735,93 @@ html[data-embed-mode='true'] .right-column {
     font-size: 11px;
     line-height: 1.5;
 }
+.share-body {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+.share-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+}
+.share-toggle input {
+    width: 16px;
+    height: 16px;
+}
+.share-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+}
+.share-note {
+    color: var(--text-muted);
+    font-size: 11px;
+    line-height: 1.5;
+}
+.share-endpoints {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.share-endpoint-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) auto;
+    gap: 8px;
+    align-items: center;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface-soft);
+}
+.share-endpoint-meta {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    min-width: 0;
+}
+.share-endpoint-tag {
+    font-size: 12px;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.share-endpoint-port {
+    color: var(--text-muted);
+    font-size: 11px;
+    flex: 0 0 auto;
+}
+.share-endpoint-url {
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-muted);
+    /* 复制按钮在非安全上下文下可能降级失败，手动选中必须是可用的退路 */
+    user-select: all;
+    cursor: text;
+}
+.share-copy-btn {
+    width: 28px;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text);
+    cursor: pointer;
+}
+.share-copy-btn:hover:not(:disabled) {
+    background: var(--surface);
+}
+.share-copy-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
 .status-icon-badge {
     width: 28px;
     height: 28px;

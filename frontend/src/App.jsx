@@ -6,6 +6,7 @@ import {
   NodesCard,
   SubsCard,
   TunProcessCard,
+  ShareCard,
   ConnectivityCard,
   ConfirmModal,
   ConnectionsModal,
@@ -20,6 +21,7 @@ import {
   useSubs,
   useNodes,
   useTunProcess,
+  useShare,
   useProxies,
   useTraffic,
   useConnections,
@@ -66,6 +68,7 @@ export default function App() {
   const { subs, fetchSubs } = useSubs()
   const { nodes, fetchNodes } = useNodes()
   const { tunProcess, setTunProcess, fetchTunProcess } = useTunProcess()
+  const { share, setShare, shareEndpoints, fetchShare, fetchShareEndpoints } = useShare()
   const { primaryGroupName, primaryGroup, fetchProxies } = useProxies(status)
   const { traffic, closeSockets } = useTraffic(status)
   const {
@@ -135,8 +138,15 @@ export default function App() {
 
   // 首次加载：获取初始状态后再决定显示 onboarding 还是 dashboard
   useEffect(() => {
-    Promise.all([fetchStatus(), fetchSubs(), fetchNodes(), fetchTunProcess()])
-      .finally(() => setFirstLoadDone(true))
+    Promise.all([
+      fetchStatus(),
+      fetchSubs(),
+      fetchNodes(),
+      fetchTunProcess(),
+      // 端口列表必须等分享配置到手之后再拉：fetchShareEndpoints 在分享模式关闭时会
+      // 直接短路，而首屏时它看到的还是默认值 false，并发发起就会永远拿到空列表。
+      fetchShare().then(() => fetchShareEndpoints()),
+    ]).finally(() => setFirstLoadDone(true))
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const needsOnboarding = firstLoadDone
@@ -208,11 +218,11 @@ export default function App() {
         await apiCall('service/start', { method: 'POST' }, 'start')
         showToast('服务已启动', 'success')
       }
-      await fetchStatus()
+      await Promise.all([fetchStatus(), fetchShareEndpoints()])
     } catch (error) {
       showToast(error.message, 'error')
     }
-  }, [status.running, apiCall, clearDelays, clearConnectivity, fetchStatus, showToast])
+  }, [status.running, apiCall, clearDelays, clearConnectivity, fetchStatus, fetchShareEndpoints, showToast])
 
   const handleSetRouteMode = useCallback(async (nextMode) => {
     if (nextMode === status.route_mode) return
@@ -269,6 +279,34 @@ export default function App() {
     showToast,
   ])
 
+  const handleSaveShare = useCallback(async (nextConfig) => {
+    try {
+      const response = await apiCall(
+        'share',
+        { method: 'POST', body: JSON.stringify(nextConfig) },
+        'share'
+      )
+      setShare(nextConfig)
+      clearDelays()
+      clearConnectivity()
+      // 四个 GET 互不依赖，串行等于白等三个来回；而且 POST 已经重启过 sing-box 了。
+      await Promise.all([fetchShare(), fetchShareEndpoints(), fetchStatus(), fetchProxies()])
+      showToast(response.message || '分享模式设置已保存', 'success')
+    } catch (error) {
+      showToast(error.message, 'error')
+    }
+  }, [
+    apiCall,
+    setShare,
+    clearDelays,
+    clearConnectivity,
+    fetchShare,
+    fetchShareEndpoints,
+    fetchStatus,
+    fetchProxies,
+    showToast,
+  ])
+
   const handleSwitchProxy = useCallback(async (groupName, nodeName) => {
     try {
       const response = await fetch(`${clashApiBase}/proxies/${encodeURIComponent(groupName)}`, {
@@ -302,46 +340,46 @@ export default function App() {
       await apiCall('subs', { method: 'POST', body: JSON.stringify({ url: newSubUrl.trim() }) }, 'addSub')
       setNewSubUrl('')
       clearDelays()
-      await fetchSubs()
+      await Promise.all([fetchSubs(), fetchShareEndpoints()])
       showToast('订阅已添加', 'success')
     } catch (error) {
       showToast(error.message, 'error')
     }
-  }, [newSubUrl, apiCall, clearDelays, fetchSubs, showToast])
+  }, [newSubUrl, apiCall, clearDelays, fetchSubs, fetchShareEndpoints, showToast])
 
   const handleOnboardingAddSub = useCallback(async (url) => {
     try {
       await apiCall('subs', { method: 'POST', body: JSON.stringify({ url }) }, 'addSub')
       clearDelays()
-      await fetchSubs()
+      await Promise.all([fetchSubs(), fetchShareEndpoints()])
       showToast('订阅已添加', 'success')
     } catch (error) {
       showToast(error.message, 'error')
     }
-  }, [apiCall, clearDelays, fetchSubs, showToast])
+  }, [apiCall, clearDelays, fetchSubs, fetchShareEndpoints, showToast])
 
   const handleDeleteSubscription = useCallback(async (url) => {
     try {
       await apiCall('subs', { method: 'DELETE', body: JSON.stringify({ url }) }, 'deleteSub')
-      await fetchSubs()
+      await Promise.all([fetchSubs(), fetchShareEndpoints()])
       clearDelays()
       showToast('订阅已删除', 'success')
     } catch (error) {
       showToast(error.message, 'error')
     }
-  }, [apiCall, clearDelays, fetchSubs, showToast])
+  }, [apiCall, clearDelays, fetchSubs, fetchShareEndpoints, showToast])
 
   const handleRefreshSubscriptions = useCallback(async () => {
     try {
       await apiCall('subs/refresh', { method: 'POST' }, 'refreshSubs')
-      await fetchSubs()
+      await Promise.all([fetchSubs(), fetchShareEndpoints()])
       clearConnectivity()
       clearDelays()
       showToast('订阅已刷新', 'success')
     } catch (error) {
       showToast(error.message, 'error')
     }
-  }, [apiCall, clearConnectivity, clearDelays, fetchSubs, showToast])
+  }, [apiCall, clearConnectivity, clearDelays, fetchSubs, fetchShareEndpoints, showToast])
 
   const handleAddNode = useCallback(async () => {
     const isSimpleProxy = nodeType === 'socks' || nodeType === 'http'
@@ -473,24 +511,24 @@ export default function App() {
       await apiCall('nodes', { method: 'POST', body: JSON.stringify(payload) }, 'addNode')
       setShowNodeModal(false)
       setNodeForm({ ...EMPTY_NODE_FORM, ...nodeTypeDefaults(nodeType) })
-      await fetchNodes()
+      await Promise.all([fetchNodes(), fetchShareEndpoints()])
       clearDelays()
       showToast('节点已添加', 'success')
     } catch (error) {
       showToast(error.message, 'error')
     }
-  }, [nodeForm, nodeType, apiCall, clearDelays, fetchNodes, showToast])
+  }, [nodeForm, nodeType, apiCall, clearDelays, fetchNodes, fetchShareEndpoints, showToast])
 
   const handleDeleteNode = useCallback(async (tag) => {
     try {
       await apiCall('nodes', { method: 'DELETE', body: JSON.stringify({ tag }) }, 'deleteNode')
-      await fetchNodes()
+      await Promise.all([fetchNodes(), fetchShareEndpoints()])
       clearDelays()
       showToast('节点已删除', 'success')
     } catch (error) {
       showToast(error.message, 'error')
     }
-  }, [apiCall, clearDelays, fetchNodes, showToast])
+  }, [apiCall, clearDelays, fetchNodes, fetchShareEndpoints, showToast])
 
   const handleTestDelay = useCallback((nodeName) => {
     testDelay(clashApiBase, nodeName)
@@ -663,6 +701,15 @@ export default function App() {
               loading={loadingAction === 'tunProcess'}
               disabled={status.initializing}
               onSave={handleSaveTunProcess}
+              showToast={showToast}
+            />
+
+            <ShareCard
+              config={share}
+              endpoints={shareEndpoints}
+              loading={loadingAction === 'share'}
+              disabled={status.initializing}
+              onSave={handleSaveShare}
               showToast={showToast}
             />
 

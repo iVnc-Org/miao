@@ -2,27 +2,11 @@ use axum::{extract::State, http::StatusCode, response::Json};
 use std::sync::Arc;
 
 use crate::{
+    handlers::apply_config_section,
     models::{ApiResponse, TunProcessConfig},
-    responses::{status_error, success, success_no_data, HandlerResult},
-    services::config::apply_persistent_config_change,
+    responses::{status_error, success, HandlerResult},
     state::AppState,
 };
-
-async fn sing_box_is_running(state: &Arc<AppState>) -> bool {
-    let mut lock = state.sing_process.lock().await;
-
-    match &mut *lock {
-        Some(proc) => match proc.child.try_wait() {
-            Ok(Some(_)) => {
-                *lock = None;
-                false
-            }
-            Ok(None) => true,
-            Err(_) => false,
-        },
-        None => false,
-    }
-}
 
 pub async fn get_tun_process(
     State(state): State<Arc<AppState>>,
@@ -40,24 +24,14 @@ pub async fn set_tun_process(
         .normalized()
         .map_err(|e| status_error(StatusCode::BAD_REQUEST, e))?;
 
-    let _config_update = state.config_update.lock().await;
-    let was_running = sing_box_is_running(&state).await;
-    let old_config = state.config.read().await.clone();
-
-    if old_config.tun_process == tun_process {
-        return Ok(success_no_data("TUN process config unchanged"));
-    }
-
-    let mut new_config = old_config.clone();
-    new_config.tun_process = tun_process;
-
-    match apply_persistent_config_change(&state, &old_config, &new_config, was_running).await {
-        Ok(_) if was_running => Ok(success_no_data(
-            "TUN process config saved and sing-box restarted",
-        )),
-        Ok(_) => Ok(success_no_data("TUN process config saved")),
-        Err(e) => Err(status_error(StatusCode::INTERNAL_SERVER_ERROR, e)),
-    }
+    apply_config_section(
+        &state,
+        "TUN process config",
+        tun_process,
+        |config| &config.tun_process,
+        |config, value| config.tun_process = value,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -91,6 +65,7 @@ mod tests {
                 dns_follow_process: true,
                 bypass_action: Default::default(),
             },
+            share: Default::default(),
             route_mode: Default::default(),
         });
 

@@ -137,6 +137,77 @@ export function useTunProcess() {
   return { tunProcess, setTunProcess, fetchTunProcess }
 }
 
+// 与后端 DEFAULT_SHARE_LISTEN 保持一致：默认只监听回环，
+// 想暴露到局域网必须显式改地址，而后端会要求那种情况下必须填账号密码。
+export const DEFAULT_SHARE = {
+  enabled: false,
+  listen: '127.0.0.1',
+  base_port: 12000,
+  username: '',
+  password: '',
+}
+
+export function normalizeShareConfig(config) {
+  return {
+    ...DEFAULT_SHARE,
+    ...(config || {}),
+  }
+}
+
+export function useShare() {
+  const [share, setShareState] = useState(DEFAULT_SHARE)
+  const [shareEndpoints, setShareEndpoints] = useState([])
+  // fetchShareEndpoints 被挂在七八个 handler 上，关闭分享模式时那些请求必然返回空数组。
+  // 用 ref 而不是读 state，是为了让保存后立刻发起的那次请求也能看到最新的开关值。
+  const enabledRef = useRef(DEFAULT_SHARE.enabled)
+
+  const setShare = useCallback((config) => {
+    const normalized = normalizeShareConfig(config)
+    enabledRef.current = normalized.enabled
+    setShareState(normalized)
+    return normalized
+  }, [])
+
+  const fetchShare = useCallback(async () => {
+    try {
+      const response = await fetch('/api/share')
+      const payload = await response.json()
+      if (payload.success && payload.data) {
+        return setShare(payload.data)
+      }
+    } catch {
+      // ignore
+    }
+    return null
+  }, [setShare])
+
+  const fetchShareEndpoints = useCallback(async () => {
+    if (!enabledRef.current) {
+      setShareEndpoints([])
+      return []
+    }
+    try {
+      const response = await fetch('/api/share/endpoints')
+      const payload = await response.json()
+      if (payload.success && Array.isArray(payload.data)) {
+        setShareEndpoints(payload.data)
+        return payload.data
+      }
+    } catch {
+      // ignore
+    }
+    return []
+  }, [])
+
+  return {
+    share,
+    setShare,
+    shareEndpoints,
+    fetchShare,
+    fetchShareEndpoints,
+  }
+}
+
 export function useProxies(status) {
   const [proxies, setProxies] = useState({})
 
