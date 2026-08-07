@@ -47,13 +47,6 @@ mod tests {
     #[tokio::test]
     async fn get_tun_process_returns_config_value() {
         let state = app_state(Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            vps_ip: None,
-            nodes: vec![],
-            custom_rules: vec![],
             tun_process: TunProcessConfig {
                 enabled: true,
                 mode: TunProcessMode::ProcessOnly,
@@ -65,8 +58,7 @@ mod tests {
                 dns_follow_process: true,
                 bypass_action: Default::default(),
             },
-            share: Default::default(),
-            route_mode: Default::default(),
+            ..Default::default()
         });
 
         let Json(response) = get_tun_process(State(state)).await;

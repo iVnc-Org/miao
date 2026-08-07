@@ -291,18 +291,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_status_reports_stopped_when_no_process_exists() {
-        let state = app_state(Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
-        });
+        let state = app_state(Config::default());
 
         let axum::response::Json(response) = get_status(State(state)).await;
 
@@ -324,16 +313,8 @@ mod tests {
     #[tokio::test]
     async fn get_status_reports_route_mode_override_without_mutating_config() {
         let state = app_state(Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
             route_mode: RouteMode::Rule,
-            vps_ip: None,
+            ..Default::default()
         });
         *state.route_mode_override.write().await = Some(RouteMode::Global);
 
@@ -347,16 +328,8 @@ mod tests {
     #[tokio::test]
     async fn get_status_defaults_to_global_without_override() {
         let state = app_state(Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
             route_mode: RouteMode::Global,
-            vps_ip: None,
+            ..Default::default()
         });
 
         let axum::response::Json(response) = get_status(State(state)).await;

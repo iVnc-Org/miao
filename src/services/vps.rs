@@ -528,18 +528,9 @@ mod tests {
     #[test]
     fn detects_existing_manual_node_for_vps_ip() {
         let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![
-                r#"{"type":"hysteria2","tag":"manual","server":"203.0.113.10","server_port":543,"password":"secret","tls":{"enabled":true,"insecure":true}}"#.to_string(),
-            ],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
+            nodes: vec![ r#"{"type":"hysteria2","tag":"manual","server":"203.0.113.10","server_port":543,"password":"secret","tls":{"enabled":true,"insecure":true}}"#.to_string(), ],
             vps_ip: Some("203.0.113.10".to_string()),
+            ..Default::default()
         };
 
         assert!(has_manual_node_for_vps(&config));
@@ -548,16 +539,9 @@ mod tests {
     #[test]
     fn ignores_invalid_manual_nodes_when_checking_vps_ip() {
         let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
             nodes: vec!["not-json".to_string()],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
             vps_ip: Some("203.0.113.10".to_string()),
+            ..Default::default()
         };
 
         assert!(!has_manual_node_for_vps(&config));

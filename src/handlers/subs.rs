@@ -120,16 +120,8 @@ mod tests {
     #[tokio::test]
     async fn get_subs_returns_default_pending_status_when_status_missing() {
         let state = app_state(Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
             subs: vec!["https://example.com/sub".to_string()],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
+            ..Default::default()
         });
 
         let Json(response) = get_subs(State(state)).await;

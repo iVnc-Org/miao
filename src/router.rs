@@ -62,19 +62,7 @@ mod tests {
 
     #[tokio::test]
     async fn router_serves_index_page() {
-        let app = test_app(Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
-        })
-        .await;
+        let app = test_app(Config::default()).await;
 
         let response = app.oneshot(empty_request("GET", "/")).await.unwrap();
 
@@ -85,19 +73,7 @@ mod tests {
 
     #[tokio::test]
     async fn router_serves_favicon_with_svg_content_type() {
-        let app = test_app(Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
-        })
-        .await;
+        let app = test_app(Config::default()).await;
 
         let response = app
             .oneshot(empty_request("GET", "/favicon.svg"))
@@ -115,19 +91,7 @@ mod tests {
 
     #[tokio::test]
     async fn router_returns_status_payload() {
-        let app = test_app(Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
-        })
-        .await;
+        let app = test_app(Config::default()).await;
 
         let response = app
             .oneshot(empty_request("GET", "/api/status"))
@@ -143,19 +107,7 @@ mod tests {
 
     #[tokio::test]
     async fn router_returns_version_build_info() {
-        let app = test_app(Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
-        })
-        .await;
+        let app = test_app(Config::default()).await;
 
         let response = app
             .oneshot(empty_request("GET", "/api/version"))
@@ -174,18 +126,8 @@ mod tests {
     #[tokio::test]
     async fn router_returns_node_list_payload() {
         let app = test_app(Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![
-                r#"{"type":"hysteria2","tag":"router-node","server":"node.example.com","server_port":443,"password":"secret","up_mbps":40,"down_mbps":350,"tls":{"enabled":true,"server_name":"sni.example.com","insecure":true}}"#.to_string(),
-            ],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
+            nodes: vec![ r#"{"type":"hysteria2","tag":"router-node","server":"node.example.com","server_port":443,"password":"secret","up_mbps":40,"down_mbps":350,"tls":{"enabled":true,"server_name":"sni.example.com","insecure":true}}"#.to_string(), ],
+            ..Default::default()
         })
         .await;
 
@@ -206,16 +148,8 @@ mod tests {
     #[tokio::test]
     async fn router_returns_subscription_list_payload() {
         let app = test_app(Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
             subs: vec!["https://example.com/subscription".to_string()],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
+            ..Default::default()
         })
         .await;
 
@@ -235,16 +169,8 @@ mod tests {
     #[tokio::test]
     async fn router_rejects_duplicate_subscription_with_bad_request() {
         let app = test_app(Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
             subs: vec!["https://example.com/subscription".to_string()],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
+            ..Default::default()
         })
         .await;
 
@@ -266,16 +192,8 @@ mod tests {
     #[tokio::test]
     async fn router_returns_not_found_when_deleting_missing_subscription() {
         let app = test_app(Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
             subs: vec!["https://example.com/subscription".to_string()],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
+            ..Default::default()
         })
         .await;
 
@@ -297,18 +215,8 @@ mod tests {
     #[tokio::test]
     async fn router_rejects_duplicate_node_with_bad_request() {
         let app = test_app(Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![
-                r#"{"type":"hysteria2","tag":"router-node","server":"node.example.com","server_port":443,"password":"password123","up_mbps":40,"down_mbps":350,"tls":{"enabled":true,"insecure":true}}"#.to_string(),
-            ],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
+            nodes: vec![ r#"{"type":"hysteria2","tag":"router-node","server":"node.example.com","server_port":443,"password":"password123","up_mbps":40,"down_mbps":350,"tls":{"enabled":true,"insecure":true}}"#.to_string(), ],
+            ..Default::default()
         })
         .await;
 
@@ -335,18 +243,8 @@ mod tests {
     #[tokio::test]
     async fn router_returns_not_found_when_deleting_missing_node() {
         let app = test_app(Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![
-                r#"{"type":"hysteria2","tag":"router-node","server":"node.example.com","server_port":443,"password":"secret","up_mbps":40,"down_mbps":350,"tls":{"enabled":true,"insecure":true}}"#.to_string(),
-            ],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
+            nodes: vec![ r#"{"type":"hysteria2","tag":"router-node","server":"node.example.com","server_port":443,"password":"secret","up_mbps":40,"down_mbps":350,"tls":{"enabled":true,"insecure":true}}"#.to_string(), ],
+            ..Default::default()
         })
         .await;
 

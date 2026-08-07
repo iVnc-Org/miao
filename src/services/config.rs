@@ -1414,19 +1414,8 @@ mod tests {
     #[test]
     fn collect_manual_outbounds_ignores_invalid_json_nodes() {
         let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![
-                r#"{"type":"hysteria2","tag":"manual-a","server":"a.example.com","server_port":443,"password":"p","up_mbps":40,"down_mbps":350,"tls":{"enabled":true,"insecure":true}}"#.to_string(),
-                "{invalid-json".to_string(),
-            ],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
+            nodes: vec![ r#"{"type":"hysteria2","tag":"manual-a","server":"a.example.com","server_port":443,"password":"p","up_mbps":40,"down_mbps":350,"tls":{"enabled":true,"insecure":true}}"#.to_string(), "{invalid-json".to_string(), ],
+            ..Default::default()
         };
 
         let (outbounds, names) = collect_manual_outbounds(&config);
@@ -1440,19 +1429,11 @@ mod tests {
     fn collect_manual_outbounds_preserves_hysteria2_without_default_bandwidth() {
         // 测试：Hysteria2 节点不强制包含带宽默认值
         let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
             nodes: vec![
-                // 不包含 up_mbps/down_mbps 的节点
-                r#"{"type":"hysteria2","tag":"no-bandwidth","server":"example.com","server_port":443,"password":"secret","tls":{"enabled":true}}"#.to_string(),
-            ],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
+    // 不包含 up_mbps/down_mbps 的节点
+    r#"{"type":"hysteria2","tag":"no-bandwidth","server":"example.com","server_port":443,"password":"secret","tls":{"enabled":true}}"#.to_string(),
+],
+            ..Default::default()
         };
 
         let (outbounds, names) = collect_manual_outbounds(&config);
@@ -1467,19 +1448,8 @@ mod tests {
     #[test]
     fn collect_manual_outbounds_preserves_socks_and_http_nodes() {
         let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![
-                r#"{"type":"socks","tag":"socks-a","server":"socks.example.com","server_port":1080}"#.to_string(),
-                r#"{"type":"http","tag":"http-a","server":"http.example.com","server_port":8080,"username":"user","password":"pass"}"#.to_string(),
-            ],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
+            nodes: vec![ r#"{"type":"socks","tag":"socks-a","server":"socks.example.com","server_port":1080}"#.to_string(), r#"{"type":"http","tag":"http-a","server":"http.example.com","server_port":8080,"username":"user","password":"pass"}"#.to_string(), ],
+            ..Default::default()
         };
 
         let (outbounds, names) = collect_manual_outbounds(&config);
@@ -1496,20 +1466,14 @@ mod tests {
     #[test]
     fn build_sing_box_config_merges_nodes_and_valid_custom_rules() {
         let config = Config {
-            port: None,
-            socks_listen: None,
             socks_port: Some(1080),
-            subs: vec![],
-            nodes: vec![],
             custom_rules: vec![
                 r#"{"domain_suffix":["example.com"],"action":"route","outbound":"proxy"}"#
                     .to_string(),
                 "not-json".to_string(),
             ],
-            tun_process: Default::default(),
-            share: Default::default(),
             route_mode: RouteMode::Rule,
-            vps_ip: None,
+            ..Default::default()
         };
 
         let my_outbounds = vec![json!({
@@ -1568,16 +1532,9 @@ mod tests {
     #[test]
     fn build_sing_box_config_global_bypass_adds_process_rules_before_dns_hijack() {
         let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
             tun_process: tun_process(TunProcessMode::GlobalBypass),
-            share: Default::default(),
             route_mode: RouteMode::Global,
-            vps_ip: None,
+            ..Default::default()
         };
 
         let built = build_sing_box_config(
@@ -1610,16 +1567,9 @@ mod tests {
     #[test]
     fn build_sing_box_config_process_only_scopes_dns_and_uses_direct_final() {
         let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
             tun_process: tun_process(TunProcessMode::ProcessOnly),
-            share: Default::default(),
             route_mode: RouteMode::Rule,
-            vps_ip: None,
+            ..Default::default()
         };
 
         let built = build_sing_box_config(
@@ -1654,16 +1604,9 @@ mod tests {
     #[test]
     fn build_sing_box_config_process_only_forces_socks_in_to_proxy() {
         let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
             tun_process: tun_process(TunProcessMode::ProcessOnly),
-            share: Default::default(),
             route_mode: RouteMode::Global,
-            vps_ip: None,
+            ..Default::default()
         };
 
         let built = build_sing_box_config(
@@ -1687,19 +1630,13 @@ mod tests {
     #[test]
     fn build_sing_box_config_process_only_scopes_custom_rules_to_processes() {
         let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
             custom_rules: vec![
                 r#"{"domain_suffix":["example.com"],"action":"route","outbound":"direct"}"#
                     .to_string(),
             ],
             tun_process: tun_process(TunProcessMode::ProcessOnly),
-            share: Default::default(),
             route_mode: RouteMode::Rule,
-            vps_ip: None,
+            ..Default::default()
         };
 
         let built = build_sing_box_config(
@@ -1725,12 +1662,6 @@ mod tests {
     #[test]
     fn build_sing_box_config_errors_when_enabled_tun_process_has_empty_match() {
         let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
             tun_process: TunProcessConfig {
                 enabled: true,
                 mode: TunProcessMode::ProcessOnly,
@@ -1738,9 +1669,8 @@ mod tests {
                 dns_follow_process: true,
                 bypass_action: Default::default(),
             },
-            share: Default::default(),
             route_mode: RouteMode::Rule,
-            vps_ip: None,
+            ..Default::default()
         };
 
         let err = build_sing_box_config(
@@ -1775,16 +1705,10 @@ mod tests {
             ]
         });
         let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
             subs: vec!["https://example.com/sub".to_string()],
-            nodes: vec![],
-            custom_rules: vec![],
             tun_process: tun_process(TunProcessMode::ProcessOnly),
-            share: Default::default(),
             route_mode: RouteMode::Rule,
-            vps_ip: None,
+            ..Default::default()
         };
 
         apply_routing_to_sing_box_config(&mut sing_box_config, &config).unwrap();
@@ -1807,16 +1731,9 @@ mod tests {
     #[test]
     fn routing_only_change_detects_route_mode_and_tun_process_changes() {
         let mut old_config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
             subs: vec!["https://example.com/sub".to_string()],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
             route_mode: RouteMode::Global,
-            vps_ip: None,
+            ..Default::default()
         };
         let mut new_config = old_config.clone();
         new_config.route_mode = RouteMode::Rule;
@@ -1836,19 +1753,12 @@ mod tests {
     #[test]
     fn build_sing_box_config_global_mode_removes_split_rules() {
         let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
             custom_rules: vec![
                 r#"{"domain_suffix":["example.com"],"action":"route","outbound":"direct"}"#
                     .to_string(),
             ],
-            tun_process: Default::default(),
-            share: Default::default(),
             route_mode: RouteMode::Global,
-            vps_ip: None,
+            ..Default::default()
         };
 
         let my_outbounds = vec![json!({
@@ -1885,16 +1795,8 @@ mod tests {
     #[test]
     fn config_with_route_override_defaults_to_global_mode() {
         let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
             route_mode: RouteMode::Global,
-            vps_ip: None,
+            ..Default::default()
         };
 
         let runtime_config = config_with_route_override(&config, None);
@@ -1904,18 +1806,7 @@ mod tests {
 
     #[test]
     fn build_sing_box_config_renames_duplicate_outbound_tags() {
-        let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
-        };
+        let config = Config::default();
 
         let my_outbounds = vec![json!({
             "type": "hysteria2",
@@ -1966,18 +1857,7 @@ mod tests {
 
     #[test]
     fn build_sing_box_config_renames_tags_reserved_by_template() {
-        let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
-        };
+        let config = Config::default();
 
         let my_outbounds = vec![
             json!({
@@ -2022,16 +1902,9 @@ mod tests {
     #[test]
     fn build_sing_box_config_uses_configured_socks_listen_and_port() {
         let config = Config {
-            port: None,
             socks_listen: Some("0.0.0.0".to_string()),
             socks_port: Some(2080),
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
+            ..Default::default()
         };
         let my_outbounds = vec![json!({
             "type": "hysteria2",
@@ -2058,18 +1931,7 @@ mod tests {
 
     #[test]
     fn build_sing_box_config_defaults_to_global_mode_with_local_socks() {
-        let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
-        };
+        let config = Config::default();
 
         let built = build_sing_box_config(
             &config,
@@ -2111,16 +1973,8 @@ mod tests {
     #[test]
     fn build_sing_box_config_supports_global_mode_private_direct() {
         let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            tun_process: Default::default(),
-            share: Default::default(),
             route_mode: RouteMode::Global,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            vps_ip: None,
+            ..Default::default()
         };
 
         let built = build_sing_box_config(
@@ -2154,16 +2008,8 @@ mod tests {
     #[test]
     fn build_sing_box_config_supports_rule_mode_domestic_bypass() {
         let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            tun_process: Default::default(),
-            share: Default::default(),
             route_mode: RouteMode::Rule,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            vps_ip: None,
+            ..Default::default()
         };
 
         let built = build_sing_box_config(
@@ -2199,15 +2045,10 @@ mod tests {
     fn config_cache_fingerprint_ignores_web_port() {
         let mut first = Config {
             port: Some(6161),
-            socks_listen: None,
             socks_port: Some(1080),
-            tun_process: Default::default(),
-            share: Default::default(),
             route_mode: RouteMode::Tunnel,
             subs: vec!["https://example.com/sub".to_string()],
-            nodes: vec![],
-            custom_rules: vec![],
-            vps_ip: None,
+            ..Default::default()
         };
         let mut second = first.clone();
         second.port = Some(7777);
@@ -2239,18 +2080,7 @@ mod tests {
 
     #[test]
     fn build_sing_box_config_errors_when_no_nodes_available() {
-        let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
-        };
+        let config = Config::default();
 
         let err = build_sing_box_config(&config, vec![], vec![], vec![], vec![]).unwrap_err();
 
@@ -2261,60 +2091,22 @@ mod tests {
 
     #[test]
     fn config_has_no_nodes_only_when_subs_and_manual_nodes_empty() {
-        assert!(super::config_has_no_nodes(&Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
-        }));
+        assert!(super::config_has_no_nodes(&Config::default()));
 
         assert!(!super::config_has_no_nodes(&Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
             subs: vec!["https://example.com/sub".to_string()],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
+            ..Default::default()
         }));
 
         assert!(!super::config_has_no_nodes(&Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
             nodes: vec![r#"{"tag":"manual"}"#.to_string()],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
+            ..Default::default()
         }));
     }
 
     #[test]
     fn collect_manual_outbounds_handles_empty_nodes() {
-        let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
-        };
+        let config = Config::default();
 
         let (outbounds, names) = collect_manual_outbounds(&config);
 
@@ -2325,20 +2117,12 @@ mod tests {
     #[test]
     fn collect_manual_outbounds_handles_all_invalid_nodes() {
         let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
             nodes: vec![
                 "not-json".to_string(),
-                r#"{}"#.to_string(),                   // Valid JSON but no tag
-                r#"{"type":"hysteria2"}"#.to_string(), // Valid JSON but no tag
+                r#"{}"#.to_string(),
+                // Valid JSON but no tag r#"{"type":"hysteria2"}"#.to_string(),
             ],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
+            ..Default::default()
         };
 
         let (outbounds, names) = collect_manual_outbounds(&config);
@@ -2350,18 +2134,7 @@ mod tests {
 
     #[test]
     fn build_sing_box_config_preserves_node_order() {
-        let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
-        };
+        let config = Config::default();
 
         let my_outbounds = vec![
             json!({"type": "hysteria2", "tag": "node-1", "server": "s1.example.com", "server_port": 443, "password": "p1"}),
@@ -2391,18 +2164,7 @@ mod tests {
 
     #[test]
     fn build_sing_box_config_handles_no_custom_rules() {
-        let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
-        };
+        let config = Config::default();
 
         let my_outbounds = vec![json!({
             "type": "hysteria2",
@@ -2431,16 +2193,8 @@ mod tests {
     #[test]
     fn build_sing_box_config_splits_direct_route_rules() {
         let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
             route_mode: RouteMode::Rule,
-            vps_ip: None,
+            ..Default::default()
         };
 
         let my_outbounds = vec![json!({
@@ -2497,18 +2251,7 @@ mod tests {
 
     #[test]
     fn build_sing_box_config_binds_clash_api_to_localhost() {
-        let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
-        };
+        let config = Config::default();
 
         let built = build_sing_box_config(
             &config,
@@ -2534,20 +2277,12 @@ mod tests {
     #[test]
     fn build_sing_box_config_ignores_all_invalid_custom_rules() {
         let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
             custom_rules: vec![
                 "not-json".to_string(),
                 "{invalid".to_string(),
                 "".to_string(),
             ],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
+            ..Default::default()
         };
 
         let my_outbounds = vec![json!({
@@ -2585,15 +2320,10 @@ mod tests {
 
         let config = Config {
             port: Some(8080),
-            socks_listen: None,
             socks_port: Some(1080),
             subs: vec!["https://example.com/sub".to_string()],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
             route_mode: RouteMode::Rule,
-            vps_ip: None,
+            ..Default::default()
         };
 
         save_config_to(&config_path, &config).await.unwrap();
@@ -2632,15 +2362,9 @@ mod tests {
         // 使用原子写入保存新配置
         let config = Config {
             port: Some(7777),
-            socks_listen: None,
             socks_port: Some(2080),
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
             route_mode: RouteMode::Rule,
-            vps_ip: None,
+            ..Default::default()
         };
         save_config_to(&config_path, &config).await.unwrap();
 
@@ -2662,15 +2386,7 @@ mod tests {
         let config_path = temp_dir.join("config.yaml");
         let config = Config {
             port: Some(6161),
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
+            ..Default::default()
         };
 
         save_config_to(&config_path, &config).await.unwrap();
@@ -2696,13 +2412,7 @@ mod tests {
     #[test]
     fn build_sing_box_config_adds_share_inbounds_and_routes() {
         let config = Config {
-            port: None,
-            socks_listen: None,
             socks_port: Some(1080),
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
             share: ShareConfig {
                 enabled: true,
                 listen: "0.0.0.0".to_string(),
@@ -2711,7 +2421,7 @@ mod tests {
                 password: "pass".to_string(),
             },
             route_mode: RouteMode::Global,
-            vps_ip: None,
+            ..Default::default()
         };
 
         let mut share_map = SharePortMap::default();
@@ -2768,13 +2478,7 @@ mod tests {
     #[test]
     fn build_sing_box_config_share_without_auth_omits_users() {
         let config = Config {
-            port: None,
-            socks_listen: None,
             socks_port: Some(1080),
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
             share: ShareConfig {
                 enabled: true,
                 listen: "127.0.0.1".to_string(),
@@ -2783,7 +2487,7 @@ mod tests {
                 password: String::new(),
             },
             route_mode: RouteMode::Global,
-            vps_ip: None,
+            ..Default::default()
         };
 
         let built = build_sing_box_config(
@@ -2802,18 +2506,7 @@ mod tests {
 
     #[test]
     fn config_cache_fingerprint_includes_share() {
-        let mut first = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
-        };
+        let mut first = Config::default();
         let second = first.clone();
         assert_eq!(
             config_cache_fingerprint(&first).unwrap(),
@@ -2830,16 +2523,9 @@ mod tests {
     #[test]
     fn routing_only_change_rejects_share_changes() {
         let old_config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
             subs: vec!["https://example.com/sub".to_string()],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
             route_mode: RouteMode::Global,
-            vps_ip: None,
+            ..Default::default()
         };
         let mut new_config = old_config.clone();
         new_config.share.enabled = true;

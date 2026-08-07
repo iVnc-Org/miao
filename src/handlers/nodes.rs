@@ -399,19 +399,8 @@ mod tests {
     #[tokio::test]
     async fn get_nodes_returns_parsed_manual_nodes() {
         let state = app_state(Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![
-                r#"{"type":"hysteria2","tag":"node-a","server":"a.example.com","server_port":443,"password":"secret","up_mbps":40,"down_mbps":350,"tls":{"enabled":true,"server_name":"sni.example.com","insecure":true}}"#.to_string(),
-                "not-json".to_string(),
-            ],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
+            nodes: vec![ r#"{"type":"hysteria2","tag":"node-a","server":"a.example.com","server_port":443,"password":"secret","up_mbps":40,"down_mbps":350,"tls":{"enabled":true,"server_name":"sni.example.com","insecure":true}}"#.to_string(), "not-json".to_string(), ],
+            ..Default::default()
         });
 
         let Json(response) = get_nodes(State(state)).await;
@@ -483,19 +472,11 @@ mod tests {
     async fn get_nodes_handles_hysteria2_without_bandwidth() {
         // 测试：Hysteria2 节点不包含带宽默认值也能被正确解析
         let state = app_state(Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
             nodes: vec![
-                // 不包含 up_mbps/down_mbps 的 Hysteria2 节点
-                r#"{"type":"hysteria2","tag":"no-bw-node","server":"example.com","server_port":443,"password":"secret","tls":{"enabled":true}}"#.to_string(),
-            ],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
+    // 不包含 up_mbps/down_mbps 的 Hysteria2 节点
+    r#"{"type":"hysteria2","tag":"no-bw-node","server":"example.com","server_port":443,"password":"secret","tls":{"enabled":true}}"#.to_string(),
+],
+            ..Default::default()
         });
 
         let Json(response) = get_nodes(State(state)).await;
@@ -511,25 +492,14 @@ mod tests {
     #[tokio::test]
     async fn get_nodes_skips_invalid_nodes_and_returns_valid_ones() {
         let state = app_state(Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
             nodes: vec![
-                // Valid node
-                r#"{"type":"hysteria2","tag":"valid-node","server":"valid.example.com","server_port":443,"password":"secret"}"#.to_string(),
-                // Invalid: missing tag
-                r#"{"type":"hysteria2","server":"invalid1.example.com","server_port":443,"password":"secret"}"#.to_string(),
-                // Invalid: zero port
-                r#"{"type":"hysteria2","tag":"invalid-port","server":"invalid2.example.com","server_port":0,"password":"secret"}"#.to_string(),
-                // Invalid: missing server
-                r#"{"type":"hysteria2","tag":"invalid-server","server_port":443,"password":"secret"}"#.to_string(),
-            ],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
+    // Valid node
+    r#"{"type":"hysteria2","tag":"valid-node","server":"valid.example.com","server_port":443,"password":"secret"}"#.to_string(),
+    // Invalid: missing tag r#"{"type":"hysteria2","server":"invalid1.example.com","server_port":443,"password":"secret"}"#.to_string(),
+    // Invalid: zero port r#"{"type":"hysteria2","tag":"invalid-port","server":"invalid2.example.com","server_port":0,"password":"secret"}"#.to_string(),
+    // Invalid: missing server r#"{"type":"hysteria2","tag":"invalid-server","server_port":443,"password":"secret"}"#.to_string(),
+],
+            ..Default::default()
         });
 
         let Json(response) = get_nodes(State(state)).await;
@@ -542,18 +512,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_nodes_returns_empty_for_no_nodes() {
-        let state = app_state(Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
-        });
+        let state = app_state(Config::default());
 
         let Json(response) = get_nodes(State(state)).await;
 
@@ -566,20 +525,12 @@ mod tests {
     #[tokio::test]
     async fn get_nodes_handles_all_invalid_nodes() {
         let state = app_state(Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
             nodes: vec![
                 "not-json".to_string(),
                 r#"{}"#.to_string(),
                 r#"{"type":"hysteria2"}"#.to_string(),
             ],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
+            ..Default::default()
         });
 
         let Json(response) = get_nodes(State(state)).await;
@@ -592,22 +543,8 @@ mod tests {
     #[tokio::test]
     async fn get_nodes_handles_mixed_node_types() {
         let state = app_state(Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![
-                r#"{"type":"hysteria2","tag":"hy2-node","server":"hy2.example.com","server_port":443,"password":"secret"}"#.to_string(),
-                r#"{"type":"shadowsocks","tag":"ss-node","server":"ss.example.com","server_port":8388,"password":"secret","method":"aes-128-gcm"}"#.to_string(),
-                r#"{"type":"anytls","tag":"anytls-node","server":"any.example.com","server_port":8443,"password":"secret"}"#.to_string(),
-                r#"{"type":"socks","tag":"socks-node","server":"socks.example.com","server_port":1080}"#.to_string(),
-                r#"{"type":"http","tag":"http-node","server":"http.example.com","server_port":8080,"username":"u","password":"p"}"#.to_string(),
-            ],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
+            nodes: vec![ r#"{"type":"hysteria2","tag":"hy2-node","server":"hy2.example.com","server_port":443,"password":"secret"}"#.to_string(), r#"{"type":"shadowsocks","tag":"ss-node","server":"ss.example.com","server_port":8388,"password":"secret","method":"aes-128-gcm"}"#.to_string(), r#"{"type":"anytls","tag":"anytls-node","server":"any.example.com","server_port":8443,"password":"secret"}"#.to_string(), r#"{"type":"socks","tag":"socks-node","server":"socks.example.com","server_port":1080}"#.to_string(), r#"{"type":"http","tag":"http-node","server":"http.example.com","server_port":8080,"username":"u","password":"p"}"#.to_string(), ],
+            ..Default::default()
         });
 
         let Json(response) = get_nodes(State(state)).await;
@@ -627,20 +564,8 @@ mod tests {
     #[tokio::test]
     async fn get_nodes_preserves_node_order() {
         let state = app_state(Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![
-                r#"{"type":"hysteria2","tag":"first","server":"first.example.com","server_port":443,"password":"secret"}"#.to_string(),
-                r#"{"type":"hysteria2","tag":"second","server":"second.example.com","server_port":443,"password":"secret"}"#.to_string(),
-                r#"{"type":"hysteria2","tag":"third","server":"third.example.com","server_port":443,"password":"secret"}"#.to_string(),
-            ],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
+            nodes: vec![ r#"{"type":"hysteria2","tag":"first","server":"first.example.com","server_port":443,"password":"secret"}"#.to_string(), r#"{"type":"hysteria2","tag":"second","server":"second.example.com","server_port":443,"password":"secret"}"#.to_string(), r#"{"type":"hysteria2","tag":"third","server":"third.example.com","server_port":443,"password":"secret"}"#.to_string(), ],
+            ..Default::default()
         });
 
         let Json(response) = get_nodes(State(state)).await;
@@ -656,19 +581,8 @@ mod tests {
     #[tokio::test]
     async fn get_nodes_handles_ipv6_addresses() {
         let state = app_state(Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![
-                r#"{"type":"hysteria2","tag":"ipv6-node","server":"2001:db8::1","server_port":443,"password":"secret"}"#.to_string(),
-                r#"{"type":"hysteria2","tag":"localhost-ipv6","server":"::1","server_port":443,"password":"secret"}"#.to_string(),
-            ],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
+            nodes: vec![ r#"{"type":"hysteria2","tag":"ipv6-node","server":"2001:db8::1","server_port":443,"password":"secret"}"#.to_string(), r#"{"type":"hysteria2","tag":"localhost-ipv6","server":"::1","server_port":443,"password":"secret"}"#.to_string(), ],
+            ..Default::default()
         });
 
         let Json(response) = get_nodes(State(state)).await;
@@ -683,19 +597,8 @@ mod tests {
     #[tokio::test]
     async fn get_nodes_handles_unicode_tags() {
         let state = app_state(Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![
-                r#"{"type":"hysteria2","tag":"香港节点","server":"hk.example.com","server_port":443,"password":"secret"}"#.to_string(),
-                r#"{"type":"hysteria2","tag":"日本サーバー","server":"jp.example.com","server_port":443,"password":"secret"}"#.to_string(),
-            ],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
+            nodes: vec![ r#"{"type":"hysteria2","tag":"香港节点","server":"hk.example.com","server_port":443,"password":"secret"}"#.to_string(), r#"{"type":"hysteria2","tag":"日本サーバー","server":"jp.example.com","server_port":443,"password":"secret"}"#.to_string(), ],
+            ..Default::default()
         });
 
         let Json(response) = get_nodes(State(state)).await;

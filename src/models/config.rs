@@ -269,16 +269,8 @@ mod tests {
     #[test]
     fn config_serializes_vps_ip_when_present() {
         let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
             vps_ip: Some("203.0.113.10".to_string()),
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
+            ..Default::default()
         };
 
         let yaml = serde_yaml::to_string(&config).unwrap();
@@ -288,18 +280,7 @@ mod tests {
 
     #[test]
     fn config_omits_empty_vps_ip() {
-        let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            vps_ip: None,
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-        };
+        let config = Config::default();
 
         let yaml = serde_yaml::to_string(&config).unwrap();
 
@@ -309,16 +290,8 @@ mod tests {
     #[test]
     fn config_omits_global_route_mode() {
         let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            vps_ip: None,
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
             route_mode: super::RouteMode::Global,
+            ..Default::default()
         };
 
         let yaml = serde_yaml::to_string(&config).unwrap();
@@ -328,18 +301,7 @@ mod tests {
 
     #[test]
     fn config_omits_default_route_mode() {
-        let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            vps_ip: None,
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-        };
+        let config = Config::default();
 
         let yaml = serde_yaml::to_string(&config).unwrap();
 
@@ -363,18 +325,7 @@ custom_rules: []
 
     #[test]
     fn config_omits_disabled_tun_process() {
-        let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            vps_ip: None,
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-        };
+        let config = Config::default();
 
         let yaml = serde_yaml::to_string(&config).unwrap();
 
@@ -402,18 +353,7 @@ custom_rules: []
 
     #[test]
     fn config_omits_default_share() {
-        let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            vps_ip: None,
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            share: Default::default(),
-            route_mode: Default::default(),
-        };
+        let config = Config::default();
 
         let yaml = serde_yaml::to_string(&config).unwrap();
 
@@ -423,14 +363,6 @@ custom_rules: []
     #[test]
     fn config_keeps_customized_share_when_disabled() {
         let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            vps_ip: None,
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
             share: super::ShareConfig {
                 enabled: false,
                 listen: "192.168.1.10".to_string(),
@@ -438,7 +370,7 @@ custom_rules: []
                 username: "alice".to_string(),
                 password: "secret".to_string(),
             },
-            route_mode: Default::default(),
+            ..Default::default()
         };
 
         let yaml = serde_yaml::to_string(&config).unwrap();
