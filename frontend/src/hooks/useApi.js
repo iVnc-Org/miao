@@ -162,10 +162,9 @@ export function useProcessProxy() {
   return { processProxy, setProcessProxy, fetchProcessProxy }
 }
 
-// 与后端 DEFAULT_SHARE_LISTEN 保持一致：默认只监听回环，
-// 想暴露到局域网必须显式改地址，而后端会要求那种情况下必须填账号密码。
+// 与后端 DEFAULT_SHARE_LISTEN 保持一致，默认供局域网设备直接连接。
 export const DEFAULT_POOL = {
-  listen: '127.0.0.1',
+  listen: '0.0.0.0',
   base_port: 12000,
   username: '',
   password: '',

@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::{
     handlers::apply_config_section,
-    models::{ApiResponse, PoolConfig, ProxyMode, ShareEndpoint},
+    models::{ApiResponse, PoolConfig, ShareEndpoint},
     responses::{status_error, success, HandlerResult},
     services::{
         config::{extract_share_bindings_from_sing_box, read_existing_sing_box_config},
@@ -25,11 +25,6 @@ pub async fn set_share(
     let share = req
         .normalized()
         .map_err(|e| status_error(StatusCode::BAD_REQUEST, e))?;
-    if state.config.read().await.mode == ProxyMode::Pool {
-        share
-            .validate_active()
-            .map_err(|e| status_error(StatusCode::BAD_REQUEST, e))?;
-    }
 
     apply_config_section(
         &state,

@@ -172,8 +172,6 @@ pub async fn set_mode(
                 .share
                 .normalized()
                 .map_err(|error| status_error(StatusCode::BAD_REQUEST, error))?;
-            pool.validate_active()
-                .map_err(|error| status_error(StatusCode::BAD_REQUEST, error))?;
             new_config.share = pool;
         }
     }

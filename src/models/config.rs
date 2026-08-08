@@ -103,9 +103,8 @@ fn default_dns_follow_process() -> bool {
     true
 }
 
-/// 默认只监听回环。分享模式面向局域网，但"开箱即用就对全网卡开放"是不可接受的
-/// 默认值——想暴露到局域网必须显式改地址，而那条路径强制要求鉴权（见 `normalized`）。
-pub const DEFAULT_SHARE_LISTEN: &str = "127.0.0.1";
+/// 代理池默认监听所有 IPv4 网卡，便于局域网设备直接使用各节点端口。
+pub const DEFAULT_SHARE_LISTEN: &str = "0.0.0.0";
 pub const DEFAULT_SHARE_BASE_PORT: u16 = 12000;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,9 +144,8 @@ impl Default for PoolConfig {
 impl PoolConfig {
     /// 只有整个配置都还是默认值时才允许在序列化时省略。
     ///
-    /// 不能用 `!enabled` 做判断：那样一关掉分享模式就会把用户填的监听地址、
-    /// 起始端口和账号密码一起从 config.yaml 里抹掉，重启后静默变回
-    /// "全默认 + 无鉴权"，再打开就是完全不同的暴露面。
+    /// 退出代理池模式时不能把用户填的监听地址、起始端口和账号密码一起从
+    /// config.yaml 里抹掉，否则再次进入时会静默恢复默认设置。
     pub fn is_default(&self) -> bool {
         self == &Self::default()
     }
@@ -181,20 +179,6 @@ impl PoolConfig {
             username,
             password,
         })
-    }
-
-    pub fn validate_active(&self) -> Result<(), String> {
-        let listen_ip = self
-            .listen
-            .parse::<std::net::IpAddr>()
-            .map_err(|_| "代理池监听地址必须是合法 IP".to_string())?;
-        if !listen_ip.is_loopback() && !self.has_auth() {
-            return Err(
-                "代理池监听非回环地址时必须设置用户名和密码，否则会变成开放代理"
-                    .to_string(),
-            );
-        }
-        Ok(())
     }
 }
 
@@ -336,15 +320,11 @@ mod tests {
     }
 
     #[test]
-    fn pool_requires_auth_only_when_activated() {
-        let pool = PoolConfig {
-            listen: "0.0.0.0".to_string(),
-            ..Default::default()
-        }
-        .normalized()
-        .unwrap();
-        assert!(pool.validate_active().unwrap_err().contains("开放代理"));
-        assert!(PoolConfig::default().validate_active().is_ok());
+    fn pool_defaults_to_all_interfaces_and_allows_no_auth() {
+        let pool = PoolConfig::default().normalized().unwrap();
+
+        assert_eq!(pool.listen, "0.0.0.0");
+        assert!(!pool.has_auth());
     }
 
     #[test]

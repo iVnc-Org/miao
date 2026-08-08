@@ -29,10 +29,6 @@ function parseListen(value) {
   return /^[0-9a-fA-F:.]+$/.test(host) && host.includes(':') ? host : null
 }
 
-function isLoopbackListen(listen) {
-  return listen === '::1' || listen.startsWith('127.')
-}
-
 /** 面板显示用的地址：通配监听时换成当前访问面板的主机名，那必定是可达的。 */
 function resolveEndpointUrl(url, listen) {
   if (!WILDCARD_HOSTS.has(listen)) return url
@@ -117,10 +113,6 @@ export function PoolCard({
       showToast('用户名和密码需同时填写或同时留空', 'error')
       return
     }
-    if (!isLoopbackListen(payload.listen) && !payload.username) {
-      showToast('监听非回环地址时必须设置用户名和密码，否则会变成开放代理', 'error')
-      return
-    }
 
     // 乐观地认为提交值就是新的基线，这样后续刷新回来的同一份值不会触发回填。
     syncedRef.current = JSON.stringify(normalizePoolConfig(payload))
@@ -187,7 +179,7 @@ export function PoolCard({
               value={listen}
               disabled={disabled || loading}
               onChange={(event) => setListen(event.target.value)}
-              placeholder="127.0.0.1"
+              placeholder="0.0.0.0"
             />
           </label>
           <label className="field">
@@ -205,7 +197,7 @@ export function PoolCard({
               value={username}
               disabled={disabled || loading}
               onChange={(event) => setUsername(event.target.value)}
-              placeholder="非回环监听时必填"
+              placeholder="可选"
               autoComplete="off"
             />
           </label>
@@ -216,15 +208,15 @@ export function PoolCard({
               value={password}
               disabled={disabled || loading}
               onChange={(event) => setPassword(event.target.value)}
-              placeholder="非回环监听时必填"
+              placeholder="可选"
               autoComplete="new-password"
             />
           </label>
         </div>
 
         <div className="share-note">
-          端口按节点名称持久分配，订阅刷新重排后端口不变。默认只监听 127.0.0.1；
-          要让局域网其它设备连入，请改成 0.0.0.0 或本机局域网 IP，此时必须设置用户名和密码。
+          端口按节点名称持久分配，订阅刷新重排后端口不变。默认监听 0.0.0.0；
+          用户名和密码可留空，填写时需同时填写。
         </div>
 
         {endpoints?.length > 0 ? (

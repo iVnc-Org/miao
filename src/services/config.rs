@@ -1139,10 +1139,8 @@ fn build_sing_box_config(
         .normalized()
         .map_err(AppError::message)?;
     let pool = config.share.normalized().map_err(AppError::message)?;
-    match config.mode {
-        ProxyMode::Global => {}
-        ProxyMode::Process => process_proxy.validate_active().map_err(AppError::message)?,
-        ProxyMode::Pool => pool.validate_active().map_err(AppError::message)?,
+    if config.mode == ProxyMode::Process {
+        process_proxy.validate_active().map_err(AppError::message)?;
     }
 
     let share_bindings = if config.mode == ProxyMode::Pool {
@@ -2598,7 +2596,7 @@ mod tests {
             socks_port: Some(1080),
             mode: ProxyMode::Pool,
             share: PoolConfig {
-                listen: "127.0.0.1".to_string(),
+                listen: "0.0.0.0".to_string(),
                 base_port: 16000,
                 username: String::new(),
                 password: String::new(),
@@ -2618,6 +2616,7 @@ mod tests {
 
         let inbound = &built["inbounds"].as_array().unwrap()[1];
         assert_eq!(inbound["tag"], "share-16000");
+        assert_eq!(inbound["listen"], "0.0.0.0");
         assert!(inbound.get("users").is_none());
     }
 
