@@ -5,8 +5,8 @@ import {
   ProxyCard,
   NodesCard,
   SubsCard,
-  TunProcessCard,
-  ShareCard,
+  ProcessProxyCard,
+  PoolCard,
   ConnectivityCard,
   ConfirmModal,
   ConnectionsModal,
@@ -20,8 +20,9 @@ import {
   useStatus,
   useSubs,
   useNodes,
-  useTunProcess,
-  useShare,
+  useNodeInventory,
+  useProcessProxy,
+  usePool,
   useProxies,
   useTraffic,
   useConnections,
@@ -49,6 +50,17 @@ import {
 
 const CONNECTIONS_MODAL_MIN_WIDTH = 841
 
+const MODE_LABELS = {
+  global: '全局代理',
+  process: '进程代理',
+  pool: '代理池',
+}
+
+function hasProcessMatch(config) {
+  const match = config?.match || {}
+  return ['names', 'paths', 'path_regex'].some((key) => Array.isArray(match[key]) && match[key].length > 0)
+}
+
 export default function App() {
   const [firstLoadDone, setFirstLoadDone] = useState(false)
   const [loadingAction, setLoadingAction] = useState('')
@@ -58,6 +70,7 @@ export default function App() {
   const [nodeType, setNodeType] = useState('hysteria2')
   const [showNodeModal, setShowNodeModal] = useState(false)
   const [showConnectionsModal, setShowConnectionsModal] = useState(false)
+  const [modeSetup, setModeSetup] = useState(null)
   const [confirmState, setConfirmState] = useState({ open: false, title: '', message: '', onConfirm: null })
 
   const clashApiBase = useMemo(() => '/api/clash', [])
@@ -67,8 +80,9 @@ export default function App() {
   const { status, fetchStatus } = useStatus()
   const { subs, fetchSubs } = useSubs()
   const { nodes, fetchNodes } = useNodes()
-  const { tunProcess, setTunProcess, fetchTunProcess } = useTunProcess()
-  const { share, setShare, shareEndpoints, fetchShare, fetchShareEndpoints } = useShare()
+  const { nodeInventory, setNodeInventory, fetchNodeInventory } = useNodeInventory()
+  const { processProxy, setProcessProxy, fetchProcessProxy } = useProcessProxy()
+  const { pool, setPool, poolEndpoints, fetchPool, fetchPoolEndpoints } = usePool(status.mode)
   const { primaryGroupName, primaryGroup, fetchProxies } = useProxies(status)
   const { traffic, closeSockets } = useTraffic(status)
   const {
@@ -114,11 +128,20 @@ export default function App() {
 
   const nodeMetaMap = useMemo(() => {
     const map = new Map()
-    nodes.forEach((node) => map.set(node.tag, node))
+    nodeInventory.nodes.forEach((node) => map.set(node.tag, node))
     return map
-  }, [nodes])
+  }, [nodeInventory.nodes])
 
-  const currentNodeMeta = primaryGroup?.now ? nodeMetaMap.get(primaryGroup.now) : null
+  const cachedPrimaryGroup = useMemo(() => {
+    const all = nodeInventory.nodes.map((node) => node.tag)
+    return all.length > 0 ? { all, now: nodeInventory.current } : null
+  }, [nodeInventory])
+  const displayedPrimaryGroup = status.running && primaryGroup ? primaryGroup : cachedPrimaryGroup
+  const displayedPrimaryGroupName = status.running && primaryGroupName ? primaryGroupName : 'proxy'
+  const currentNodeMeta = displayedPrimaryGroup?.now
+    ? nodeMetaMap.get(displayedPrimaryGroup.now)
+    : null
+  const proxyInteractive = status.running && Boolean(primaryGroup)
 
   const openConfirm = useCallback((title, message, onConfirm) => {
     setConfirmState({ open: true, title, message, onConfirm })
@@ -142,11 +165,12 @@ export default function App() {
       fetchStatus(),
       fetchSubs(),
       fetchNodes(),
-      fetchTunProcess(),
-      // 端口列表必须等分享配置到手之后再拉：fetchShareEndpoints 在分享模式关闭时会
-      // 直接短路，而首屏时它看到的还是默认值 false，并发发起就会永远拿到空列表。
-      fetchShare().then(() => fetchShareEndpoints()),
-    ]).finally(() => setFirstLoadDone(true))
+      fetchNodeInventory(),
+      fetchProcessProxy(),
+      fetchPool(),
+    ])
+      .then(([initialStatus]) => fetchPoolEndpoints(initialStatus?.mode))
+      .finally(() => setFirstLoadDone(true))
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const needsOnboarding = firstLoadDone
@@ -157,13 +181,13 @@ export default function App() {
 
   // 统一轮询管理：合并所有定时任务到单个定时器
   const pollingTasks = useMemo(() => {
-    const tasks = [fetchStatus, fetchSubs, fetchNodes]
+    const tasks = [fetchStatus, fetchSubs, fetchNodes, fetchNodeInventory]
     // 服务运行时才轮询 proxies
     if (status.running) {
       tasks.push(fetchProxies)
     }
     return tasks
-  }, [fetchStatus, fetchSubs, fetchNodes, fetchProxies, status.running])
+  }, [fetchStatus, fetchSubs, fetchNodes, fetchNodeInventory, fetchProxies, status.running])
 
   const connectionPollingTasks = useMemo(() => [fetchConnections], [fetchConnections])
 
@@ -175,6 +199,10 @@ export default function App() {
   useEffect(() => {
     fetchVersion()
   }, [status.running, fetchVersion])
+
+  useEffect(() => {
+    fetchPoolEndpoints(status.mode)
+  }, [status.mode, status.running, fetchPoolEndpoints])
 
   // 清理 WebSocket 连接
   useEffect(() => {
@@ -207,6 +235,12 @@ export default function App() {
     return () => mediaQuery.removeEventListener('change', handleChange)
   }, [])
 
+  const refreshProxyViews = useCallback(async () => {
+    const tasks = [fetchNodeInventory(), fetchPoolEndpoints(status.mode)]
+    if (status.running) tasks.push(fetchProxies())
+    await Promise.all(tasks)
+  }, [fetchNodeInventory, fetchPoolEndpoints, fetchProxies, status.mode, status.running])
+
   const handleToggleService = useCallback(async () => {
     try {
       if (status.running) {
@@ -218,96 +252,136 @@ export default function App() {
         await apiCall('service/start', { method: 'POST' }, 'start')
         showToast('服务已启动', 'success')
       }
-      await Promise.all([fetchStatus(), fetchShareEndpoints()])
-    } catch (error) {
-      showToast(error.message, 'error')
-    }
-  }, [status.running, apiCall, clearDelays, clearConnectivity, fetchStatus, fetchShareEndpoints, showToast])
-
-  const handleSetRouteMode = useCallback(async (nextMode) => {
-    if (nextMode === status.route_mode) return
-
-    try {
-      await apiCall(
-        'route-mode',
-        { method: 'POST', body: JSON.stringify({ route_mode: nextMode }) },
-        'routeMode'
-      )
-      clearDelays()
-      clearConnectivity()
-      await fetchStatus()
-      await fetchProxies()
-      showToast(nextMode === 'global' ? '已切换为全局代理' : '已切换为分流模式', 'success')
+      const nextStatus = await fetchStatus()
+      const tasks = [fetchNodeInventory(), fetchPoolEndpoints(nextStatus?.mode || status.mode)]
+      if (nextStatus?.running) tasks.push(fetchProxies())
+      await Promise.all(tasks)
     } catch (error) {
       showToast(error.message, 'error')
     }
   }, [
-    status.route_mode,
+    status.running,
+    status.mode,
     apiCall,
     clearDelays,
     clearConnectivity,
     fetchStatus,
+    fetchNodeInventory,
+    fetchPoolEndpoints,
+    fetchProxies,
+    showToast,
+  ])
+
+  const applyProxyMode = useCallback(async (nextMode) => {
+    try {
+      const response = await apiCall(
+        'mode',
+        { method: 'POST', body: JSON.stringify({ mode: nextMode }) },
+        'mode'
+      )
+      clearDelays()
+      clearConnectivity()
+      const nextStatus = await fetchStatus()
+      const tasks = [fetchNodeInventory(), fetchPoolEndpoints(nextMode)]
+      if (nextStatus?.running) tasks.push(fetchProxies())
+      await Promise.all(tasks)
+      setModeSetup(null)
+      showToast(`已切换为${MODE_LABELS[nextMode]}`, 'success')
+      return response
+    } catch (error) {
+      showToast(error.message, 'error')
+      return null
+    }
+  }, [
+    apiCall,
+    clearDelays,
+    clearConnectivity,
+    fetchStatus,
+    fetchNodeInventory,
+    fetchPoolEndpoints,
     fetchProxies,
     showToast
   ])
 
-  const handleSaveTunProcess = useCallback(async (nextConfig) => {
+  const handleSetMode = useCallback(async (nextMode) => {
+    if (nextMode === status.mode) {
+      setModeSetup(null)
+      return
+    }
+    if (nextMode === 'process' && !hasProcessMatch(processProxy)) {
+      setModeSetup('process')
+      showToast('请先填写进程名单并保存', 'info')
+      return
+    }
+
+    setModeSetup(null)
+    await applyProxyMode(nextMode)
+  }, [status.mode, processProxy, applyProxyMode, showToast])
+
+  const handleSaveProcessProxy = useCallback(async (nextConfig) => {
     try {
       const response = await apiCall(
         'tun-process',
         { method: 'POST', body: JSON.stringify(nextConfig) },
-        'tunProcess'
+        'processProxy'
       )
-      setTunProcess(nextConfig)
+      setProcessProxy(nextConfig)
       clearDelays()
       clearConnectivity()
-      await fetchTunProcess()
-      await fetchStatus()
-      await fetchProxies()
-      showToast(response.message || '进程代理设置已保存', 'success')
+      await Promise.all([fetchProcessProxy(), fetchStatus(), refreshProxyViews()])
+      if (modeSetup === 'process') {
+        await applyProxyMode('process')
+      } else {
+        showToast(response.message || '进程代理设置已保存', 'success')
+      }
     } catch (error) {
       showToast(error.message, 'error')
     }
   }, [
     apiCall,
-    setTunProcess,
+    setProcessProxy,
     clearDelays,
     clearConnectivity,
-    fetchTunProcess,
+    fetchProcessProxy,
     fetchStatus,
-    fetchProxies,
+    refreshProxyViews,
+    modeSetup,
+    applyProxyMode,
     showToast,
   ])
 
-  const handleSaveShare = useCallback(async (nextConfig) => {
+  const handleSavePool = useCallback(async (nextConfig) => {
     try {
       const response = await apiCall(
         'share',
         { method: 'POST', body: JSON.stringify(nextConfig) },
-        'share'
+        'pool'
       )
-      setShare(nextConfig)
+      setPool(nextConfig)
       clearDelays()
       clearConnectivity()
-      // 四个 GET 互不依赖，串行等于白等三个来回；而且 POST 已经重启过 sing-box 了。
-      await Promise.all([fetchShare(), fetchShareEndpoints(), fetchStatus(), fetchProxies()])
-      showToast(response.message || '分享模式设置已保存', 'success')
+      await Promise.all([
+        fetchPool(),
+        fetchStatus(),
+        refreshProxyViews(),
+      ])
+      showToast(response.message || '代理池设置已保存', 'success')
     } catch (error) {
       showToast(error.message, 'error')
     }
   }, [
     apiCall,
-    setShare,
+    setPool,
     clearDelays,
     clearConnectivity,
-    fetchShare,
-    fetchShareEndpoints,
+    fetchPool,
     fetchStatus,
-    fetchProxies,
+    refreshProxyViews,
     showToast,
   ])
 
   const handleSwitchProxy = useCallback(async (groupName, nodeName) => {
+    if (!status.running) return
     try {
       const response = await fetch(`${clashApiBase}/proxies/${encodeURIComponent(groupName)}`, {
         method: 'PUT',
@@ -319,6 +393,7 @@ export default function App() {
         throw new Error(details || `切换节点失败 (${response.status})`)
       }
       await fetchProxies()
+      setNodeInventory((previous) => ({ ...previous, current: nodeName }))
       fetch('/api/last-proxy', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -328,7 +403,7 @@ export default function App() {
     } catch {
       showToast('切换节点失败', 'error')
     }
-  }, [clashApiBase, fetchProxies, showToast])
+  }, [status.running, clashApiBase, fetchProxies, setNodeInventory, showToast])
 
   const handleAddSubscription = useCallback(async () => {
     const error = validateSubscriptionUrl(newSubUrl.trim())
@@ -340,46 +415,75 @@ export default function App() {
       await apiCall('subs', { method: 'POST', body: JSON.stringify({ url: newSubUrl.trim() }) }, 'addSub')
       setNewSubUrl('')
       clearDelays()
-      await Promise.all([fetchSubs(), fetchShareEndpoints()])
+      await Promise.all([fetchSubs(), refreshProxyViews()])
       showToast('订阅已添加', 'success')
     } catch (error) {
       showToast(error.message, 'error')
     }
-  }, [newSubUrl, apiCall, clearDelays, fetchSubs, fetchShareEndpoints, showToast])
+  }, [newSubUrl, apiCall, clearDelays, fetchSubs, refreshProxyViews, showToast])
 
   const handleOnboardingAddSub = useCallback(async (url) => {
     try {
       await apiCall('subs', { method: 'POST', body: JSON.stringify({ url }) }, 'addSub')
       clearDelays()
-      await Promise.all([fetchSubs(), fetchShareEndpoints()])
+      await Promise.all([fetchSubs(), refreshProxyViews()])
       showToast('订阅已添加', 'success')
     } catch (error) {
       showToast(error.message, 'error')
     }
-  }, [apiCall, clearDelays, fetchSubs, fetchShareEndpoints, showToast])
+  }, [apiCall, clearDelays, fetchSubs, refreshProxyViews, showToast])
 
   const handleDeleteSubscription = useCallback(async (url) => {
     try {
       await apiCall('subs', { method: 'DELETE', body: JSON.stringify({ url }) }, 'deleteSub')
-      await Promise.all([fetchSubs(), fetchShareEndpoints()])
+      await Promise.all([fetchSubs(), refreshProxyViews()])
       clearDelays()
       showToast('订阅已删除', 'success')
     } catch (error) {
       showToast(error.message, 'error')
     }
-  }, [apiCall, clearDelays, fetchSubs, fetchShareEndpoints, showToast])
+  }, [apiCall, clearDelays, fetchSubs, refreshProxyViews, showToast])
+
+  const handleReplaceSubscription = useCallback(async (oldUrl, replacementUrl) => {
+    const newUrl = replacementUrl.trim()
+    const error = validateSubscriptionUrl(newUrl)
+    if (error) {
+      showToast(error, 'error')
+      return false
+    }
+    if (newUrl === oldUrl) {
+      showToast('新订阅链接不能与原链接相同', 'error')
+      return false
+    }
+
+    try {
+      await apiCall(
+        'subs',
+        { method: 'PUT', body: JSON.stringify({ old_url: oldUrl, new_url: newUrl }) },
+        'replaceSub'
+      )
+      clearDelays()
+      await Promise.all([fetchSubs(), refreshProxyViews()])
+      showToast('订阅链接已替换', 'success')
+      return true
+    } catch (replaceError) {
+      showToast(replaceError.message, 'error')
+      return false
+    }
+  }, [apiCall, clearDelays, fetchSubs, refreshProxyViews, showToast])
 
   const handleRefreshSubscriptions = useCallback(async () => {
     try {
-      await apiCall('subs/refresh', { method: 'POST' }, 'refreshSubs')
-      await Promise.all([fetchSubs(), fetchShareEndpoints()])
+      const response = await apiCall('subs/refresh', { method: 'POST' }, 'refreshSubs')
+      await Promise.all([fetchSubs(), refreshProxyViews()])
       clearConnectivity()
       clearDelays()
-      showToast('订阅已刷新', 'success')
+      const expired = response.message?.includes('失效')
+      showToast(response.message || '订阅已刷新', expired ? 'info' : 'success')
     } catch (error) {
       showToast(error.message, 'error')
     }
-  }, [apiCall, clearConnectivity, clearDelays, fetchSubs, fetchShareEndpoints, showToast])
+  }, [apiCall, clearConnectivity, clearDelays, fetchSubs, refreshProxyViews, showToast])
 
   const handleAddNode = useCallback(async () => {
     const isSimpleProxy = nodeType === 'socks' || nodeType === 'http'
@@ -511,32 +615,34 @@ export default function App() {
       await apiCall('nodes', { method: 'POST', body: JSON.stringify(payload) }, 'addNode')
       setShowNodeModal(false)
       setNodeForm({ ...EMPTY_NODE_FORM, ...nodeTypeDefaults(nodeType) })
-      await Promise.all([fetchNodes(), fetchShareEndpoints()])
+      await Promise.all([fetchNodes(), refreshProxyViews()])
       clearDelays()
       showToast('节点已添加', 'success')
     } catch (error) {
       showToast(error.message, 'error')
     }
-  }, [nodeForm, nodeType, apiCall, clearDelays, fetchNodes, fetchShareEndpoints, showToast])
+  }, [nodeForm, nodeType, apiCall, clearDelays, fetchNodes, refreshProxyViews, showToast])
 
   const handleDeleteNode = useCallback(async (tag) => {
     try {
       await apiCall('nodes', { method: 'DELETE', body: JSON.stringify({ tag }) }, 'deleteNode')
-      await Promise.all([fetchNodes(), fetchShareEndpoints()])
+      await Promise.all([fetchNodes(), refreshProxyViews()])
       clearDelays()
       showToast('节点已删除', 'success')
     } catch (error) {
       showToast(error.message, 'error')
     }
-  }, [apiCall, clearDelays, fetchNodes, fetchShareEndpoints, showToast])
+  }, [apiCall, clearDelays, fetchNodes, refreshProxyViews, showToast])
 
   const handleTestDelay = useCallback((nodeName) => {
+    if (!status.running) return
     testDelay(clashApiBase, nodeName)
-  }, [clashApiBase, testDelay])
+  }, [status.running, clashApiBase, testDelay])
 
   const handleTestGroupDelays = useCallback((groupName, nodeNames) => {
+    if (!status.running) return
     testGroupDelays(clashApiBase, groupName, nodeNames)
-  }, [clashApiBase, testGroupDelays])
+  }, [status.running, clashApiBase, testGroupDelays])
 
   const handleTestSingleSite = useCallback((site) => {
     testSingleSite(site)
@@ -657,7 +763,7 @@ export default function App() {
           traffic={traffic} 
           loadingAction={loadingAction} 
           onToggleService={handleToggleService} 
-          onSetRouteMode={handleSetRouteMode}
+          onSetMode={handleSetMode}
           onOpenConnections={handleOpenConnections}
         />
 
@@ -665,8 +771,9 @@ export default function App() {
           <div className="left-column">
             <ProxyCard
               status={status}
-              primaryGroup={primaryGroup}
-              primaryGroupName={primaryGroupName}
+              primaryGroup={displayedPrimaryGroup}
+              primaryGroupName={displayedPrimaryGroupName}
+              interactive={proxyInteractive}
               currentNodeMeta={currentNodeMeta}
               delays={delays}
               testingNodes={testingNodes}
@@ -692,24 +799,27 @@ export default function App() {
               loadingAction={loadingAction}
               onAddSub={handleAddSubscription}
               onDeleteSub={handleOpenDeleteSubConfirm}
+              onReplaceSub={handleReplaceSubscription}
               onRefreshSubs={handleRefreshSubscriptions}
               isInitializing={status.initializing}
             />
 
-            <TunProcessCard
-              config={tunProcess}
-              loading={loadingAction === 'tunProcess'}
-              disabled={status.initializing}
-              onSave={handleSaveTunProcess}
+            <ProcessProxyCard
+              proxyMode={modeSetup || status.mode}
+              config={processProxy}
+              loading={loadingAction === 'processProxy'}
+              disabled={status.initializing || loadingAction === 'mode'}
+              onSave={handleSaveProcessProxy}
               showToast={showToast}
             />
 
-            <ShareCard
-              config={share}
-              endpoints={shareEndpoints}
-              loading={loadingAction === 'share'}
-              disabled={status.initializing}
-              onSave={handleSaveShare}
+            <PoolCard
+              proxyMode={modeSetup || status.mode}
+              config={pool}
+              endpoints={poolEndpoints}
+              loading={loadingAction === 'pool'}
+              disabled={status.initializing || loadingAction === 'mode'}
+              onSave={handleSavePool}
               showToast={showToast}
             />
 

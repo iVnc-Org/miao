@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tracing::warn;
 
-use crate::{error::AppResult, models::RouteMode, services::write_file_atomic};
+use crate::{error::AppResult, services::write_file_atomic};
 
 const RUNTIME_STATE_DIR: &str = "data/cache";
 const RUNTIME_STATE_FILE: &str = "runtime.json";
@@ -11,15 +11,12 @@ const RUNTIME_STATE_FILE: &str = "runtime.json";
 pub struct RuntimeState {
     #[serde(default = "default_running")]
     pub running: bool,
-    #[serde(default)]
-    pub route_mode: RouteMode,
 }
 
 impl Default for RuntimeState {
     fn default() -> Self {
         Self {
             running: true,
-            route_mode: RouteMode::default(),
         }
     }
 }
@@ -52,24 +49,25 @@ pub async fn save_runtime_state(state: RuntimeState) -> AppResult<()> {
     write_file_atomic(&runtime_state_path(), &content, "runtime state").await
 }
 
-pub async fn save_running_state(running: bool, route_mode: RouteMode) -> AppResult<()> {
-    save_runtime_state(RuntimeState {
-        running,
-        route_mode,
-    })
-    .await
+pub async fn save_running_state(running: bool) -> AppResult<()> {
+    save_runtime_state(RuntimeState { running }).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::RuntimeState;
-    use crate::models::RouteMode;
 
     #[test]
     fn runtime_state_defaults_to_running_for_compatibility() {
         let state = RuntimeState::default();
 
         assert!(state.running);
-        assert_eq!(state.route_mode, RouteMode::Global);
+    }
+
+    #[test]
+    fn runtime_state_ignores_legacy_route_mode() {
+        let state: RuntimeState =
+            serde_json::from_str(r#"{"running":false,"route_mode":"rule"}"#).unwrap();
+        assert!(!state.running);
     }
 }

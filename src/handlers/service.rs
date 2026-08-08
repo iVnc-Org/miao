@@ -5,13 +5,14 @@ use tokio::time::Duration;
 
 use crate::error::AppError;
 use crate::models::{
-    ApiResponse, ConnectivityResult, RouteMode, RouteModeRequest, StatusData, DEFAULT_SOCKS_LISTEN,
+    ApiResponse, ConnectivityResult, ModeRequest, ProxyMode, StatusData, DEFAULT_SOCKS_LISTEN,
     DEFAULT_SOCKS_PORT,
 };
 use crate::responses::{status_error, success, success_no_data, HandlerResult};
 use crate::services::{
     config::{
-        apply_runtime_config_change, gen_config, restore_config_from_cache, save_config_cache,
+        apply_persistent_config_change, gen_config, restore_config_from_cache, save_config_cache,
+        SubFetchPolicy,
     },
     proxy::restore_last_proxy,
     runtime::save_running_state,
@@ -46,18 +47,14 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> Json<ApiResponse<
         .load(std::sync::atomic::Ordering::Relaxed);
     let warning = state.config_warning.lock().await.clone();
     let config_source = state.config_source.lock().await.clone();
-    let route_mode = state
-        .route_mode_override
-        .read()
-        .await
-        .unwrap_or(RouteMode::default());
+    let mode = state.config.read().await.mode;
 
     success(
         if running { "running" } else { "stopped" },
         StatusData {
             running,
             initializing,
-            route_mode,
+            mode,
             pid,
             uptime_secs,
             warning,
@@ -72,50 +69,44 @@ pub async fn start_service(State(state): State<Arc<AppState>>) -> HandlerResult 
     let _config_update = state.config_update.lock().await;
     let config_path = get_sing_box_home().join("config.json");
     if !config_path.exists() {
-        let mut config = state.config.read().await.clone();
-        config.route_mode = state
-            .route_mode_override
-            .read()
-            .await
-            .unwrap_or(RouteMode::default());
+        let config = state.config.read().await.clone();
         match restore_config_from_cache(&config).await {
             Ok(_) => {
                 *state.config_source.lock().await = Some("cache".to_string());
                 *state.config_warning.lock().await =
                     Some("当前使用上次成功生成的缓存配置，订阅未在启动时自动刷新".to_string());
             }
-            Err(cache_err) => match gen_config(&config, &state).await {
-                Ok(has_sub_nodes) => {
-                    *state.config_source.lock().await = Some("generated".to_string());
-                    if has_sub_nodes || config.subs.is_empty() {
-                        save_config_cache(&config).await;
-                        *state.config_warning.lock().await = None;
-                    } else if !config.subs.is_empty() {
-                        *state.config_warning.lock().await =
-                            Some("所有订阅获取失败，请检查当前订阅".to_string());
+            // 缓存未命中时才生成。只有订阅节点缓存也是空的（首装/用户清了缓存）
+            // 才会真的联网抓一次，否则一律复用已存节点。
+            Err(cache_err) => {
+                match gen_config(&config, &state, SubFetchPolicy::CacheOrBootstrap).await {
+                    Ok(outcome) => {
+                        *state.config_source.lock().await = Some("generated".to_string());
+                        if outcome.has_sub_nodes() || config.subs.is_empty() {
+                            save_config_cache(&config).await;
+                            *state.config_warning.lock().await = None;
+                        } else if !config.subs.is_empty() {
+                            *state.config_warning.lock().await =
+                                Some("订阅节点缓存为空，请点击刷新订阅".to_string());
+                        }
+                    }
+                    Err(generate_err) => {
+                        return Err(status_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!(
+                                "Failed to prepare sing-box config: cache restore failed: {}; regenerate failed: {}",
+                                cache_err, generate_err
+                            ),
+                        ));
                     }
                 }
-                Err(generate_err) => {
-                    return Err(status_error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!(
-                            "Failed to prepare sing-box config: cache restore failed: {}; regenerate failed: {}",
-                            cache_err, generate_err
-                        ),
-                    ));
-                }
-            },
+            }
         }
     }
 
     match start_sing_internal(&state).await {
         Ok(_) => {
-            let route_mode = state
-                .route_mode_override
-                .read()
-                .await
-                .unwrap_or(RouteMode::default());
-            if let Err(e) = save_running_state(true, route_mode).await {
+            if let Err(e) = save_running_state(true).await {
                 return Err(status_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("Failed to save runtime state: {}", e),
@@ -139,13 +130,9 @@ pub async fn start_service(State(state): State<Arc<AppState>>) -> HandlerResult 
 }
 
 pub async fn stop_service(State(state): State<Arc<AppState>>) -> HandlerResult {
+    let _config_update = state.config_update.lock().await;
     stop_sing_internal(&state).await;
-    let route_mode = state
-        .route_mode_override
-        .read()
-        .await
-        .unwrap_or(RouteMode::default());
-    if let Err(e) = save_running_state(false, route_mode).await {
+    if let Err(e) = save_running_state(false).await {
         return Err(status_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Failed to save runtime state: {}", e),
@@ -154,57 +141,55 @@ pub async fn stop_service(State(state): State<Arc<AppState>>) -> HandlerResult {
     Ok(success_no_data("sing-box stopped"))
 }
 
-pub async fn set_route_mode(
+pub async fn set_mode(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<RouteModeRequest>,
+    Json(req): Json<ModeRequest>,
 ) -> HandlerResult {
     let _config_update = state.config_update.lock().await;
     let was_running = sing_box_is_running(&state).await;
     let old_config = state.config.read().await.clone();
-    let current_route_mode = state
-        .route_mode_override
-        .read()
-        .await
-        .unwrap_or(RouteMode::default());
 
-    if current_route_mode == req.route_mode {
-        return Ok(success_no_data("Route mode unchanged"));
+    if old_config.mode == req.mode {
+        return Ok(success_no_data("Proxy mode unchanged"));
     }
 
-    let mut old_runtime_config = old_config.clone();
-    old_runtime_config.route_mode = current_route_mode;
-    let mut new_runtime_config = old_config.clone();
-    new_runtime_config.route_mode = req.route_mode;
+    let mut new_config = old_config.clone();
+    new_config.mode = req.mode;
+    match req.mode {
+        ProxyMode::Global => {}
+        ProxyMode::Process => {
+            let process_proxy = new_config
+                .tun_process
+                .normalized()
+                .map_err(|error| status_error(StatusCode::BAD_REQUEST, error))?;
+            process_proxy
+                .validate_active()
+                .map_err(|error| status_error(StatusCode::BAD_REQUEST, error))?;
+            new_config.tun_process = process_proxy;
+        }
+        ProxyMode::Pool => {
+            let pool = new_config
+                .share
+                .normalized()
+                .map_err(|error| status_error(StatusCode::BAD_REQUEST, error))?;
+            pool.validate_active()
+                .map_err(|error| status_error(StatusCode::BAD_REQUEST, error))?;
+            new_config.share = pool;
+        }
+    }
 
-    let result = apply_runtime_config_change(
+    let result = apply_persistent_config_change(
         &state,
-        &old_runtime_config,
-        &new_runtime_config,
+        &old_config,
+        &new_config,
         was_running,
+        SubFetchPolicy::CacheOnly,
     )
     .await;
 
     match result {
-        Ok(_) if was_running => {
-            if let Err(e) = save_running_state(true, req.route_mode).await {
-                return Err(status_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to save runtime state: {}", e),
-                ));
-            }
-            Ok(success_no_data(
-                "Route mode updated for current session and sing-box restarted",
-            ))
-        }
-        Ok(_) => {
-            if let Err(e) = save_running_state(false, req.route_mode).await {
-                return Err(status_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to save runtime state: {}", e),
-                ));
-            }
-            Ok(success_no_data("Route mode updated for current session"))
-        }
+        Ok(_) if was_running => Ok(success_no_data("Proxy mode updated and sing-box restarted")),
+        Ok(_) => Ok(success_no_data("Proxy mode updated")),
         Err(e) => Err(status_error(StatusCode::INTERNAL_SERVER_ERROR, e)),
     }
 }
@@ -286,7 +271,7 @@ mod tests {
     use axum::extract::State;
 
     use super::{get_status, socks_proxy_url};
-    use crate::models::{Config, RouteMode};
+    use crate::models::{Config, ProxyMode};
     use crate::test_support::app_state;
 
     #[tokio::test]
@@ -311,30 +296,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_status_reports_route_mode_override_without_mutating_config() {
+    async fn get_status_reports_persisted_proxy_mode() {
         let state = app_state(Config {
-            route_mode: RouteMode::Rule,
-            ..Default::default()
-        });
-        *state.route_mode_override.write().await = Some(RouteMode::Global);
-
-        let axum::response::Json(response) = get_status(State(state.clone())).await;
-
-        let data = response.data.unwrap();
-        assert_eq!(data.route_mode, RouteMode::Global);
-        assert_eq!(state.config.read().await.route_mode, RouteMode::Rule);
-    }
-
-    #[tokio::test]
-    async fn get_status_defaults_to_global_without_override() {
-        let state = app_state(Config {
-            route_mode: RouteMode::Global,
+            mode: ProxyMode::Pool,
             ..Default::default()
         });
 
         let axum::response::Json(response) = get_status(State(state)).await;
 
         let data = response.data.unwrap();
-        assert_eq!(data.route_mode, RouteMode::Global);
+        assert_eq!(data.mode, ProxyMode::Pool);
     }
 }

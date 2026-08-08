@@ -15,7 +15,10 @@ use axum::http::StatusCode;
 use crate::{
     models::Config,
     responses::{status_error, success_no_data, HandlerResult},
-    services::{config::apply_persistent_config_change, singbox::sing_box_is_running},
+    services::{
+        config::{apply_persistent_config_change, SubFetchPolicy},
+        singbox::sing_box_is_running,
+    },
     state::AppState,
 };
 
@@ -45,7 +48,16 @@ where
     let mut new_config = old_config.clone();
     apply(&mut new_config, section);
 
-    match apply_persistent_config_change(state, &old_config, &new_config, was_running).await {
+    // 子配置变更（代理池、进程代理）与订阅内容无关，一律用缓存。
+    match apply_persistent_config_change(
+        state,
+        &old_config,
+        &new_config,
+        was_running,
+        SubFetchPolicy::CacheOnly,
+    )
+    .await
+    {
         Ok(_) if was_running => Ok(success_no_data(format!(
             "{label} saved and sing-box restarted"
         ))),

@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::{
     handlers::apply_config_section,
-    models::{ApiResponse, ShareConfig, ShareEndpoint},
+    models::{ApiResponse, PoolConfig, ProxyMode, ShareEndpoint},
     responses::{status_error, success, HandlerResult},
     services::{
         config::{extract_share_bindings_from_sing_box, read_existing_sing_box_config},
@@ -13,18 +13,23 @@ use crate::{
     state::AppState,
 };
 
-pub async fn get_share(State(state): State<Arc<AppState>>) -> Json<ApiResponse<ShareConfig>> {
+pub async fn get_share(State(state): State<Arc<AppState>>) -> Json<ApiResponse<PoolConfig>> {
     let config = state.config.read().await;
     success("Share config loaded", config.share.clone())
 }
 
 pub async fn set_share(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<ShareConfig>,
+    Json(req): Json<PoolConfig>,
 ) -> HandlerResult {
     let share = req
         .normalized()
         .map_err(|e| status_error(StatusCode::BAD_REQUEST, e))?;
+    if state.config.read().await.mode == ProxyMode::Pool {
+        share
+            .validate_active()
+            .map_err(|e| status_error(StatusCode::BAD_REQUEST, e))?;
+    }
 
     apply_config_section(
         &state,
@@ -40,7 +45,7 @@ pub async fn get_share_endpoints(
     State(state): State<Arc<AppState>>,
 ) -> Json<ApiResponse<Vec<ShareEndpoint>>> {
     let config = state.config.read().await;
-    if !config.share.enabled {
+    if config.mode != ProxyMode::Pool {
         return success("Share endpoints", Vec::new());
     }
 
@@ -80,29 +85,22 @@ mod tests {
 
     use super::{get_share, get_share_endpoints};
     use crate::{
-        models::{Config, ShareConfig},
+        models::{Config, PoolConfig, ProxyMode},
         test_support::app_state,
     };
 
-    fn config_with_share(share: ShareConfig) -> Config {
+    fn config_with_share(share: PoolConfig) -> Config {
         Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            vps_ip: None,
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
+            mode: ProxyMode::Pool,
             share,
-            route_mode: Default::default(),
+            ..Default::default()
         }
     }
 
     #[tokio::test]
     async fn get_share_returns_config_value() {
-        let state = app_state(config_with_share(ShareConfig {
-            enabled: true,
+        let state = app_state(config_with_share(PoolConfig {
+            legacy_enabled: false,
             listen: "0.0.0.0".to_string(),
             base_port: 13000,
             username: "alice".to_string(),
@@ -112,14 +110,13 @@ mod tests {
         let Json(response) = get_share(State(state)).await;
         assert!(response.success);
         let config = response.data.unwrap();
-        assert!(config.enabled);
         assert_eq!(config.base_port, 13000);
         assert_eq!(config.username, "alice");
     }
 
     #[tokio::test]
     async fn get_share_endpoints_empty_when_disabled() {
-        let state = app_state(config_with_share(Default::default()));
+        let state = app_state(Config::default());
 
         let Json(response) = get_share_endpoints(State(state)).await;
         assert!(response.success);

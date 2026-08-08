@@ -5,6 +5,7 @@ pub mod proxy;
 pub mod runtime;
 pub mod share_ports;
 pub mod singbox;
+pub mod sub_nodes;
 pub mod subscription;
 pub mod version;
 pub mod vps;

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Copy, Save, Share2 } from 'lucide-react'
 import { Button, SectionCard } from './ui.jsx'
-import { normalizeShareConfig } from '../hooks/useApi.js'
+import { normalizePoolConfig } from '../hooks/useApi.js'
 
 const PORT_PLACEHOLDER = '12000'
 const WILDCARD_HOSTS = new Set(['0.0.0.0', '::'])
@@ -48,11 +48,10 @@ function resolveEndpointUrl(url, listen) {
 }
 
 /** 表单当前内容对应的提交负载；`base_port` 非法时为 null。 */
-function buildPayload({ enabled, listen, basePort, username, password }) {
+function buildPayload({ listen, basePort, username, password }) {
   const port = parsePort(basePort)
   if (port === null) return null
   return {
-    enabled,
     listen: listen.trim(),
     base_port: port,
     username: username.trim(),
@@ -60,7 +59,8 @@ function buildPayload({ enabled, listen, basePort, username, password }) {
   }
 }
 
-export function ShareCard({
+export function PoolCard({
+  proxyMode,
   config,
   endpoints,
   loading,
@@ -68,8 +68,7 @@ export function ShareCard({
   onSave,
   showToast,
 }) {
-  const normalizedConfig = useMemo(() => normalizeShareConfig(config), [config])
-  const [enabled, setEnabled] = useState(normalizedConfig.enabled)
+  const normalizedConfig = useMemo(() => normalizePoolConfig(config), [config])
   const [listen, setListen] = useState(normalizedConfig.listen)
   const [basePort, setBasePort] = useState(String(normalizedConfig.base_port))
   const [username, setUsername] = useState(normalizedConfig.username)
@@ -84,21 +83,19 @@ export function ShareCard({
     const incoming = JSON.stringify(normalizedConfig)
     if (syncedRef.current === incoming) return
     syncedRef.current = incoming
-    setEnabled(normalizedConfig.enabled)
     setListen(normalizedConfig.listen)
     setBasePort(String(normalizedConfig.base_port))
     setUsername(normalizedConfig.username)
     setPassword(normalizedConfig.password)
   }, [normalizedConfig])
 
-  const payload = buildPayload({ enabled, listen, basePort, username, password })
+  const payload = buildPayload({ listen, basePort, username, password })
   // 和 handleSave 实际发送的负载逐字段比对，保存按钮的亮灭才和"点了会不会有效果"一致。
   // 端口填得不合法时算作"有改动"：让按钮保持可点，点下去会给出明确的错误提示；
   // 直接置灰只会让用户对着一个和已保存值明显不同的表单，却得不到任何解释。
   const dirty = payload === null
     ? true
-    : payload.enabled !== normalizedConfig.enabled
-      || payload.listen !== normalizedConfig.listen
+    : payload.listen !== normalizedConfig.listen
       || payload.base_port !== normalizedConfig.base_port
       || payload.username !== normalizedConfig.username
       || payload.password !== normalizedConfig.password
@@ -120,19 +117,19 @@ export function ShareCard({
       showToast('用户名和密码需同时填写或同时留空', 'error')
       return
     }
-    if (payload.enabled && !isLoopbackListen(payload.listen) && !payload.username) {
+    if (!isLoopbackListen(payload.listen) && !payload.username) {
       showToast('监听非回环地址时必须设置用户名和密码，否则会变成开放代理', 'error')
       return
     }
 
     // 乐观地认为提交值就是新的基线，这样后续刷新回来的同一份值不会触发回填。
-    syncedRef.current = JSON.stringify(normalizeShareConfig(payload))
+    syncedRef.current = JSON.stringify(normalizePoolConfig(payload))
     onSave(payload)
   }
 
   const handleCopy = async (url) => {
     // 面板默认是局域网明文 HTTP，非安全上下文里 navigator.clipboard 根本不存在，
-    // 而"从别的机器打开面板复制地址"恰恰是分享模式的主要用法。
+    // 而"从别的机器打开面板复制地址"恰恰是代理池的主要用法。
     try {
       if (navigator.clipboard?.writeText) {
         await navigator.clipboard.writeText(url)
@@ -154,6 +151,8 @@ export function ShareCard({
     }
   }
 
+  if (proxyMode !== 'pool') return null
+
   return (
     <SectionCard
       className="share-card"
@@ -162,8 +161,8 @@ export function ShareCard({
         <div className="section-header">
           <div className="section-title-wrap">
             <Share2 size={14} className="section-icon" />
-            <span>分享模式</span>
-            {enabled && endpoints?.length > 0 && (
+            <span>代理池</span>
+            {endpoints?.length > 0 && (
               <span className="counter-pill">{endpoints.length}</span>
             )}
           </div>
@@ -181,94 +180,81 @@ export function ShareCard({
       }
     >
       <div className="share-body">
-        <label className="share-toggle">
-          <input
-            type="checkbox"
-            checked={enabled}
-            disabled={disabled || loading}
-            onChange={(event) => setEnabled(event.target.checked)}
-          />
-          <span>为每个节点开放独立 SOCKS5 端口</span>
-        </label>
+        <div className="share-grid">
+          <label className="field">
+            <span>监听地址</span>
+            <input
+              value={listen}
+              disabled={disabled || loading}
+              onChange={(event) => setListen(event.target.value)}
+              placeholder="127.0.0.1"
+            />
+          </label>
+          <label className="field">
+            <span>起始端口</span>
+            <input
+              value={basePort}
+              disabled={disabled || loading}
+              onChange={(event) => setBasePort(event.target.value)}
+              placeholder={PORT_PLACEHOLDER}
+            />
+          </label>
+          <label className="field">
+            <span>用户名</span>
+            <input
+              value={username}
+              disabled={disabled || loading}
+              onChange={(event) => setUsername(event.target.value)}
+              placeholder="非回环监听时必填"
+              autoComplete="off"
+            />
+          </label>
+          <label className="field">
+            <span>密码</span>
+            <input
+              type="password"
+              value={password}
+              disabled={disabled || loading}
+              onChange={(event) => setPassword(event.target.value)}
+              placeholder="非回环监听时必填"
+              autoComplete="new-password"
+            />
+          </label>
+        </div>
 
-        {enabled ? (
-          <>
-            <div className="share-grid">
-              <label className="field">
-                <span>监听地址</span>
-                <input
-                  value={listen}
-                  disabled={disabled || loading}
-                  onChange={(event) => setListen(event.target.value)}
-                  placeholder="127.0.0.1"
-                />
-              </label>
-              <label className="field">
-                <span>起始端口</span>
-                <input
-                  value={basePort}
-                  disabled={disabled || loading}
-                  onChange={(event) => setBasePort(event.target.value)}
-                  placeholder={PORT_PLACEHOLDER}
-                />
-              </label>
-              <label className="field">
-                <span>用户名</span>
-                <input
-                  value={username}
-                  disabled={disabled || loading}
-                  onChange={(event) => setUsername(event.target.value)}
-                  placeholder="非回环监听时必填"
-                  autoComplete="off"
-                />
-              </label>
-              <label className="field">
-                <span>密码</span>
-                <input
-                  type="password"
-                  value={password}
-                  disabled={disabled || loading}
-                  onChange={(event) => setPassword(event.target.value)}
-                  placeholder="非回环监听时必填"
-                  autoComplete="new-password"
-                />
-              </label>
-            </div>
+        <div className="share-note">
+          端口按节点名称持久分配，订阅刷新重排后端口不变。默认只监听 127.0.0.1；
+          要让局域网其它设备连入，请改成 0.0.0.0 或本机局域网 IP，此时必须设置用户名和密码。
+        </div>
 
-            <div className="share-note">
-              端口按节点名称持久分配，订阅刷新重排后端口不变。默认只监听 127.0.0.1；
-              要让局域网其它设备连入，请改成 0.0.0.0 或本机局域网 IP，此时必须设置用户名和密码。
-            </div>
-
-            {normalizedConfig.enabled && endpoints?.length > 0 ? (
-              <div className="share-endpoints">
-                {endpoints.map((item) => {
-                  const displayUrl = resolveEndpointUrl(item.url, item.listen)
-                  return (
-                    <div key={`${item.tag}-${item.port}`} className="share-endpoint-row">
-                      <div className="share-endpoint-meta">
-                        <span className="share-endpoint-tag">{item.tag}</span>
-                        <span className="share-endpoint-port">:{item.port}</span>
-                      </div>
-                      <code className="share-endpoint-url" title={displayUrl}>{displayUrl}</code>
-                      <button
-                        type="button"
-                        className="share-copy-btn"
-                        disabled={disabled || loading}
-                        onClick={() => handleCopy(displayUrl)}
-                        aria-label={`复制 ${item.tag}`}
-                      >
-                        <Copy size={12} />
-                      </button>
-                    </div>
-                  )
-                })}
-              </div>
-            ) : (
-              <div className="empty-block">保存并启动服务后显示节点端口</div>
-            )}
-          </>
+        {endpoints?.length > 0 ? (
+          <div className="share-endpoints">
+            {endpoints.map((item) => {
+              const displayUrl = resolveEndpointUrl(item.url, item.listen)
+              return (
+                <div key={`${item.tag}-${item.port}`} className="share-endpoint-row">
+                  <div className="share-endpoint-meta">
+                    <span className="share-endpoint-tag">{item.tag}</span>
+                    <span className="share-endpoint-port">:{item.port}</span>
+                  </div>
+                  <code className="share-endpoint-url" title={displayUrl}>{displayUrl}</code>
+                  <button
+                    type="button"
+                    className="share-copy-btn"
+                    disabled={disabled || loading}
+                    onClick={() => handleCopy(displayUrl)}
+                    aria-label={`复制 ${item.tag}`}
+                  >
+                    <Copy size={12} />
+                  </button>
+                </div>
+              )
+            })}
+          </div>
         ) : null}
+        {endpoints?.length === 0 && (
+          <div className="empty-block">保存并启动服务后显示节点端口</div>
+        )}
       </div>
     </SectionCard>
   )

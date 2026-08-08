@@ -7,12 +7,12 @@ use axum::{
 
 use crate::handlers::{
     clash::{get_proxies, switch_proxy, test_proxy_delay, traffic_ws},
-    nodes::{add_node, delete_node, get_nodes},
+    nodes::{add_node, delete_node, get_node_inventory, get_nodes},
     proxy::set_last_proxy,
-    service::{get_status, set_route_mode, start_service, stop_service, test_connectivity},
+    service::{get_status, set_mode, start_service, stop_service, test_connectivity},
     share::{get_share, get_share_endpoints, set_share},
     static_assets::{serve_favicon, serve_index},
-    subs::{add_sub, delete_sub, get_subs, refresh_subs},
+    subs::{add_sub, delete_sub, get_subs, refresh_subs, replace_sub},
     tun_process::{get_tun_process, set_tun_process},
     version::{get_version, upgrade},
 };
@@ -25,7 +25,7 @@ pub fn build_router(app_state: Arc<AppState>) -> Router {
         .route("/api/status", get(get_status))
         .route("/api/service/start", post(start_service))
         .route("/api/service/stop", post(stop_service))
-        .route("/api/route-mode", post(set_route_mode))
+        .route("/api/mode", post(set_mode))
         .route("/api/tun-process", get(get_tun_process))
         .route("/api/tun-process", post(set_tun_process))
         .route("/api/share", get(get_share))
@@ -36,11 +36,13 @@ pub fn build_router(app_state: Arc<AppState>) -> Router {
         .route("/api/upgrade", post(upgrade))
         .route("/api/subs", get(get_subs))
         .route("/api/subs", post(add_sub))
+        .route("/api/subs", put(replace_sub))
         .route("/api/subs", delete(delete_sub))
         .route("/api/subs/refresh", post(refresh_subs))
         .route("/api/nodes", get(get_nodes))
         .route("/api/nodes", post(add_node))
         .route("/api/nodes", delete(delete_node))
+        .route("/api/proxies", get(get_node_inventory))
         .route("/api/clash/proxies", get(get_proxies))
         .route("/api/clash/proxies/{group}", put(switch_proxy))
         .route("/api/clash/proxies/{name}/delay", get(test_proxy_delay))
@@ -103,6 +105,7 @@ mod tests {
         assert_eq!(json["success"], true);
         assert_eq!(json["message"], "stopped");
         assert_eq!(json["data"]["running"], false);
+        assert_eq!(json["data"]["mode"], "global");
     }
 
     #[tokio::test]
@@ -143,6 +146,48 @@ mod tests {
         assert_eq!(json["data"][0]["tag"], "router-node");
         assert_eq!(json["data"][0]["server"], "node.example.com");
         assert_eq!(json["data"][0]["sni"], "sni.example.com");
+    }
+
+    #[tokio::test]
+    async fn router_returns_persistent_proxy_inventory() {
+        let app = test_app(Config {
+            nodes: vec![
+                r#"{"type":"socks","tag":"inventory-node","server":"127.0.0.1","server_port":1081}"#
+                    .to_string(),
+            ],
+            ..Default::default()
+        })
+        .await;
+
+        let response = app
+            .oneshot(empty_request("GET", "/api/proxies"))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["success"], true);
+        assert_eq!(json["message"], "Proxy inventory loaded");
+        assert_eq!(json["data"]["nodes"][0]["tag"], "inventory-node");
+    }
+
+    #[tokio::test]
+    async fn router_accepts_the_persisted_mode_contract() {
+        let app = test_app(Config::default()).await;
+
+        let response = app
+            .oneshot(json_request(
+                "POST",
+                "/api/mode",
+                json!({ "mode": "global" }),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["success"], true);
+        assert_eq!(json["message"], "Proxy mode unchanged");
     }
 
     #[tokio::test]
@@ -187,6 +232,32 @@ mod tests {
         let json = response_json(response).await;
         assert_eq!(json["success"], false);
         assert_eq!(json["message"], "Subscription already exists");
+    }
+
+    #[tokio::test]
+    async fn router_exposes_atomic_subscription_replacement() {
+        let app = test_app(Config {
+            subs: vec!["https://example.com/subscription".to_string()],
+            ..Default::default()
+        })
+        .await;
+
+        let response = app
+            .oneshot(json_request(
+                "PUT",
+                "/api/subs",
+                json!({
+                    "old_url": "https://example.com/subscription",
+                    "new_url": "ftp://example.com/replacement"
+                }),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = response_json(response).await;
+        assert_eq!(json["success"], false);
+        assert!(json["message"].as_str().unwrap().contains("HTTP"));
     }
 
     #[tokio::test]

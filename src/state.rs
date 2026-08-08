@@ -6,13 +6,12 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock};
 
-use crate::models::{Config, GitHubRelease, RouteMode, SubStatus};
+use crate::models::{Config, GitHubRelease, SubStatus};
 
 /// 应用状态容器 - 包含所有运行时状态
 /// 通过依赖注入传递，避免全局静态变量
 pub struct AppState {
     pub config: RwLock<Config>, // 使用 RwLock 支持并发读
-    pub route_mode_override: RwLock<Option<RouteMode>>,
     pub config_path: PathBuf,
     pub config_update: Mutex<()>,
     pub sing_process: Mutex<Option<SingBoxProcess>>,
@@ -39,7 +38,6 @@ impl AppState {
 
         Ok(Self {
             config: RwLock::new(config),
-            route_mode_override: RwLock::new(None),
             config_path,
             config_update: Mutex::new(()),
             sing_process: Mutex::new(None),

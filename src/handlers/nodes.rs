@@ -3,10 +3,12 @@ use serde_json::{json, Map, Value as JsonValue};
 use std::sync::Arc;
 use tracing::warn;
 
-use crate::models::{ApiResponse, DeleteNodeRequest, NodeInfo, NodeRequest};
+use crate::models::{ApiResponse, DeleteNodeRequest, NodeInfo, NodeInventory, NodeRequest};
 use crate::responses::{status_error, success, success_no_data, HandlerResult};
-use crate::services::config::apply_config_change;
+use crate::services::config::{apply_config_change, resolve_node_inventory, SubFetchPolicy};
 use crate::services::node_parser::parse_node_json;
+use crate::services::proxy::load_last_proxy;
+use crate::services::sub_nodes::load_sub_nodes;
 use crate::state::AppState;
 use crate::validation::Validator;
 
@@ -301,6 +303,20 @@ pub async fn get_nodes(State(state): State<Arc<AppState>>) -> Json<ApiResponse<V
     success("Nodes loaded", nodes)
 }
 
+pub async fn get_node_inventory(
+    State(state): State<Arc<AppState>>,
+) -> Json<ApiResponse<NodeInventory>> {
+    let config = state.config.read().await.clone();
+    let store = load_sub_nodes().await;
+    let nodes = resolve_node_inventory(&config, &store);
+    let current = load_last_proxy()
+        .await
+        .map(|proxy| proxy.name)
+        .filter(|name| nodes.iter().any(|node| node.tag == *name));
+
+    success("Proxy inventory loaded", NodeInventory { nodes, current })
+}
+
 pub async fn add_node(
     State(state): State<Arc<AppState>>,
     Json(req): Json<NodeRequest>,
@@ -353,7 +369,8 @@ pub async fn add_node(
 
     new_config.nodes.push(node_json);
 
-    match apply_config_change(&state, &old_config, &new_config).await {
+    // 手动节点的增删与订阅无关，一律用缓存里的订阅节点。
+    match apply_config_change(&state, &old_config, &new_config, SubFetchPolicy::CacheOnly).await {
         Ok(_) => Ok(success_no_data("Node added and sing-box restarted")),
         Err(e) => Err(status_error(StatusCode::INTERNAL_SERVER_ERROR, e)),
     }
@@ -380,7 +397,8 @@ pub async fn delete_node(
         return Err(status_error(StatusCode::NOT_FOUND, "Node not found"));
     }
 
-    match apply_config_change(&state, &old_config, &new_config).await {
+    // 手动节点的增删与订阅无关，一律用缓存里的订阅节点。
+    match apply_config_change(&state, &old_config, &new_config, SubFetchPolicy::CacheOnly).await {
         Ok(_) => Ok(success_no_data("Node deleted and sing-box restarted")),
         Err(e) => Err(status_error(StatusCode::INTERNAL_SERVER_ERROR, e)),
     }

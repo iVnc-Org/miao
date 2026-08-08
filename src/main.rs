@@ -17,13 +17,17 @@ use nix::unistd::Uid;
 use std::{fs, net::IpAddr, sync::Arc};
 use tracing::{error, info, warn};
 
-use models::{Config, DEFAULT_PORT, DEFAULT_SOCKS_LISTEN, DEFAULT_SOCKS_PORT};
+use models::{Config, ProxyMode, DEFAULT_PORT, DEFAULT_SOCKS_LISTEN, DEFAULT_SOCKS_PORT};
 use services::{
-    config::{gen_config, restore_config_from_cache, save_config_cache},
+    config::{
+        gen_config, migrate_legacy_subscription_nodes, restore_config_from_cache,
+        save_config_cache, save_config_to, SubFetchPolicy,
+    },
     openwrt::check_and_install_openwrt_dependencies,
     proxy::restore_last_proxy,
     runtime::{load_runtime_state, save_running_state},
     singbox::{extract_sing_box, start_sing_internal, stop_sing_internal},
+    sub_nodes::hydrate_sub_status,
     vps::ensure_vps_hysteria_node,
 };
 use state::AppState;
@@ -206,14 +210,46 @@ async fn open_onboarding_browser(url: String) {
     }
 }
 
-fn config_declares_route_mode(content: &str) -> bool {
+fn config_declares_key(content: &str, key: &str) -> bool {
     let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(content) else {
         return false;
     };
 
     value
         .as_mapping()
-        .is_some_and(|mapping| mapping.contains_key("route_mode"))
+        .is_some_and(|mapping| mapping.contains_key(key))
+}
+
+fn migrate_proxy_mode(config: &mut Config, mode_declared: bool) -> (bool, Option<String>) {
+    let legacy_process = config.tun_process.legacy_enabled;
+    let legacy_pool = config.share.legacy_enabled;
+    config.tun_process.legacy_enabled = false;
+    config.share.legacy_enabled = false;
+
+    if mode_declared {
+        return (false, None);
+    }
+
+    config.mode = if legacy_pool {
+        ProxyMode::Pool
+    } else if legacy_process {
+        ProxyMode::Process
+    } else {
+        ProxyMode::Global
+    };
+
+    let warning = if legacy_process && legacy_pool {
+        Some("检测到旧配置同时启用了进程代理和分享模式，已迁移为代理池模式".to_string())
+    } else {
+        None
+    };
+    (true, warning)
+}
+
+fn config_backup_path(path: &std::path::Path) -> std::path::PathBuf {
+    let mut backup = path.as_os_str().to_os_string();
+    backup.push(".bak");
+    backup.into()
 }
 
 #[tokio::main]
@@ -262,31 +298,39 @@ async fn main() -> AppResult<()> {
         "Resolved configuration path"
     );
 
-    let mut config: Config = match tokio::fs::read_to_string(&config_path).await {
+    let (mut config, migration_warning): (Config, Option<String>) =
+        match tokio::fs::read_to_string(&config_path).await {
         Ok(content) => {
-            let route_mode_declared = config_declares_route_mode(&content);
+            let mode_declared = config_declares_key(&content, "mode");
             let mut config: Config = serde_yaml::from_str(&content)?;
-            if route_mode_declared {
-                info!(
-                    config_path = ?config_path,
-                    "Ignoring route_mode from configuration file; route mode is session-only"
-                );
-                config.route_mode = Default::default();
+            let (migrated, warning) = migrate_proxy_mode(&mut config, mode_declared);
+            if migrated {
+                let backup_path = config_backup_path(&config_path);
+                tokio::fs::copy(&config_path, &backup_path)
+                    .await
+                    .map_err(|error| AppError::context("Failed to back up config before mode migration", error))?;
+                save_config_to(&config_path, &config).await?;
+                info!(config_path = ?config_path, backup_path = ?backup_path, mode = ?config.mode, "Migrated legacy proxy mode configuration");
+                if let Some(message) = &warning {
+                    warn!("{message}");
+                }
             }
-            config
+            (config, warning)
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             info!(
                 config_path = ?config_path,
                 "No config file found, using in-memory default configuration"
             );
-            Config::default()
+            (Config::default(), None)
         }
         Err(e) => return Err(e.into()),
     };
     apply_cli_overrides(&mut config, &cli_options);
+    if let Err(error) = migrate_legacy_subscription_nodes(&config).await {
+        warn!(error = %error, "Failed to import subscription nodes from legacy config cache");
+    }
     let runtime_state = load_runtime_state().await;
-    config.route_mode = runtime_state.route_mode;
     let port = config.port.unwrap_or(DEFAULT_PORT);
     let socks_listen = config
         .socks_listen
@@ -312,7 +356,7 @@ async fn main() -> AppResult<()> {
         AppState::with_config_path(config.clone(), config_path)
             .map_err(|e| AppError::context("Failed to create HTTP client", e))?,
     );
-    *app_state.route_mode_override.write().await = Some(runtime_state.route_mode);
+    *app_state.config_warning.lock().await = migration_warning.clone();
     let state_for_init = app_state.clone();
 
     // Start web server immediately so the panel is accessible during initialization
@@ -349,6 +393,10 @@ async fn main() -> AppResult<()> {
             }
         }
 
+        // 用本地缓存回填订阅状态。必须在下面两个提前返回之前做——服务处于停止
+        // 状态时恰恰最需要它，否则面板上订阅节点数会是 0。
+        hydrate_sub_status(&state_for_init, &config.subs).await;
+
         if config.subs.is_empty() && config.nodes.is_empty() {
             info!("No subscriptions or nodes configured, waiting for onboarding");
             state_for_init
@@ -366,27 +414,29 @@ async fn main() -> AppResult<()> {
         }
 
         info!("Preparing initial sing-box config...");
-        let mut started_from_cache = false;
-        let mut all_subs_failed = false;
-
         match restore_config_from_cache(&config).await {
             Ok(_) => {
                 info!("Using cached config for initial startup");
-                started_from_cache = true;
                 *state_for_init.config_source.lock().await = Some("cache".to_string());
                 *state_for_init.config_warning.lock().await =
                     Some("当前使用上次成功生成的缓存配置，订阅未在启动时自动刷新".to_string());
             }
             Err(cache_err) => {
                 info!(error = %cache_err, "No matching config cache available, generating config");
-                match gen_config(&config, &state_for_init).await {
-                    Ok(has_sub_nodes) => {
-                        if has_sub_nodes || config.subs.is_empty() {
+                // 开机自启不主动刷订阅：链接几分钟就失效，抓也是白抓。
+                // 只有节点缓存彻底为空时才做一次首装抓取。
+                match gen_config(&config, &state_for_init, SubFetchPolicy::CacheOrBootstrap).await {
+                    Ok(outcome) => {
+                        if outcome.has_sub_nodes() || config.subs.is_empty() {
                             save_config_cache(&config).await;
                         } else if !config.subs.is_empty() {
-                            all_subs_failed = true;
+                            *state_for_init.config_warning.lock().await =
+                                Some("订阅节点缓存为空，请点击刷新订阅".to_string());
                         }
                         *state_for_init.config_source.lock().await = Some("generated".to_string());
+                        if outcome.has_sub_nodes() || config.subs.is_empty() {
+                            *state_for_init.config_warning.lock().await = migration_warning.clone();
+                        }
                     }
                     Err(e) => {
                         error!(error = %e, "Failed to generate config");
@@ -411,34 +461,17 @@ async fn main() -> AppResult<()> {
         }
 
         // 重新拿锁：下面还要写 runtime.json 和配置缓存，这两个都是从配置派生的持久状态。
-        // 放锁期间用户可能已经改过路由模式或订阅，所以快照也要重新取，
-        // 否则会用过期的 route_mode 覆盖 runtime.json，并给新的 config.json
-        // 配上旧配置的指纹。
+        // 放锁期间用户可能已经改过模式或订阅，所以快照也要重新取。
         let config_update = state_for_init.config_update.lock().await;
-        let config = {
-            let mut current = state_for_init.config.read().await.clone();
-            current.route_mode = state_for_init
-                .route_mode_override
-                .read()
-                .await
-                .unwrap_or(config.route_mode);
-            current
-        };
+        let config = state_for_init.config.read().await.clone();
 
         match start_sing_internal(&state_for_init).await {
             Ok(_) => {
                 info!("sing-box started successfully");
-                if let Err(e) = save_running_state(true, config.route_mode).await {
+                if let Err(e) = save_running_state(true).await {
                     error!(error = %e, "Failed to save runtime state after startup");
                 }
                 save_config_cache(&config).await;
-                if all_subs_failed {
-                    warn!("所有订阅获取失败，请检查当前订阅");
-                    *state_for_init.config_warning.lock().await =
-                        Some("所有订阅获取失败，请检查当前订阅".to_string());
-                } else if !started_from_cache {
-                    *state_for_init.config_warning.lock().await = None;
-                }
                 let state_for_proxy = state_for_init.clone();
                 tokio::spawn(async move {
                     restore_last_proxy(&state_for_proxy).await;
@@ -476,31 +509,62 @@ async fn shutdown_signal(state: Arc<AppState>) {
 
 #[cfg(test)]
 mod tests {
-    use super::config_declares_route_mode;
+    use super::{config_declares_key, migrate_proxy_mode};
+    use crate::models::{Config, ProxyMode};
 
     #[test]
-    fn config_declares_route_mode_when_top_level_key_exists() {
+    fn config_declares_top_level_key() {
         let yaml = r#"
 port: 6161
-route_mode: global
+mode: global
 subs: []
 "#;
 
-        assert!(config_declares_route_mode(yaml));
+        assert!(config_declares_key(yaml, "mode"));
     }
 
     #[test]
-    fn config_declares_route_mode_ignores_nested_key() {
+    fn config_declares_key_ignores_nested_key() {
         let yaml = r#"
 custom_rules:
-  - '{"route_mode":"global"}'
+  - '{"mode":"global"}'
 "#;
 
-        assert!(!config_declares_route_mode(yaml));
+        assert!(!config_declares_key(yaml, "mode"));
     }
 
     #[test]
-    fn config_declares_route_mode_handles_invalid_yaml() {
-        assert!(!config_declares_route_mode("route_mode: ["));
+    fn config_declares_key_handles_invalid_yaml() {
+        assert!(!config_declares_key("mode: [", "mode"));
+    }
+
+    #[test]
+    fn legacy_mode_migration_prefers_pool_and_warns_on_conflict() {
+        let mut config = Config::default();
+        config.tun_process.legacy_enabled = true;
+        config.share.legacy_enabled = true;
+
+        let (migrated, warning) = migrate_proxy_mode(&mut config, false);
+
+        assert!(migrated);
+        assert_eq!(config.mode, ProxyMode::Pool);
+        assert!(warning.is_some());
+        assert!(!config.tun_process.legacy_enabled);
+        assert!(!config.share.legacy_enabled);
+    }
+
+    #[test]
+    fn explicit_mode_wins_over_legacy_flags() {
+        let mut config = Config {
+            mode: ProxyMode::Process,
+            ..Default::default()
+        };
+        config.share.legacy_enabled = true;
+
+        let (migrated, warning) = migrate_proxy_mode(&mut config, true);
+
+        assert!(!migrated);
+        assert!(warning.is_none());
+        assert_eq!(config.mode, ProxyMode::Process);
     }
 }
