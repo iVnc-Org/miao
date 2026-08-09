@@ -164,6 +164,7 @@ html[data-embed-mode='true'] .shell {
 .workspace {
     flex: 1;
     min-height: 0;
+    min-width: 0;
     display: flex;
     flex-direction: column;
     padding: 24px;
@@ -316,6 +317,7 @@ html[data-embed-mode='true'] .workspace {
 .content-grid {
     flex: 1;
     min-height: 0;
+    min-width: 0;
     display: grid;
     grid-template-columns: minmax(0, 1fr) 400px;
     gap: 16px;
@@ -332,6 +334,12 @@ html[data-embed-mode='true'] .content-grid {
     gap: 16px;
     overflow-y: auto;
     min-height: 0;
+    min-width: 0;
+}
+.left-column > .panel-card,
+.right-column > .panel-card {
+    flex: 0 0 auto;
+    min-width: 0;
 }
 html[data-embed-mode='true'] .left-column,
 html[data-embed-mode='true'] .right-column {
@@ -773,6 +781,7 @@ html[data-embed-mode='true'] .right-column {
     display: flex;
     flex-direction: column;
     gap: 12px;
+    min-width: 0;
     padding: 12px 16px;
 }
 .share-grid {
@@ -789,12 +798,18 @@ html[data-embed-mode='true'] .right-column {
     display: flex;
     flex-direction: column;
     gap: 8px;
+    max-height: min(360px, 42svh);
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-gutter: stable;
+    padding-right: 2px;
 }
 .share-endpoint-row {
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) auto;
     gap: 8px;
     align-items: center;
+    min-width: 0;
     padding: 8px 10px;
     border: 1px solid var(--border);
     border-radius: 10px;
@@ -819,6 +834,7 @@ html[data-embed-mode='true'] .right-column {
     flex: 0 0 auto;
 }
 .share-endpoint-url {
+    min-width: 0;
     font-size: 11px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1421,60 +1437,40 @@ a.commit-badge:hover {
         transform: rotate(360deg);
     }
 }
+@media (max-width: 1180px), (max-height: 900px) {
+    html,
+    body,
+    #root {
+        height: auto;
+        overflow-x: hidden;
+        overflow-y: auto;
+    }
+    .shell {
+        height: auto;
+        min-height: 100svh;
+        overflow: visible;
+    }
+    .workspace {
+        flex: none;
+        overflow: visible;
+    }
+    .content-grid {
+        flex: none;
+        overflow: visible;
+    }
+    .left-column,
+    .right-column {
+        overflow: visible;
+    }
+}
 @media (max-width: 1180px) {
     .content-grid {
         grid-template-columns: 1fr;
     }
 }
-@media (max-height: 900px) {
-    html,
-    body,
-    #root {
-        height: auto;
-        overflow: auto;
-    }
-    .shell {
-        height: auto;
-        min-height: 100svh;
-        overflow: visible;
-    }
-    .workspace {
-        flex: none;
-        overflow: visible;
-    }
-    .content-grid {
-        flex: none;
-        overflow: visible;
-        grid-template-columns: 1fr;
-    }
-    .left-column,
-    .right-column {
-        overflow: visible;
-    }
-}
 @media (max-width: 840px) {
-    /* Switch from viewport-locked to natural page scroll */
-    html, body, #root {
-        height: auto;
-        overflow: auto;
-    }
-    .shell {
-        height: auto;
-        min-height: 100svh;
-        overflow: visible;
-    }
     .workspace {
-        flex: none;
-        overflow: visible;
         padding: 16px;
-    }
-    .content-grid {
-        flex: none;
-        overflow: visible;
-    }
-    .left-column,
-    .right-column {
-        overflow: visible;
     }
     .status-card-body {
         flex-wrap: wrap;
@@ -1508,6 +1504,12 @@ html[data-embed-mode='true'] .proxy-grid-wrap {
     max-height: none;
     overflow: visible;
 }
+html[data-embed-mode='true'] .share-endpoints {
+    max-height: none;
+    overflow: visible;
+    scrollbar-gutter: auto;
+    padding-right: 0;
+}
 html[data-embed-mode='true'] .modal-overlay {
     align-items: flex-start;
 }
@@ -1527,6 +1529,22 @@ html[data-embed-mode='true'] .modal-card {
     .form-grid.two,
     .share-grid {
         grid-template-columns: 1fr;
+    }
+    .share-endpoint-row {
+        grid-template-columns: minmax(0, 1fr) auto;
+        row-gap: 6px;
+    }
+    .share-endpoint-meta {
+        grid-column: 1;
+        grid-row: 1;
+    }
+    .share-endpoint-url {
+        grid-column: 1 / -1;
+        grid-row: 2;
+    }
+    .share-copy-btn {
+        grid-column: 2;
+        grid-row: 1;
     }
     .connectivity-item {
         border-right: none;
