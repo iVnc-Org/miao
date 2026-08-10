@@ -3,10 +3,12 @@ use nix::unistd::Pid;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::io;
 use tokio::time::{sleep, Duration};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::error::{AppError, AppResult};
 use crate::state::{AppState, SingBoxProcess};
@@ -113,6 +115,40 @@ pub async fn sing_box_is_running(state: &Arc<AppState>) -> bool {
     }
 }
 
+fn startup_output_details(stdout: &[u8], stderr: &[u8]) -> String {
+    let stdout = String::from_utf8_lossy(stdout);
+    let stderr = String::from_utf8_lossy(stderr);
+    let stdout = stdout.trim();
+    let stderr = stderr.trim();
+
+    match (stdout.is_empty(), stderr.is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => stderr.to_string(),
+        (false, true) => stdout.to_string(),
+        (false, false) => format!("stderr: {stderr}\nstdout: {stdout}"),
+    }
+}
+
+fn forward_child_output(child: &mut tokio::process::Child) {
+    if let Some(mut stdout) = child.stdout.take() {
+        tokio::spawn(async move {
+            let mut destination = io::stdout();
+            if let Err(error) = io::copy(&mut stdout, &mut destination).await {
+                warn!(error = %error, "Failed to forward sing-box stdout");
+            }
+        });
+    }
+
+    if let Some(mut stderr) = child.stderr.take() {
+        tokio::spawn(async move {
+            let mut destination = io::stderr();
+            if let Err(error) = io::copy(&mut stderr, &mut destination).await {
+                warn!(error = %error, "Failed to forward sing-box stderr");
+            }
+        });
+    }
+}
+
 pub async fn start_sing_internal(state: &Arc<AppState>) -> AppResult<()> {
     let _ = extract_sing_box()?;
 
@@ -141,8 +177,8 @@ pub async fn start_sing_internal(state: &Arc<AppState>) -> AppResult<()> {
         .arg("run")
         .arg("-c")
         .arg(&config_path)
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| AppError::context("Failed to spawn sing-box process", e))?;
 
@@ -155,12 +191,22 @@ pub async fn start_sing_internal(state: &Arc<AppState>) -> AppResult<()> {
         .map_err(|e| AppError::context("Failed to check sing-box startup status", e))?
     {
         let code = exit_status.code().unwrap_or(-1);
+        let output = child
+            .wait_with_output()
+            .await
+            .map_err(|e| AppError::context("Failed to collect sing-box startup output", e))?;
+        let details = startup_output_details(&output.stdout, &output.stderr);
+        let suffix = if details.is_empty() {
+            String::new()
+        } else {
+            format!(": {details}")
+        };
         return Err(AppError::message(format!(
-            "sing-box exited immediately with code {}",
-            code
+            "sing-box exited immediately with code {code}{suffix}"
         )));
     }
 
+    forward_child_output(&mut child);
     *lock = Some(SingBoxProcess {
         child,
         started_at: Instant::now(),
@@ -196,4 +242,25 @@ pub async fn stop_sing_internal(state: &Arc<AppState>) {
         }
     }
     *lock = None;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::startup_output_details;
+
+    #[test]
+    fn startup_output_details_prefers_stderr() {
+        assert_eq!(
+            startup_output_details(b"", b"listen tcp 0.0.0.0:50000: address already in use\n"),
+            "listen tcp 0.0.0.0:50000: address already in use"
+        );
+    }
+
+    #[test]
+    fn startup_output_details_preserves_both_streams() {
+        assert_eq!(
+            startup_output_details(b"startup context\n", b"fatal error\n"),
+            "stderr: fatal error\nstdout: startup context"
+        );
+    }
 }

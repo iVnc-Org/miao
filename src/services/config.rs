@@ -132,6 +132,13 @@ async fn clear_generated_config_state() {
     }
 }
 
+async fn restore_no_node_runtime_state(state: &Arc<AppState>) {
+    clear_generated_config_state().await;
+    state.sub_status.lock().await.clear();
+    *state.config_source.lock().await = None;
+    *state.config_warning.lock().await = None;
+}
+
 async fn restore_subscription_nodes(snapshot: &SubNodeStore) -> AppResult<()> {
     if load_sub_nodes().await != *snapshot {
         save_sub_nodes(snapshot).await?;
@@ -170,14 +177,8 @@ async fn apply_no_node_config(
     if stop_runtime {
         stop_sing_internal(state).await;
     }
-    clear_generated_config_state().await;
-    {
-        let mut status_map = state.sub_status.lock().await;
-        status_map.retain(|url, _| new_config.subs.contains(url));
-    }
+    restore_no_node_runtime_state(state).await;
     *state.config.write().await = new_config;
-    *state.config_source.lock().await = None;
-    *state.config_warning.lock().await = None;
     Ok(())
 }
 
@@ -512,6 +513,12 @@ async fn restore_previous_running_config(
     old_config: &Config,
     state: &Arc<AppState>,
 ) -> AppResult<()> {
+    if config_has_no_nodes(old_config) {
+        stop_sing_internal(state).await;
+        restore_no_node_runtime_state(state).await;
+        return Ok(());
+    }
+
     if sing_box_is_running(state).await {
         match restore_config_from_cache(old_config).await {
             Ok(()) => {}
@@ -535,6 +542,11 @@ async fn restore_previous_running_config(
 
 async fn restart_with_previous_config(old_config: &Config, state: &Arc<AppState>) -> AppResult<()> {
     stop_sing_internal(state).await;
+
+    if config_has_no_nodes(old_config) {
+        restore_no_node_runtime_state(state).await;
+        return Ok(());
+    }
 
     if let Err(cache_err) = restore_config_from_cache(old_config).await {
         warn!(error = %cache_err, "Failed to restore runtime config from cache for rollback; regenerating previous config");
@@ -566,6 +578,11 @@ async fn restore_previous_stopped_config(
     old_config: &Config,
     state: &Arc<AppState>,
 ) -> AppResult<()> {
+    if config_has_no_nodes(old_config) {
+        restore_no_node_runtime_state(state).await;
+        return Ok(());
+    }
+
     let outcome =
         regenerate_without_restart_runtime(old_config, state, SubFetchPolicy::CacheOnly).await?;
     update_config_warning(old_config, state, &outcome).await;

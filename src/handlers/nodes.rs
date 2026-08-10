@@ -5,9 +5,12 @@ use tracing::warn;
 
 use crate::models::{ApiResponse, DeleteNodeRequest, NodeInfo, NodeInventory, NodeRequest};
 use crate::responses::{status_error, success, success_no_data, HandlerResult};
-use crate::services::config::{apply_config_change, resolve_node_inventory, SubFetchPolicy};
+use crate::services::config::{
+    apply_persistent_config_change, resolve_node_inventory, SubFetchPolicy,
+};
 use crate::services::node_parser::parse_node_json;
 use crate::services::proxy::load_last_proxy;
+use crate::services::singbox::sing_box_is_running;
 use crate::services::sub_nodes::load_sub_nodes;
 use crate::state::AppState;
 use crate::validation::Validator;
@@ -338,6 +341,7 @@ pub async fn add_node(
     }
 
     let _config_update = state.config_update.lock().await;
+    let was_running = sing_box_is_running(&state).await;
     let old_config = state.config.read().await.clone();
     let mut new_config = old_config.clone();
 
@@ -370,8 +374,17 @@ pub async fn add_node(
     new_config.nodes.push(node_json);
 
     // 手动节点的增删与订阅无关，一律用缓存里的订阅节点。
-    match apply_config_change(&state, &old_config, &new_config, SubFetchPolicy::CacheOnly).await {
-        Ok(_) => Ok(success_no_data("Node added and sing-box restarted")),
+    match apply_persistent_config_change(
+        &state,
+        &old_config,
+        &new_config,
+        was_running,
+        SubFetchPolicy::CacheOnly,
+    )
+    .await
+    {
+        Ok(_) if was_running => Ok(success_no_data("Node added and sing-box restarted")),
+        Ok(_) => Ok(success_no_data("Node added")),
         Err(e) => Err(status_error(StatusCode::INTERNAL_SERVER_ERROR, e)),
     }
 }
@@ -381,6 +394,7 @@ pub async fn delete_node(
     Json(req): Json<DeleteNodeRequest>,
 ) -> HandlerResult {
     let _config_update = state.config_update.lock().await;
+    let was_running = sing_box_is_running(&state).await;
     let old_config = state.config.read().await.clone();
     let mut new_config = old_config.clone();
 
@@ -398,8 +412,17 @@ pub async fn delete_node(
     }
 
     // 手动节点的增删与订阅无关，一律用缓存里的订阅节点。
-    match apply_config_change(&state, &old_config, &new_config, SubFetchPolicy::CacheOnly).await {
-        Ok(_) => Ok(success_no_data("Node deleted and sing-box restarted")),
+    match apply_persistent_config_change(
+        &state,
+        &old_config,
+        &new_config,
+        was_running,
+        SubFetchPolicy::CacheOnly,
+    )
+    .await
+    {
+        Ok(_) if was_running => Ok(success_no_data("Node deleted and sing-box restarted")),
+        Ok(_) => Ok(success_no_data("Node deleted")),
         Err(e) => Err(status_error(StatusCode::INTERNAL_SERVER_ERROR, e)),
     }
 }
@@ -484,6 +507,28 @@ mod tests {
         assert_eq!(value["congestion_control"], "cubic");
         assert_eq!(value["udp_relay_mode"], "native");
         assert_eq!(value["tls"]["enabled"], true);
+    }
+
+    #[test]
+    fn build_node_value_maps_unauthenticated_socks() {
+        let req = NodeRequest {
+            node_type: Some("socks".to_string()),
+            tag: "ivnc".to_string(),
+            server: "127.0.0.1".to_string(),
+            server_port: 51004,
+            username: Some("   ".to_string()),
+            password: None,
+            ..NodeRequest::default()
+        };
+
+        let value = build_node_value(&req, "socks");
+
+        assert_eq!(value["type"], "socks");
+        assert_eq!(value["tag"], "ivnc");
+        assert_eq!(value["server"], "127.0.0.1");
+        assert_eq!(value["server_port"], 51004);
+        assert!(value.get("username").is_none());
+        assert!(value.get("password").is_none());
     }
 
     #[tokio::test]
