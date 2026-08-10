@@ -225,20 +225,22 @@ export function PoolCard({
               const displayUrl = resolveEndpointUrl(item.url, item.listen)
               return (
                 <div key={`${item.tag}-${item.port}`} className="share-endpoint-row">
-                  <div className="share-endpoint-meta">
+                  <div className="share-endpoint-meta" title={item.tag}>
                     <span className="share-endpoint-tag">{item.tag}</span>
-                    <span className="share-endpoint-port">:{item.port}</span>
                   </div>
-                  <code className="share-endpoint-url" title={displayUrl}>{displayUrl}</code>
-                  <button
-                    type="button"
-                    className="share-copy-btn"
-                    disabled={disabled || loading}
-                    onClick={() => handleCopy(displayUrl)}
-                    aria-label={`复制 ${item.tag}`}
-                  >
-                    <Copy size={12} />
-                  </button>
+                  <div className="share-endpoint-address">
+                    <code className="share-endpoint-url" title={displayUrl}>{displayUrl}</code>
+                    <button
+                      type="button"
+                      className="share-copy-btn"
+                      disabled={disabled || loading}
+                      onClick={() => handleCopy(displayUrl)}
+                      title={`复制 ${item.tag} 的 SOCKS 地址`}
+                      aria-label={`复制 ${item.tag} 的 SOCKS 地址`}
+                    >
+                      <Copy size={12} />
+                    </button>
+                  </div>
                 </div>
               )
             })}

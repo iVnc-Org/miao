@@ -748,6 +748,8 @@ export default function App() {
     )
   }
 
+  const displayedProxyMode = modeSetup || status.mode
+
   return (
     <div className="shell">
       <TopBar
@@ -805,7 +807,7 @@ export default function App() {
             />
 
             <ProcessProxyCard
-              proxyMode={modeSetup || status.mode}
+              proxyMode={displayedProxyMode}
               config={processProxy}
               loading={loadingAction === 'processProxy'}
               disabled={status.initializing || loadingAction === 'mode'}
@@ -814,7 +816,7 @@ export default function App() {
             />
 
             <PoolCard
-              proxyMode={modeSetup || status.mode}
+              proxyMode={displayedProxyMode}
               config={pool}
               endpoints={poolEndpoints}
               loading={loadingAction === 'pool'}
@@ -823,15 +825,17 @@ export default function App() {
               showToast={showToast}
             />
 
-            <ConnectivityCard
-              connectivityResults={connectivityResults}
-              testingConnectivity={testingConnectivity}
-              currentTestingSite={currentTestingSite}
-              status={status}
-              onTestAll={handleTestAllConnectivity}
-              onStopTest={stopConnectivity}
-              onTestSingleSite={handleTestSingleSite}
-            />
+            {displayedProxyMode !== 'pool' && (
+              <ConnectivityCard
+                connectivityResults={connectivityResults}
+                testingConnectivity={testingConnectivity}
+                currentTestingSite={currentTestingSite}
+                status={status}
+                onTestAll={handleTestAllConnectivity}
+                onStopTest={stopConnectivity}
+                onTestSingleSite={handleTestSingleSite}
+              />
+            )}
           </div>
         </div>
       </main>

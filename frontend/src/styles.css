@@ -805,10 +805,10 @@ html[data-embed-mode='true'] .right-column {
     padding-right: 2px;
 }
 .share-endpoint-row {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) auto;
-    gap: 8px;
-    align-items: center;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
     min-width: 0;
     padding: 8px 10px;
     border: 1px solid var(--border);
@@ -816,24 +816,25 @@ html[data-embed-mode='true'] .right-column {
     background: var(--surface-soft);
 }
 .share-endpoint-meta {
-    display: flex;
-    align-items: baseline;
-    gap: 6px;
     min-width: 0;
 }
 .share-endpoint-tag {
+    display: block;
     font-size: 12px;
     font-weight: 600;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
-.share-endpoint-port {
-    color: var(--text-muted);
-    font-size: 11px;
-    flex: 0 0 auto;
+.share-endpoint-address {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
 }
 .share-endpoint-url {
+    display: block;
     min-width: 0;
     font-size: 11px;
     overflow: hidden;
@@ -1529,22 +1530,6 @@ html[data-embed-mode='true'] .modal-card {
     .form-grid.two,
     .share-grid {
         grid-template-columns: 1fr;
-    }
-    .share-endpoint-row {
-        grid-template-columns: minmax(0, 1fr) auto;
-        row-gap: 6px;
-    }
-    .share-endpoint-meta {
-        grid-column: 1;
-        grid-row: 1;
-    }
-    .share-endpoint-url {
-        grid-column: 1 / -1;
-        grid-row: 2;
-    }
-    .share-copy-btn {
-        grid-column: 2;
-        grid-row: 1;
     }
     .connectivity-item {
         border-right: none;
