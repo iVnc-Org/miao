@@ -10,7 +10,7 @@ use crate::handlers::{
     nodes::{add_node, delete_node, get_node_inventory, get_nodes},
     proxy::set_last_proxy,
     service::{get_status, set_mode, start_service, stop_service, test_connectivity},
-    share::{get_share, get_share_endpoints, set_share},
+    share::{get_share, get_share_endpoints, set_share, test_share_endpoint},
     static_assets::{serve_favicon, serve_index},
     subs::{add_sub, delete_sub, get_subs, refresh_subs, replace_sub},
     tun_process::{get_tun_process, set_tun_process},
@@ -31,6 +31,7 @@ pub fn build_router(app_state: Arc<AppState>) -> Router {
         .route("/api/share", get(get_share))
         .route("/api/share", post(set_share))
         .route("/api/share/endpoints", get(get_share_endpoints))
+        .route("/api/share/test", post(test_share_endpoint))
         .route("/api/connectivity", post(test_connectivity))
         .route("/api/version", get(get_version))
         .route("/api/upgrade", post(upgrade))
@@ -106,6 +107,48 @@ mod tests {
         assert_eq!(json["message"], "stopped");
         assert_eq!(json["data"]["running"], false);
         assert_eq!(json["data"]["mode"], "global");
+    }
+
+    #[tokio::test]
+    async fn router_rejects_proxy_pool_tests_outside_pool_mode() {
+        let app = test_app(Config::default()).await;
+
+        let response = app
+            .oneshot(json_request(
+                "POST",
+                "/api/share/test",
+                json!({"tag": "node-a", "port": 50000}),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = response_json(response).await;
+        assert_eq!(json["success"], false);
+        assert_eq!(json["message"], "Proxy pool mode is not active");
+    }
+
+    #[tokio::test]
+    async fn router_requires_a_running_service_for_proxy_pool_tests() {
+        let app = test_app(Config {
+            mode: crate::models::ProxyMode::Pool,
+            ..Default::default()
+        })
+        .await;
+
+        let response = app
+            .oneshot(json_request(
+                "POST",
+                "/api/share/test",
+                json!({"tag": "node-a", "port": 50000}),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let json = response_json(response).await;
+        assert_eq!(json["success"], false);
+        assert_eq!(json["message"], "Proxy service is not running");
     }
 
     #[tokio::test]

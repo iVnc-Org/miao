@@ -11,6 +11,7 @@ import {
   ConfirmModal,
   ConnectionsModal,
   NodeModal,
+  PoolTestResultModal,
   ToastStack,
   OnboardingScreen
 } from './components/index.js'
@@ -82,7 +83,17 @@ export default function App() {
   const { nodes, fetchNodes } = useNodes()
   const { nodeInventory, setNodeInventory, fetchNodeInventory } = useNodeInventory()
   const { processProxy, setProcessProxy, fetchProcessProxy } = useProcessProxy()
-  const { pool, setPool, poolEndpoints, fetchPool, fetchPoolEndpoints } = usePool(status.mode)
+  const {
+    pool,
+    setPool,
+    poolEndpoints,
+    fetchPool,
+    fetchPoolEndpoints,
+    testingPoolPort,
+    poolTestResult,
+    testPoolEndpoint,
+    clearPoolTestResult,
+  } = usePool(status.mode)
   const { primaryGroupName, primaryGroup, fetchProxies } = useProxies(status)
   const { traffic, closeSockets } = useTraffic(status)
   const {
@@ -94,15 +105,14 @@ export default function App() {
     closeAllConnections,
   } = useConnections(status, clashApiBase)
   const { versionInfo, fetchVersion } = useVersion()
-  const { delays, testingNodes, testingGroup, testDelay, testGroupDelays, clearDelays } = useDelays()
+  const { delays, testingNodes, testingGroup, testDelay, testGroupDelays } = useDelays()
   const { 
     connectivityResults, 
     testingConnectivity, 
     currentTestingSite,
     testSingleSite, 
-    testAllConnectivity, 
-    stopConnectivity,
-    clearConnectivity
+    testAllConnectivity,
+    stopConnectivity
   } = useConnectivity()
 
   useEffect(() => {
@@ -216,14 +226,6 @@ export default function App() {
     }
   }, [status.warning, showToast])
 
-  // Clear delays and connectivity when service stops
-  useEffect(() => {
-    if (!status.running) {
-      clearDelays()
-      clearConnectivity()
-    }
-  }, [status.running, clearDelays, clearConnectivity])
-
   useEffect(() => {
     const mediaQuery = window.matchMedia(`(max-width: ${CONNECTIONS_MODAL_MIN_WIDTH - 1}px)`)
     const handleChange = () => {
@@ -245,8 +247,6 @@ export default function App() {
     try {
       if (status.running) {
         await apiCall('service/stop', { method: 'POST' }, 'stop')
-        clearDelays()
-        clearConnectivity()
         showToast('服务已停止', 'success')
       } else {
         await apiCall('service/start', { method: 'POST' }, 'start')
@@ -263,8 +263,6 @@ export default function App() {
     status.running,
     status.mode,
     apiCall,
-    clearDelays,
-    clearConnectivity,
     fetchStatus,
     fetchNodeInventory,
     fetchPoolEndpoints,
@@ -279,8 +277,6 @@ export default function App() {
         { method: 'POST', body: JSON.stringify({ mode: nextMode }) },
         'mode'
       )
-      clearDelays()
-      clearConnectivity()
       const nextStatus = await fetchStatus()
       const tasks = [fetchNodeInventory(), fetchPoolEndpoints(nextMode)]
       if (nextStatus?.running) tasks.push(fetchProxies())
@@ -294,8 +290,6 @@ export default function App() {
     }
   }, [
     apiCall,
-    clearDelays,
-    clearConnectivity,
     fetchStatus,
     fetchNodeInventory,
     fetchPoolEndpoints,
@@ -326,8 +320,6 @@ export default function App() {
         'processProxy'
       )
       setProcessProxy(nextConfig)
-      clearDelays()
-      clearConnectivity()
       await Promise.all([fetchProcessProxy(), fetchStatus(), refreshProxyViews()])
       if (modeSetup === 'process') {
         await applyProxyMode('process')
@@ -340,8 +332,6 @@ export default function App() {
   }, [
     apiCall,
     setProcessProxy,
-    clearDelays,
-    clearConnectivity,
     fetchProcessProxy,
     fetchStatus,
     refreshProxyViews,
@@ -358,8 +348,6 @@ export default function App() {
         'pool'
       )
       setPool(nextConfig)
-      clearDelays()
-      clearConnectivity()
       await Promise.all([
         fetchPool(),
         fetchStatus(),
@@ -372,8 +360,6 @@ export default function App() {
   }, [
     apiCall,
     setPool,
-    clearDelays,
-    clearConnectivity,
     fetchPool,
     fetchStatus,
     refreshProxyViews,
@@ -414,35 +400,32 @@ export default function App() {
     try {
       await apiCall('subs', { method: 'POST', body: JSON.stringify({ url: newSubUrl.trim() }) }, 'addSub')
       setNewSubUrl('')
-      clearDelays()
       await Promise.all([fetchSubs(), refreshProxyViews()])
       showToast('订阅已添加', 'success')
     } catch (error) {
       showToast(error.message, 'error')
     }
-  }, [newSubUrl, apiCall, clearDelays, fetchSubs, refreshProxyViews, showToast])
+  }, [newSubUrl, apiCall, fetchSubs, refreshProxyViews, showToast])
 
   const handleOnboardingAddSub = useCallback(async (url) => {
     try {
       await apiCall('subs', { method: 'POST', body: JSON.stringify({ url }) }, 'addSub')
-      clearDelays()
       await Promise.all([fetchSubs(), refreshProxyViews()])
       showToast('订阅已添加', 'success')
     } catch (error) {
       showToast(error.message, 'error')
     }
-  }, [apiCall, clearDelays, fetchSubs, refreshProxyViews, showToast])
+  }, [apiCall, fetchSubs, refreshProxyViews, showToast])
 
   const handleDeleteSubscription = useCallback(async (url) => {
     try {
       await apiCall('subs', { method: 'DELETE', body: JSON.stringify({ url }) }, 'deleteSub')
       await Promise.all([fetchSubs(), refreshProxyViews()])
-      clearDelays()
       showToast('订阅已删除', 'success')
     } catch (error) {
       showToast(error.message, 'error')
     }
-  }, [apiCall, clearDelays, fetchSubs, refreshProxyViews, showToast])
+  }, [apiCall, fetchSubs, refreshProxyViews, showToast])
 
   const handleReplaceSubscription = useCallback(async (oldUrl, replacementUrl) => {
     const newUrl = replacementUrl.trim()
@@ -462,7 +445,6 @@ export default function App() {
         { method: 'PUT', body: JSON.stringify({ old_url: oldUrl, new_url: newUrl }) },
         'replaceSub'
       )
-      clearDelays()
       await Promise.all([fetchSubs(), refreshProxyViews()])
       showToast('订阅链接已替换', 'success')
       return true
@@ -470,20 +452,18 @@ export default function App() {
       showToast(replaceError.message, 'error')
       return false
     }
-  }, [apiCall, clearDelays, fetchSubs, refreshProxyViews, showToast])
+  }, [apiCall, fetchSubs, refreshProxyViews, showToast])
 
   const handleRefreshSubscriptions = useCallback(async () => {
     try {
       const response = await apiCall('subs/refresh', { method: 'POST' }, 'refreshSubs')
       await Promise.all([fetchSubs(), refreshProxyViews()])
-      clearConnectivity()
-      clearDelays()
       const expired = response.message?.includes('失效')
       showToast(response.message || '订阅已刷新', expired ? 'info' : 'success')
     } catch (error) {
       showToast(error.message, 'error')
     }
-  }, [apiCall, clearConnectivity, clearDelays, fetchSubs, refreshProxyViews, showToast])
+  }, [apiCall, fetchSubs, refreshProxyViews, showToast])
 
   const handleAddNode = useCallback(async () => {
     const isSimpleProxy = nodeType === 'socks' || nodeType === 'http'
@@ -616,23 +596,21 @@ export default function App() {
       setShowNodeModal(false)
       setNodeForm({ ...EMPTY_NODE_FORM, ...nodeTypeDefaults(nodeType) })
       await Promise.all([fetchNodes(), refreshProxyViews()])
-      clearDelays()
       showToast('节点已添加', 'success')
     } catch (error) {
       showToast(error.message, 'error')
     }
-  }, [nodeForm, nodeType, apiCall, clearDelays, fetchNodes, refreshProxyViews, showToast])
+  }, [nodeForm, nodeType, apiCall, fetchNodes, refreshProxyViews, showToast])
 
   const handleDeleteNode = useCallback(async (tag) => {
     try {
       await apiCall('nodes', { method: 'DELETE', body: JSON.stringify({ tag }) }, 'deleteNode')
       await Promise.all([fetchNodes(), refreshProxyViews()])
-      clearDelays()
       showToast('节点已删除', 'success')
     } catch (error) {
       showToast(error.message, 'error')
     }
-  }, [apiCall, clearDelays, fetchNodes, refreshProxyViews, showToast])
+  }, [apiCall, fetchNodes, refreshProxyViews, showToast])
 
   const handleTestDelay = useCallback((nodeName) => {
     if (!status.running) return
@@ -821,7 +799,9 @@ export default function App() {
               endpoints={poolEndpoints}
               loading={loadingAction === 'pool'}
               disabled={status.initializing || loadingAction === 'mode'}
+              testingPort={testingPoolPort}
               onSave={handleSavePool}
+              onTestEndpoint={testPoolEndpoint}
               showToast={showToast}
             />
 
@@ -865,6 +845,11 @@ export default function App() {
         onCloseConnection={closeConnection}
         onCloseAllConnections={closeAllConnections}
         showToast={showToast}
+      />
+
+      <PoolTestResultModal
+        result={poolTestResult}
+        onClose={clearPoolTestResult}
       />
 
       <ConfirmModal

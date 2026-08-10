@@ -10,20 +10,43 @@ use crate::services::write_file_atomic;
 
 const SHARE_PORTS_FILE: &str = "share_ports.json";
 const CLASH_API_PORT: u16 = 6262;
+const SHARE_PORTS_SCHEMA_VERSION: u32 = 2;
+const SHARE_PORT_BLOCK_SIZE: u32 = 1000;
 
-/// 节点 tag -> SOCKS 端口的分配账本。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SharePortGroup {
+    pub source: String,
+    pub tags: Vec<String>,
+}
+
+/// 节点 tag -> SOCKS 端口及订阅 -> 端口段的分配账本。
 ///
 /// 只是一本"谁曾经拿到过哪个端口"的账，用来在节点增删/订阅重排时保持端口稳定；
 /// 真正在监听什么以生成出来的 sing-box 配置为准。
 ///
-/// `base_port` 记录这本账是按哪个起始端口算出来的：用户改了起始端口就整本重算，
-/// 否则改设置会变成静默空操作。
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// `base_port` 记录这本账是按哪个起始端口算出来的：用户改了起始端口就整本重算。
+/// 第 0 个 1000 端口段固定属于手动节点，订阅从第 1 段开始，并按 URL 持久绑定段号。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SharePortMap {
+    #[serde(default)]
+    pub schema_version: u32,
     #[serde(default)]
     pub base_port: u16,
     #[serde(default)]
     pub ports: BTreeMap<String, u16>,
+    #[serde(default)]
+    pub subscription_blocks: BTreeMap<String, u32>,
+}
+
+impl Default for SharePortMap {
+    fn default() -> Self {
+        Self {
+            schema_version: SHARE_PORTS_SCHEMA_VERSION,
+            base_port: 0,
+            ports: BTreeMap::new(),
+            subscription_blocks: BTreeMap::new(),
+        }
+    }
 }
 
 pub fn share_ports_path() -> PathBuf {
@@ -65,19 +88,22 @@ pub fn reserved_system_ports(web_port: Option<u16>, socks_port: Option<u16>) -> 
     reserved
 }
 
-/// 为给定节点 tag 分配稳定的 SOCKS 端口，纯内存操作。
+/// 为手动节点和各订阅节点分配稳定的 SOCKS 端口，纯内存操作。
 ///
 /// 规则：
-/// - 已有 tag 保留原端口，除非该端口现在与保留端口冲突或低于起始端口；
+/// - 手动节点只能使用 `base_port` 开始的第 0 个 1000 端口段；
+/// - 每个订阅 URL 持久绑定一个从 1 开始的独立端口段，配置重排不会换段；
+/// - 已有 tag 保留原端口，除非该端口与保留端口冲突或不在所属段内；
 /// - `base_port` 变化时整本账重算，让"改起始端口"真的生效；
 /// - 只在 `prune` 为真（即节点列表确实完整）时删除失效 tag——订阅临时抓取失败
 ///   不能把别人的端口收走，否则恢复后端口会变，分发出去的地址全部作废；
-/// - 端口只在 `base_port..=65535` 内扫描，扫不到就报错，绝不回绕到低位特权端口。
+/// - 每组只在自己的端口段内扫描，容量不足或段起点超过 65535 时明确报错。
 ///
-/// 返回值按传入 `tags` 的顺序给出 (tag, port)。
+/// 返回值先按手动节点顺序、再按传入订阅及其节点顺序给出 (tag, port)。
 pub fn allocate_share_ports(
     map: &mut SharePortMap,
-    tags: &[String],
+    manual_tags: &[String],
+    subscription_groups: &[SharePortGroup],
     base_port: u16,
     reserved: &BTreeSet<u16>,
     prune: bool,
@@ -88,60 +114,194 @@ pub fn allocate_share_ports(
         ));
     }
 
-    if map.base_port != base_port {
-        map.ports.clear();
-        map.base_port = base_port;
+    let mut updated = map.clone();
+    if updated.schema_version != SHARE_PORTS_SCHEMA_VERSION || updated.base_port != base_port {
+        updated = SharePortMap {
+            base_port,
+            ..SharePortMap::default()
+        };
+    }
+
+    let mut active_sources = BTreeSet::new();
+    for group in subscription_groups {
+        if !active_sources.insert(group.source.as_str()) {
+            return Err(AppError::message(format!(
+                "Share mode: duplicate subscription source: {}",
+                group.source
+            )));
+        }
+    }
+    updated
+        .subscription_blocks
+        .retain(|source, _| active_sources.contains(source.as_str()));
+
+    // 先校验持久化的段号。URL 顺序只用于给新订阅挑最小空闲段，已经分配的段不动。
+    let mut used_blocks = BTreeSet::new();
+    let mut invalid_sources = Vec::new();
+    for group in subscription_groups {
+        let Some(block) = updated.subscription_blocks.get(&group.source).copied() else {
+            continue;
+        };
+        if block == 0
+            || port_block_bounds(base_port, block).is_none()
+            || !used_blocks.insert(block)
+        {
+            invalid_sources.push(group.source.clone());
+        }
+    }
+    for source in invalid_sources {
+        updated.subscription_blocks.remove(&source);
+    }
+
+    for group in subscription_groups {
+        if updated.subscription_blocks.contains_key(&group.source) {
+            continue;
+        }
+        let mut block = 1_u32;
+        while used_blocks.contains(&block) {
+            block += 1;
+        }
+        if port_block_bounds(base_port, block).is_none() {
+            return Err(AppError::message(format!(
+                "Share mode: no port block available for subscription {} with base_port {}",
+                group.source, base_port
+            )));
+        }
+        used_blocks.insert(block);
+        updated
+            .subscription_blocks
+            .insert(group.source.clone(), block);
+    }
+
+    let manual_bounds = port_block_bounds(base_port, 0).expect("validated non-zero base port");
+    let mut expected_bounds = BTreeMap::new();
+    let mut ordered_tags = Vec::new();
+    for tag in manual_tags {
+        if expected_bounds.insert(tag.clone(), manual_bounds).is_some() {
+            return Err(AppError::message(format!(
+                "Share mode: duplicate node tag: {tag}"
+            )));
+        }
+        ordered_tags.push(tag.clone());
+    }
+    for group in subscription_groups {
+        let block = updated.subscription_blocks[&group.source];
+        let bounds = port_block_bounds(base_port, block).expect("validated subscription block");
+        for tag in &group.tags {
+            if expected_bounds.insert(tag.clone(), bounds).is_some() {
+                return Err(AppError::message(format!(
+                    "Share mode: duplicate node tag: {tag}"
+                )));
+            }
+            ordered_tags.push(tag.clone());
+        }
     }
 
     if prune {
-        let active: BTreeSet<&str> = tags.iter().map(String::as_str).collect();
-        map.ports.retain(|tag, _| active.contains(tag.as_str()));
+        updated
+            .ports
+            .retain(|tag, _| expected_bounds.contains_key(tag));
     }
 
-    // 已落盘的分配也要重新校验：起始端口调整过、或者 web/socks 端口改到了某个
-    // 已分配端口上时，旧账目必须让位，否则会生成两个监听同一端口的 inbound，
-    // 而 `sing-box check` 不绑定套接字、发现不了，直到启动时整个进程挂掉。
-    map.ports
-        .retain(|_, port| *port >= base_port && !reserved.contains(port));
+    // 已落盘的活动节点必须仍在所属端口段内；非活动节点在不完整抓取期间继续占号。
+    updated.ports.retain(|tag, port| {
+        if *port < base_port || reserved.contains(port) {
+            return false;
+        }
+        match expected_bounds.get(tag) {
+            Some((start, end)) => *port >= *start && *port <= *end,
+            None => true,
+        }
+    });
 
-    // 防御手改账本导致的一端口多 tag。
+    // 防御手改账本导致的一端口多 tag；当前活动节点优先保留端口。
     let mut seen_ports = BTreeSet::new();
-    map.ports.retain(|_, port| seen_ports.insert(*port));
-
-    let mut used: BTreeSet<u16> = reserved.clone();
-    used.extend(map.ports.values().copied());
-
-    // 单次调用内 `used` 只增不减，所以游标可以单调前进；跨调用则从 base_port
-    // 重新开始，这样被释放的低位端口能重新用上，不会一路漂到 65535。
-    let mut cursor = base_port;
-    for tag in tags {
-        if map.ports.contains_key(tag) {
+    let mut duplicate_tags = Vec::new();
+    for tag in &ordered_tags {
+        if let Some(port) = updated.ports.get(tag) {
+            if !seen_ports.insert(*port) {
+                duplicate_tags.push(tag.clone());
+            }
+        }
+    }
+    for (tag, port) in &updated.ports {
+        if expected_bounds.contains_key(tag) {
             continue;
         }
-        let port = next_free_port(&mut cursor, &used, base_port)?;
-        used.insert(port);
-        map.ports.insert(tag.clone(), port);
+        if !seen_ports.insert(*port) {
+            duplicate_tags.push(tag.clone());
+        }
+    }
+    for tag in duplicate_tags {
+        updated.ports.remove(&tag);
     }
 
-    Ok(tags
+    let mut used: BTreeSet<u16> = reserved.clone();
+    used.extend(updated.ports.values().copied());
+
+    allocate_group_ports(
+        &mut updated.ports,
+        manual_tags,
+        manual_bounds,
+        &mut used,
+        "manual nodes",
+    )?;
+    for group in subscription_groups {
+        let block = updated.subscription_blocks[&group.source];
+        let bounds = port_block_bounds(base_port, block).expect("validated subscription block");
+        allocate_group_ports(
+            &mut updated.ports,
+            &group.tags,
+            bounds,
+            &mut used,
+            &format!("subscription {}", group.source),
+        )?;
+    }
+
+    let bindings = ordered_tags
         .iter()
-        .filter_map(|tag| map.ports.get(tag).map(|port| (tag.clone(), *port)))
-        .collect())
+        .filter_map(|tag| updated.ports.get(tag).map(|port| (tag.clone(), *port)))
+        .collect();
+    *map = updated;
+    Ok(bindings)
 }
 
-fn next_free_port(cursor: &mut u16, used: &BTreeSet<u16>, base_port: u16) -> AppResult<u16> {
-    loop {
-        if !used.contains(cursor) {
-            return Ok(*cursor);
+fn port_block_bounds(base_port: u16, block: u32) -> Option<(u16, u16)> {
+    let start = u32::from(base_port).checked_add(block.checked_mul(SHARE_PORT_BLOCK_SIZE)?)?;
+    if start > u32::from(u16::MAX) {
+        return None;
+    }
+    let end = start
+        .saturating_add(SHARE_PORT_BLOCK_SIZE - 1)
+        .min(u32::from(u16::MAX));
+    Some((start as u16, end as u16))
+}
+
+fn allocate_group_ports(
+    ports: &mut BTreeMap<String, u16>,
+    tags: &[String],
+    (start, end): (u16, u16),
+    used: &mut BTreeSet<u16>,
+    group_label: &str,
+) -> AppResult<()> {
+    let mut cursor = u32::from(start);
+    for tag in tags {
+        if ports.contains_key(tag) {
+            continue;
         }
-        if *cursor == u16::MAX {
+        while cursor <= u32::from(end) && used.contains(&(cursor as u16)) {
+            cursor += 1;
+        }
+        if cursor > u32::from(end) {
             return Err(AppError::message(format!(
-                "Share mode: no free port left in {}-65535 for all nodes",
-                base_port
+                "Share mode: no free port left in {start}-{end} for {group_label}"
             )));
         }
-        *cursor += 1;
+        let port = cursor as u16;
+        used.insert(port);
+        ports.insert(tag.clone(), port);
     }
+    Ok(())
 }
 
 pub fn share_inbound_tag(port: u16) -> String {
@@ -192,7 +352,14 @@ mod tests {
         base_port: u16,
         reserved: &BTreeSet<u16>,
     ) -> Vec<(String, u16)> {
-        allocate_share_ports(map, &tags(names), base_port, reserved, true).unwrap()
+        allocate_share_ports(map, &tags(names), &[], base_port, reserved, true).unwrap()
+    }
+
+    fn group(source: &str, names: &[&str]) -> SharePortGroup {
+        SharePortGroup {
+            source: source.to_string(),
+            tags: tags(names),
+        }
     }
 
     #[test]
@@ -254,6 +421,7 @@ mod tests {
         let partial = allocate_share_ports(
             &mut map,
             &tags(&["alpha", "beta", "delta"]),
+            &[],
             12000,
             &reserved,
             false,
@@ -278,14 +446,22 @@ mod tests {
 
         // 订阅抓取失败，本轮只看得到 alpha —— prune=false，beta 的端口必须留着。
         let partial =
-            allocate_share_ports(&mut map, &tags(&["alpha"]), 12000, &reserved, false).unwrap();
+            allocate_share_ports(&mut map, &tags(&["alpha"]), &[], 12000, &reserved, false)
+                .unwrap();
         assert_eq!(partial, vec![("alpha".into(), 12000)]);
         assert_eq!(map.ports.get("beta"), Some(&12001));
 
         // 订阅恢复后 beta 拿回原来的端口。
         let restored =
-            allocate_share_ports(&mut map, &tags(&["alpha", "beta"]), 12000, &reserved, false)
-                .unwrap();
+            allocate_share_ports(
+                &mut map,
+                &tags(&["alpha", "beta"]),
+                &[],
+                12000,
+                &reserved,
+                false,
+            )
+            .unwrap();
         assert_eq!(
             restored,
             vec![("alpha".into(), 12000), ("beta".into(), 12001)]
@@ -338,16 +514,188 @@ mod tests {
         let mut map = SharePortMap::default();
 
         // base_port=65534 只剩 65534/65535 两个口，第三个节点必须报错而不是绕回 1。
-        let err = allocate_share_ports(&mut map, &tags(&["a", "b", "c"]), 65534, &reserved, true)
-            .unwrap_err()
-            .to_string();
+        let err = allocate_share_ports(
+            &mut map,
+            &tags(&["a", "b", "c"]),
+            &[],
+            65534,
+            &reserved,
+            true,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("no free port left"), "unexpected error: {err}");
     }
 
     #[test]
     fn rejects_zero_base_port() {
         let mut map = SharePortMap::default();
-        assert!(allocate_share_ports(&mut map, &tags(&["a"]), 0, &BTreeSet::new(), true).is_err());
+        assert!(
+            allocate_share_ports(
+                &mut map,
+                &tags(&["a"]),
+                &[],
+                0,
+                &BTreeSet::new(),
+                true,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn separates_manual_nodes_and_subscriptions_into_thousand_port_blocks() {
+        let mut map = SharePortMap::default();
+        let groups = vec![
+            group("subscription-a", &["a1", "a2"]),
+            group("subscription-b", &["b1"]),
+        ];
+
+        let bindings = allocate_share_ports(
+            &mut map,
+            &tags(&["manual-1", "manual-2"]),
+            &groups,
+            10000,
+            &BTreeSet::new(),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(
+            bindings,
+            vec![
+                ("manual-1".into(), 10000),
+                ("manual-2".into(), 10001),
+                ("a1".into(), 11000),
+                ("a2".into(), 11001),
+                ("b1".into(), 12000),
+            ]
+        );
+        assert_eq!(map.subscription_blocks["subscription-a"], 1);
+        assert_eq!(map.subscription_blocks["subscription-b"], 2);
+    }
+
+    #[test]
+    fn empty_subscription_still_reserves_its_port_block() {
+        let mut map = SharePortMap::default();
+        let bindings = allocate_share_ports(
+            &mut map,
+            &[],
+            &[
+                group("subscription-a", &[]),
+                group("subscription-b", &["b1"]),
+            ],
+            10000,
+            &BTreeSet::new(),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(bindings, vec![("b1".into(), 12000)]);
+        assert_eq!(map.subscription_blocks["subscription-a"], 1);
+        assert_eq!(map.subscription_blocks["subscription-b"], 2);
+    }
+
+    #[test]
+    fn subscription_reordering_keeps_persisted_blocks() {
+        let mut map = SharePortMap::default();
+        allocate_share_ports(
+            &mut map,
+            &[],
+            &[
+                group("subscription-a", &["a1"]),
+                group("subscription-b", &["b1"]),
+            ],
+            10000,
+            &BTreeSet::new(),
+            true,
+        )
+        .unwrap();
+
+        let reordered = allocate_share_ports(
+            &mut map,
+            &[],
+            &[
+                group("subscription-b", &["b1", "b2"]),
+                group("subscription-a", &["a1", "a2"]),
+            ],
+            10000,
+            &BTreeSet::new(),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(
+            reordered,
+            vec![
+                ("b1".into(), 12000),
+                ("b2".into(), 12001),
+                ("a1".into(), 11000),
+                ("a2".into(), 11001),
+            ]
+        );
+    }
+
+    #[test]
+    fn group_cannot_spill_into_the_next_port_block() {
+        let mut map = SharePortMap::default();
+        let manual_tags: Vec<String> = (0..=SHARE_PORT_BLOCK_SIZE)
+            .map(|index| format!("node-{index}"))
+            .collect();
+
+        let err = allocate_share_ports(
+            &mut map,
+            &manual_tags,
+            &[],
+            10000,
+            &BTreeSet::new(),
+            true,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("10000-10999"), "unexpected error: {err}");
+        assert!(map.ports.is_empty(), "failed allocation must be transactional");
+    }
+
+    #[test]
+    fn subscription_block_must_start_within_the_port_range() {
+        let mut map = SharePortMap::default();
+        let err = allocate_share_ports(
+            &mut map,
+            &[],
+            &[group("subscription-a", &[])],
+            65000,
+            &BTreeSet::new(),
+            true,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("no port block available"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn old_contiguous_allocation_schema_is_rebuilt() {
+        let mut map = SharePortMap {
+            schema_version: 1,
+            base_port: 10000,
+            ports: BTreeMap::from([("subscription-node".to_string(), 10000)]),
+            subscription_blocks: BTreeMap::new(),
+        };
+
+        let bindings = allocate_share_ports(
+            &mut map,
+            &[],
+            &[group("subscription-a", &["subscription-node"])],
+            10000,
+            &BTreeSet::new(),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(bindings, vec![("subscription-node".into(), 11000)]);
+        assert_eq!(map.schema_version, SHARE_PORTS_SCHEMA_VERSION);
     }
 
     #[test]

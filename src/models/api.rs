@@ -111,3 +111,17 @@ pub struct ShareEndpoint {
     pub listen: String,
     pub url: String,
 }
+
+#[derive(Deserialize)]
+pub struct ShareTestRequest {
+    pub tag: String,
+    pub port: u16,
+}
+
+#[derive(Serialize, Clone)]
+pub struct ShareTestResult {
+    pub tag: String,
+    pub status_code: u16,
+    pub status_text: String,
+    pub body: serde_json::Value,
+}

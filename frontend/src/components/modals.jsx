@@ -40,6 +40,50 @@ export function ConfirmModal({ open, title, message, onCancel, onConfirm }) {
   )
 }
 
+export function PoolTestResultModal({ result, onClose }) {
+  if (!result) return null
+
+  const statusTone = result.status_code >= 200 && result.status_code < 300
+    ? 'success'
+    : result.status_code >= 400
+      ? 'error'
+      : 'warning'
+  const statusLabel = `HTTP ${result.status_code}${result.status_text ? ` ${result.status_text}` : ''}`
+  const formattedBody = JSON.stringify(result.body, null, 2) ?? 'null'
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-card pool-test-modal" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-title-row">
+          <div className="modal-title-wrap">
+            <Activity size={18} className="icon-accent" />
+            <h3>代理节点测试</h3>
+          </div>
+          <button
+            type="button"
+            className="icon-button"
+            onClick={onClose}
+            title="关闭"
+            aria-label="关闭测试结果"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="pool-test-summary">
+          <span className={classNames('pool-test-status', statusTone)}>{statusLabel}</span>
+          <code className="pool-test-tag" title={result.tag}>{result.tag}</code>
+        </div>
+        <pre className="pool-test-json" aria-label="响应 JSON">{formattedBody}</pre>
+
+        <div className="modal-actions">
+          <Button tone="secondary" size="sm" onClick={onClose}>关闭</Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export function NodeModal({ open, nodeType, setNodeType, form, setForm, loading, onClose, onSubmit }) {
   if (!open) return null
 

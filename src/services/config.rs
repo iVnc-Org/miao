@@ -19,7 +19,7 @@ use crate::services::{
     proxy::restore_last_proxy,
     share_ports::{
         allocate_share_ports, load_share_port_map, reserved_system_ports, save_share_port_map,
-        share_inbound_tag, SharePortMap,
+        share_inbound_tag, SharePortGroup, SharePortMap,
     },
     singbox::{
         get_sing_box_home, sing_box_is_running, start_sing_internal, stop_sing_internal,
@@ -35,7 +35,7 @@ use crate::state::AppState;
 
 const CONFIG_CACHE_FILE: &str = "config.json";
 const CONFIG_CACHE_META_FILE: &str = "config.meta.json";
-const CONFIG_CACHE_SCHEMA_VERSION: u32 = 7;
+const CONFIG_CACHE_SCHEMA_VERSION: u32 = 8;
 const MAX_CONCURRENT_SUBS: usize = 5;
 
 #[derive(Serialize, Deserialize)]
@@ -919,6 +919,11 @@ pub async fn gen_config(
     }
 
     let outcome = gen_outcome_from_store(config, &store);
+    let subscription_group_sizes = config
+        .subs
+        .iter()
+        .map(|url| (url.clone(), store.node_count(url)))
+        .collect();
     let (final_node_names, final_outbounds) = store.nodes_in_order(&config.subs);
 
     let mut share_map = if config.mode == ProxyMode::Pool {
@@ -934,6 +939,7 @@ pub async fn gen_config(
         my_outbounds,
         final_node_names,
         final_outbounds,
+        subscription_group_sizes,
         &mut share_map,
         node_list_is_complete,
     )?;
@@ -1102,9 +1108,12 @@ fn build_sing_box_config(
     my_outbounds: Vec<serde_json::Value>,
     final_node_names: Vec<String>,
     final_outbounds: Vec<serde_json::Value>,
+    subscription_group_sizes: Vec<(String, usize)>,
     share_map: &mut SharePortMap,
     prune_share_ports: bool,
 ) -> AppResult<serde_json::Value> {
+    let manual_node_count = my_outbounds.len();
+    let subscription_node_count = final_outbounds.len();
     let total_nodes = my_outbounds.len() + final_outbounds.len();
     if total_nodes == 0 {
         return Err(AppError::message(
@@ -1144,10 +1153,42 @@ fn build_sing_box_config(
     }
 
     let share_bindings = if config.mode == ProxyMode::Pool {
+        let grouped_node_count: usize = subscription_group_sizes
+            .iter()
+            .map(|(_, node_count)| node_count)
+            .sum();
+        if grouped_node_count != subscription_node_count {
+            return Err(AppError::message(format!(
+                "Share mode: subscription group sizes describe {grouped_node_count} nodes, but {subscription_node_count} outbounds were provided"
+            )));
+        }
+
+        let manual_tags = node_names
+            .get(..manual_node_count)
+            .ok_or_else(|| AppError::message("Share mode: manual node grouping is inconsistent"))?;
+        let mut group_start = manual_node_count;
+        let mut share_groups = Vec::with_capacity(subscription_group_sizes.len());
+        for (source, node_count) in subscription_group_sizes {
+            let group_end = group_start.checked_add(node_count).ok_or_else(|| {
+                AppError::message("Share mode: subscription node count overflow")
+            })?;
+            let tags = node_names.get(group_start..group_end).ok_or_else(|| {
+                AppError::message(format!(
+                    "Share mode: node grouping is inconsistent for subscription {source}"
+                ))
+            })?;
+            share_groups.push(SharePortGroup {
+                source,
+                tags: tags.to_vec(),
+            });
+            group_start = group_end;
+        }
+
         let reserved = reserved_system_ports(config.port, Some(socks_port));
         allocate_share_ports(
             share_map,
-            &node_names,
+            manual_tags,
+            &share_groups,
             pool.base_port,
             &reserved,
             prune_share_ports,
@@ -1612,6 +1653,11 @@ mod tests {
         final_node_names: Vec<String>,
         final_outbounds: Vec<serde_json::Value>,
     ) -> AppResult<serde_json::Value> {
+        let subscription_group_sizes = if final_outbounds.is_empty() {
+            Vec::new()
+        } else {
+            vec![("test-subscription".to_string(), final_outbounds.len())]
+        };
         let mut share_map = SharePortMap::default();
         super::build_sing_box_config(
             config,
@@ -1619,6 +1665,7 @@ mod tests {
             my_outbounds,
             final_node_names,
             final_outbounds,
+            subscription_group_sizes,
             &mut share_map,
             true,
         )
@@ -2560,6 +2607,7 @@ mod tests {
             ],
             vec![],
             vec![],
+            vec![],
             &mut share_map,
             true,
         )
@@ -2621,6 +2669,58 @@ mod tests {
     }
 
     #[test]
+    fn build_sing_box_config_pool_groups_manual_and_subscription_ports() {
+        let config = Config {
+            socks_port: Some(1080),
+            mode: ProxyMode::Pool,
+            share: PoolConfig {
+                base_port: 10000,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut share_map = SharePortMap::default();
+
+        let built = super::build_sing_box_config(
+            &config,
+            vec!["duplicate".to_string()],
+            vec![manual_outbound()],
+            vec!["duplicate".to_string(), "subscription-b".to_string()],
+            vec![
+                json!({
+                    "type": "socks",
+                    "tag": "duplicate",
+                    "server": "a.example.com",
+                    "server_port": 1080
+                }),
+                json!({
+                    "type": "socks",
+                    "tag": "subscription-b",
+                    "server": "b.example.com",
+                    "server_port": 1080
+                }),
+            ],
+            vec![
+                ("subscription-a".to_string(), 1),
+                ("subscription-b".to_string(), 1),
+            ],
+            &mut share_map,
+            true,
+        )
+        .unwrap();
+
+        let inbounds = built["inbounds"].as_array().unwrap();
+        assert_eq!(inbounds[1]["listen_port"], 10000);
+        assert_eq!(inbounds[2]["listen_port"], 11000);
+        assert_eq!(inbounds[3]["listen_port"], 12000);
+        assert_eq!(share_map.ports["duplicate"], 10000);
+        assert_eq!(share_map.ports["duplicate (2)"], 11000);
+        assert_eq!(share_map.ports["subscription-b"], 12000);
+        assert_eq!(share_map.subscription_blocks["subscription-a"], 1);
+        assert_eq!(share_map.subscription_blocks["subscription-b"], 2);
+    }
+
+    #[test]
     fn config_cache_fingerprint_includes_mode_and_pool_settings() {
         let mut first = Config::default();
         let second = first.clone();
@@ -2663,6 +2763,7 @@ mod tests {
             outbounds.clone(),
             vec![],
             vec![],
+            vec![],
             &mut share_map,
             true,
         )
@@ -2676,6 +2777,7 @@ mod tests {
             outbounds.clone(),
             vec![],
             vec![],
+            vec![],
             &mut share_map,
             true,
         )
@@ -2685,6 +2787,7 @@ mod tests {
             &config,
             names,
             outbounds,
+            vec![],
             vec![],
             vec![],
             &mut share_map,

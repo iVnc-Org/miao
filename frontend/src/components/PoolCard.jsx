@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Copy, Save, Share2 } from 'lucide-react'
+import { Activity, Copy, LoaderCircle, Save, Share2 } from 'lucide-react'
 import { Button, SectionCard } from './ui.jsx'
 import { normalizePoolConfig } from '../hooks/useApi.js'
 
-const PORT_PLACEHOLDER = '12000'
+const PORT_PLACEHOLDER = '50000'
 const WILDCARD_HOSTS = new Set(['0.0.0.0', '::'])
 
 function parsePort(value) {
@@ -61,7 +61,9 @@ export function PoolCard({
   endpoints,
   loading,
   disabled,
+  testingPort = null,
   onSave,
+  onTestEndpoint,
   showToast,
 }) {
   const normalizedConfig = useMemo(() => normalizePoolConfig(config), [config])
@@ -143,6 +145,15 @@ export function PoolCard({
     }
   }
 
+  const handleTest = async (endpoint) => {
+    if (!onTestEndpoint) return
+    try {
+      await onTestEndpoint(endpoint)
+    } catch (error) {
+      showToast(error.message || '节点测试失败', 'error')
+    }
+  }
+
   if (proxyMode !== 'pool') return null
 
   return (
@@ -215,8 +226,8 @@ export function PoolCard({
         </div>
 
         <div className="share-note">
-          端口按节点名称持久分配，订阅刷新重排后端口不变。默认监听 0.0.0.0；
-          用户名和密码可留空，填写时需同时填写。
+          手动节点使用起始端口段，每个订阅使用后续独立的 1000 端口段。
+          默认监听 0.0.0.0；用户名和密码可留空，填写时需同时填写。
         </div>
 
         {endpoints?.length > 0 ? (
@@ -232,7 +243,20 @@ export function PoolCard({
                     <code className="share-endpoint-url" title={displayUrl}>{displayUrl}</code>
                     <button
                       type="button"
-                      className="share-copy-btn"
+                      className="share-endpoint-action"
+                      disabled={disabled || loading || testingPort !== null || !onTestEndpoint}
+                      onClick={() => handleTest(item)}
+                      title={`测试 ${item.tag}`}
+                      aria-label={`测试 ${item.tag}`}
+                      aria-busy={testingPort === item.port ? true : undefined}
+                    >
+                      {testingPort === item.port
+                        ? <LoaderCircle size={12} className="spin" />
+                        : <Activity size={12} />}
+                    </button>
+                    <button
+                      type="button"
+                      className="share-endpoint-action"
                       disabled={disabled || loading}
                       onClick={() => handleCopy(displayUrl)}
                       title={`复制 ${item.tag} 的 SOCKS 地址`}

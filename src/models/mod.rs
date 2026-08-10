@@ -5,8 +5,8 @@ pub mod proxy;
 pub mod version;
 
 pub use api::{
-    ApiResponse, ConnectivityResult, ModeRequest, ReplaceSubRequest, ShareEndpoint, StatusData,
-    SubRequest, SubState, SubStatus,
+    ApiResponse, ConnectivityResult, ModeRequest, ReplaceSubRequest, ShareEndpoint, ShareTestRequest,
+    ShareTestResult, StatusData, SubRequest, SubState, SubStatus,
 };
 pub use config::{
     BypassAction, Config, PoolConfig, ProcessListMode, ProcessMatch, ProcessProxyConfig, ProxyMode,

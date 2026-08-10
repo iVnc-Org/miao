@@ -2,6 +2,42 @@ import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
 import { API_HEADERS } from '../utils.js'
 import { useWebSocket } from './useWebSocket.js'
 
+const DELAY_RESULTS_STORAGE_KEY = 'miao.delay-results.v1'
+const CONNECTIVITY_RESULTS_STORAGE_KEY = 'miao.connectivity-results.v1'
+
+function isRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function readStoredResults(key, isValidResult) {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(key) || '{}')
+    if (!isRecord(parsed)) return {}
+    return Object.fromEntries(
+      Object.entries(parsed).filter(([, value]) => isValidResult(value))
+    )
+  } catch {
+    return {}
+  }
+}
+
+function storeResults(key, results) {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(results))
+  } catch {
+    // Storage can be disabled or full; live test results should still work in memory.
+  }
+}
+
+function isValidDelay(value) {
+  return Number.isFinite(value) && value >= -1
+}
+
+function isValidConnectivityResult(value) {
+  if (!isRecord(value) || typeof value.success !== 'boolean') return false
+  return !value.success || (Number.isFinite(value.latency_ms) && value.latency_ms >= 0)
+}
+
 export function useToast() {
   const [toasts, setToasts] = useState([])
   const toastIdRef = useRef(0)
@@ -165,7 +201,7 @@ export function useProcessProxy() {
 // 与后端 DEFAULT_SHARE_LISTEN 保持一致，默认供局域网设备直接连接。
 export const DEFAULT_POOL = {
   listen: '0.0.0.0',
-  base_port: 12000,
+  base_port: 50000,
   username: '',
   password: '',
 }
@@ -180,11 +216,19 @@ export function normalizePoolConfig(config) {
 export function usePool(mode) {
   const [pool, setPoolState] = useState(DEFAULT_POOL)
   const [poolEndpoints, setPoolEndpoints] = useState([])
+  const [testingPoolPort, setTestingPoolPort] = useState(null)
+  const [poolTestResult, setPoolTestResult] = useState(null)
   const modeRef = useRef(mode)
+  const poolTestRequestRef = useRef(0)
 
   useEffect(() => {
     modeRef.current = mode
-    if (mode !== 'pool') setPoolEndpoints([])
+    if (mode !== 'pool') {
+      poolTestRequestRef.current += 1
+      setPoolEndpoints([])
+      setTestingPoolPort(null)
+      setPoolTestResult(null)
+    }
   }, [mode])
 
   const setPool = useCallback((config) => {
@@ -224,12 +268,53 @@ export function usePool(mode) {
     return []
   }, [])
 
+  const testPoolEndpoint = useCallback(async (endpoint) => {
+    const requestId = ++poolTestRequestRef.current
+    setTestingPoolPort(endpoint.port)
+    setPoolTestResult(null)
+    try {
+      const response = await fetch('/api/share/test', {
+        method: 'POST',
+        headers: API_HEADERS,
+        body: JSON.stringify({ tag: endpoint.tag, port: endpoint.port }),
+      })
+      let payload
+      try {
+        payload = await response.json()
+      } catch {
+        throw new Error(`节点测试失败 (HTTP ${response.status})`)
+      }
+      if (!response.ok || !payload.success || !payload.data) {
+        throw new Error(payload.message || `节点测试失败 (HTTP ${response.status})`)
+      }
+      if (requestId === poolTestRequestRef.current && modeRef.current === 'pool') {
+        setPoolTestResult(payload.data)
+      }
+      return payload.data
+    } catch (error) {
+      if (requestId !== poolTestRequestRef.current) return null
+      throw error
+    } finally {
+      if (requestId === poolTestRequestRef.current) {
+        setTestingPoolPort((current) => current === endpoint.port ? null : current)
+      }
+    }
+  }, [])
+
+  const clearPoolTestResult = useCallback(() => {
+    setPoolTestResult(null)
+  }, [])
+
   return {
     pool,
     setPool,
     poolEndpoints,
     fetchPool,
     fetchPoolEndpoints,
+    testingPoolPort,
+    poolTestResult,
+    testPoolEndpoint,
+    clearPoolTestResult,
   }
 }
 
@@ -414,9 +499,15 @@ export function useVersion() {
 }
 
 export function useDelays() {
-  const [delays, setDelays] = useState({})
+  const [delays, setDelays] = useState(() => (
+    readStoredResults(DELAY_RESULTS_STORAGE_KEY, isValidDelay)
+  ))
   const [testingNodes, setTestingNodes] = useState({})
   const [testingGroup, setTestingGroup] = useState('')
+
+  useEffect(() => {
+    storeResults(DELAY_RESULTS_STORAGE_KEY, delays)
+  }, [delays])
 
   const testDelay = useCallback(async (clashApiBase, nodeName) => {
     setTestingNodes((prev) => ({ ...prev, [nodeName]: true }))
@@ -445,18 +536,20 @@ export function useDelays() {
     setTestingGroup('')
   }, [testDelay])
 
-  const clearDelays = useCallback(() => {
-    setDelays({})
-  }, [])
-
-  return { delays, testingNodes, testingGroup, testDelay, testGroupDelays, clearDelays }
+  return { delays, testingNodes, testingGroup, testDelay, testGroupDelays }
 }
 
 export function useConnectivity() {
-  const [connectivityResults, setConnectivityResults] = useState({})
+  const [connectivityResults, setConnectivityResults] = useState(() => (
+    readStoredResults(CONNECTIVITY_RESULTS_STORAGE_KEY, isValidConnectivityResult)
+  ))
   const [testingConnectivity, setTestingConnectivity] = useState(false)
   const [currentTestingSite, setCurrentTestingSite] = useState(null)
   const stopConnectivityRef = useRef(false)
+
+  useEffect(() => {
+    storeResults(CONNECTIVITY_RESULTS_STORAGE_KEY, connectivityResults)
+  }, [connectivityResults])
 
   const testSingleSite = useCallback(async (site) => {
     setCurrentTestingSite(site.name)
@@ -478,7 +571,6 @@ export function useConnectivity() {
   const testAllConnectivity = useCallback(async (sites) => {
     setTestingConnectivity(true)
     stopConnectivityRef.current = false
-    setConnectivityResults({})
     for (const site of sites) {
       if (stopConnectivityRef.current) break
       await testSingleSite(site)
@@ -493,17 +585,12 @@ export function useConnectivity() {
     setCurrentTestingSite(null)
   }, [])
 
-  const clearConnectivity = useCallback(() => {
-    setConnectivityResults({})
-  }, [])
-
   return { 
     connectivityResults, 
     testingConnectivity, 
     currentTestingSite, 
     testSingleSite, 
     testAllConnectivity, 
-    stopConnectivity,
-    clearConnectivity 
+    stopConnectivity
   }
 }

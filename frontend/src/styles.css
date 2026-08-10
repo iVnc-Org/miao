@@ -828,7 +828,7 @@ html[data-embed-mode='true'] .right-column {
 }
 .share-endpoint-address {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) auto auto;
     align-items: center;
     gap: 8px;
     min-width: 0;
@@ -845,7 +845,7 @@ html[data-embed-mode='true'] .right-column {
     user-select: all;
     cursor: text;
 }
-.share-copy-btn {
+.share-endpoint-action {
     width: 28px;
     height: 28px;
     display: inline-flex;
@@ -857,10 +857,10 @@ html[data-embed-mode='true'] .right-column {
     color: var(--text);
     cursor: pointer;
 }
-.share-copy-btn:hover:not(:disabled) {
+.share-endpoint-action:hover:not(:disabled) {
     background: var(--surface);
 }
-.share-copy-btn:disabled {
+.share-endpoint-action:disabled {
     opacity: 0.6;
     cursor: not-allowed;
 }
@@ -965,6 +965,57 @@ html[data-embed-mode='true'] .right-column {
 }
 .modal-confirm {
     width: min(100%, 420px);
+}
+.pool-test-modal {
+    width: min(100%, 680px);
+}
+.pool-test-summary {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    margin-bottom: 12px;
+}
+.pool-test-status {
+    flex: 0 0 auto;
+    padding: 4px 7px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 700;
+}
+.pool-test-status.success {
+    color: var(--success);
+    background: var(--surface-green-soft);
+}
+.pool-test-status.warning {
+    color: var(--warning);
+    background: rgba(245, 158, 11, 0.1);
+}
+.pool-test-status.error {
+    color: var(--danger);
+    background: rgba(239, 68, 68, 0.1);
+}
+.pool-test-tag {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text-muted);
+    font-size: 11px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.pool-test-json {
+    max-height: min(52vh, 440px);
+    margin: 0 0 18px;
+    padding: 12px;
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: #11151a;
+    color: var(--text);
+    font-size: 12px;
+    line-height: 1.55;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
 }
 .connections-modal {
     width: min(100%, 980px);

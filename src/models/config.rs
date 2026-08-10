@@ -105,7 +105,7 @@ fn default_dns_follow_process() -> bool {
 
 /// 代理池默认监听所有 IPv4 网卡，便于局域网设备直接使用各节点端口。
 pub const DEFAULT_SHARE_LISTEN: &str = "0.0.0.0";
-pub const DEFAULT_SHARE_BASE_PORT: u16 = 12000;
+pub const DEFAULT_SHARE_BASE_PORT: u16 = 50000;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PoolConfig {
@@ -324,6 +324,7 @@ mod tests {
         let pool = PoolConfig::default().normalized().unwrap();
 
         assert_eq!(pool.listen, "0.0.0.0");
+        assert_eq!(pool.base_port, 50000);
         assert!(!pool.has_auth());
     }
 
