@@ -31,7 +31,7 @@ pub async fn save_last_proxy(proxy: &LastProxy) -> AppResult<()> {
     Ok(())
 }
 
-async fn load_last_proxy() -> Option<LastProxy> {
+pub async fn load_last_proxy() -> Option<LastProxy> {
     for path in [get_last_proxy_path(), get_legacy_last_proxy_path()] {
         if let Ok(content) = tokio::fs::read_to_string(&path).await {
             if let Ok(proxy) = serde_json::from_str(&content) {

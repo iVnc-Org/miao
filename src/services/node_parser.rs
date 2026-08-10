@@ -861,6 +861,13 @@ pub fn parse_node_json(node_str: &str) -> Result<(NodeDisplayInfo, serde_json::V
     let v: serde_json::Value =
         serde_json::from_str(node_str).map_err(|e| format!("Invalid JSON: {}", e))?;
 
+    let info = node_display_info(&v)?;
+
+    Ok((info, v))
+}
+
+pub fn node_display_info(v: &serde_json::Value) -> Result<NodeDisplayInfo, String> {
+
     let tag = v
         .get("tag")
         .and_then(|t| t.as_str())
@@ -900,15 +907,13 @@ pub fn parse_node_json(node_str: &str) -> Result<(NodeDisplayInfo, serde_json::V
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
 
-    let info = NodeDisplayInfo {
+    Ok(NodeDisplayInfo {
         tag,
         server,
         server_port,
         node_type,
         sni,
-    };
-
-    Ok((info, v))
+    })
 }
 
 /// 节点显示信息结构

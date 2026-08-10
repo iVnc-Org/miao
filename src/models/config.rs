@@ -4,19 +4,21 @@ use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum RouteMode {
-    Tunnel,
+pub enum ProxyMode {
     #[default]
     Global,
-    Rule,
+    Process,
+    Pool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum TunProcessMode {
+pub enum ProcessListMode {
     #[default]
-    GlobalBypass,
-    ProcessOnly,
+    #[serde(alias = "global_bypass")]
+    Blacklist,
+    #[serde(alias = "process_only")]
+    Whitelist,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,7 +30,7 @@ pub enum BypassAction {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TunProcessMatch {
+pub struct ProcessMatch {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub names: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -37,7 +39,7 @@ pub struct TunProcessMatch {
     pub path_regex: Vec<String>,
 }
 
-impl TunProcessMatch {
+impl ProcessMatch {
     pub fn is_empty(&self) -> bool {
         self.names.is_empty() && self.paths.is_empty() && self.path_regex.is_empty()
     }
@@ -52,48 +54,132 @@ impl TunProcessMatch {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TunProcessConfig {
+pub struct ProcessProxyConfig {
+    #[serde(default, rename = "enabled", skip_serializing)]
+    pub legacy_enabled: bool,
     #[serde(default)]
-    pub enabled: bool,
+    pub mode: ProcessListMode,
     #[serde(default)]
-    pub mode: TunProcessMode,
-    #[serde(default)]
-    pub r#match: TunProcessMatch,
+    pub r#match: ProcessMatch,
     #[serde(default = "default_dns_follow_process")]
     pub dns_follow_process: bool,
     #[serde(default)]
     pub bypass_action: BypassAction,
 }
 
-impl Default for TunProcessConfig {
+impl Default for ProcessProxyConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
-            mode: TunProcessMode::GlobalBypass,
-            r#match: TunProcessMatch::default(),
+            legacy_enabled: false,
+            mode: ProcessListMode::Blacklist,
+            r#match: ProcessMatch::default(),
             dns_follow_process: true,
             bypass_action: BypassAction::Bypass,
         }
     }
 }
 
-impl TunProcessConfig {
-    pub fn is_disabled(&self) -> bool {
-        !self.enabled
+impl ProcessProxyConfig {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
     }
 
     pub fn normalized(&self) -> Result<Self, String> {
         let mut normalized = self.clone();
+        normalized.legacy_enabled = false;
         normalized.r#match = self.r#match.normalized()?;
-        if normalized.enabled && normalized.r#match.is_empty() {
-            return Err("启用进程代理时至少需要填写一个进程名或进程路径".to_string());
-        }
         Ok(normalized)
+    }
+
+    pub fn validate_active(&self) -> Result<(), String> {
+        if self.r#match.is_empty() {
+            return Err("进程代理模式至少需要填写一个进程名或进程路径".to_string());
+        }
+        Ok(())
     }
 }
 
 fn default_dns_follow_process() -> bool {
     true
+}
+
+/// 代理池默认监听所有 IPv4 网卡，便于局域网设备直接使用各节点端口。
+pub const DEFAULT_SHARE_LISTEN: &str = "0.0.0.0";
+pub const DEFAULT_SHARE_BASE_PORT: u16 = 12000;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoolConfig {
+    #[serde(default, rename = "enabled", skip_serializing)]
+    pub legacy_enabled: bool,
+    #[serde(default = "default_share_listen")]
+    pub listen: String,
+    #[serde(default = "default_share_base_port")]
+    pub base_port: u16,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub username: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub password: String,
+}
+
+fn default_share_listen() -> String {
+    DEFAULT_SHARE_LISTEN.to_string()
+}
+
+fn default_share_base_port() -> u16 {
+    DEFAULT_SHARE_BASE_PORT
+}
+
+impl Default for PoolConfig {
+    fn default() -> Self {
+        Self {
+            legacy_enabled: false,
+            listen: default_share_listen(),
+            base_port: DEFAULT_SHARE_BASE_PORT,
+            username: String::new(),
+            password: String::new(),
+        }
+    }
+}
+
+impl PoolConfig {
+    /// 只有整个配置都还是默认值时才允许在序列化时省略。
+    ///
+    /// 退出代理池模式时不能把用户填的监听地址、起始端口和账号密码一起从
+    /// config.yaml 里抹掉，否则再次进入时会静默恢复默认设置。
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+
+    pub fn has_auth(&self) -> bool {
+        !self.username.is_empty() && !self.password.is_empty()
+    }
+
+    pub fn normalized(&self) -> Result<Self, String> {
+        let listen = self.listen.trim().to_string();
+        if listen.is_empty() {
+            return Err("代理池监听地址不能为空".to_string());
+        }
+        let Ok(_listen_ip) = listen.parse::<std::net::IpAddr>() else {
+            return Err("代理池监听地址必须是合法 IP".to_string());
+        };
+        if self.base_port == 0 {
+            return Err("代理池起始端口必须在 1 到 65535 之间".to_string());
+        }
+
+        let username = self.username.trim().to_string();
+        let password = self.password.trim().to_string();
+        if username.is_empty() != password.is_empty() {
+            return Err("代理池用户名和密码需同时填写或同时留空".to_string());
+        }
+
+        Ok(Self {
+            legacy_enabled: false,
+            listen,
+            base_port: self.base_port,
+            username,
+            password,
+        })
+    }
 }
 
 enum ProcessMatchKind {
@@ -161,10 +247,12 @@ pub struct Config {
     pub nodes: Vec<String>,
     #[serde(default)]
     pub custom_rules: Vec<String>,
-    #[serde(default, skip_serializing_if = "TunProcessConfig::is_disabled")]
-    pub tun_process: TunProcessConfig,
-    #[serde(default, skip_serializing, skip_deserializing)]
-    pub route_mode: RouteMode,
+    #[serde(default)]
+    pub mode: ProxyMode,
+    #[serde(default, skip_serializing_if = "ProcessProxyConfig::is_default")]
+    pub tun_process: ProcessProxyConfig,
+    #[serde(default, skip_serializing_if = "PoolConfig::is_default")]
+    pub share: PoolConfig,
 }
 
 pub const DEFAULT_PORT: u16 = 6161;
@@ -173,153 +261,81 @@ pub const DEFAULT_SOCKS_PORT: u16 = 1080;
 
 #[cfg(test)]
 mod tests {
-    use super::Config;
+    use super::{Config, PoolConfig, ProcessListMode, ProcessMatch, ProcessProxyConfig, ProxyMode};
 
     #[test]
-    fn config_serializes_vps_ip_when_present() {
-        let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            vps_ip: Some("203.0.113.10".to_string()),
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            route_mode: Default::default(),
-        };
+    fn config_persists_mode() {
+        let yaml = serde_yaml::to_string(&Config::default()).unwrap();
+        assert!(yaml.contains("mode: global"));
+    }
+
+    #[test]
+    fn legacy_process_and_pool_flags_deserialize_without_reserializing() {
+        let config: Config = serde_yaml::from_str(
+            "tun_process:\n  enabled: true\n  mode: process_only\nshare:\n  enabled: true\n",
+        )
+        .unwrap();
+        assert!(config.tun_process.legacy_enabled);
+        assert!(config.share.legacy_enabled);
+        assert_eq!(config.tun_process.mode, ProcessListMode::Whitelist);
 
         let yaml = serde_yaml::to_string(&config).unwrap();
-
-        assert!(yaml.contains("vps_ip: 203.0.113.10"));
+        assert!(!yaml.contains("enabled:"));
     }
 
     #[test]
-    fn config_omits_empty_vps_ip() {
-        let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            vps_ip: None,
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            route_mode: Default::default(),
-        };
-
-        let yaml = serde_yaml::to_string(&config).unwrap();
-
-        assert!(!yaml.contains("vps_ip"));
-    }
-
-    #[test]
-    fn config_omits_global_route_mode() {
-        let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            vps_ip: None,
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            route_mode: super::RouteMode::Global,
-        };
-
-        let yaml = serde_yaml::to_string(&config).unwrap();
-
-        assert!(!yaml.contains("route_mode"));
-    }
-
-    #[test]
-    fn config_omits_default_route_mode() {
-        let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            vps_ip: None,
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            route_mode: Default::default(),
-        };
-
-        let yaml = serde_yaml::to_string(&config).unwrap();
-
-        assert!(!yaml.contains("route_mode"));
-    }
-
-    #[test]
-    fn config_ignores_route_mode_when_deserializing() {
-        let yaml = r#"
-port: 6161
-route_mode: definitely-not-valid
-subs: []
-nodes: []
-custom_rules: []
-"#;
-
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
-
-        assert_eq!(config.route_mode, super::RouteMode::Global);
-    }
-
-    #[test]
-    fn config_omits_disabled_tun_process() {
-        let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            vps_ip: None,
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            route_mode: Default::default(),
-        };
-
-        let yaml = serde_yaml::to_string(&config).unwrap();
-
-        assert!(!yaml.contains("tun_process"));
-    }
-
-    #[test]
-    fn tun_process_normalizes_match_lists() {
-        let config = super::TunProcessConfig {
-            enabled: true,
-            mode: super::TunProcessMode::ProcessOnly,
-            r#match: super::TunProcessMatch {
+    fn process_config_normalizes_shape_and_validates_only_when_active() {
+        let config = ProcessProxyConfig {
+            mode: ProcessListMode::Whitelist,
+            r#match: ProcessMatch {
                 names: vec![" curl ".to_string(), "curl".to_string(), "ssh".to_string()],
-                paths: vec![],
-                path_regex: vec![],
+                ..Default::default()
             },
-            dns_follow_process: true,
-            bypass_action: Default::default(),
+            ..Default::default()
         };
-
         let normalized = config.normalized().unwrap();
-
         assert_eq!(normalized.r#match.names, vec!["curl", "ssh"]);
+        assert!(normalized.validate_active().is_ok());
+        assert!(ProcessProxyConfig::default().normalized().is_ok());
+        assert!(ProcessProxyConfig::default().validate_active().is_err());
     }
 
     #[test]
-    fn tun_process_rejects_command_line_as_process_name() {
-        let config = super::TunProcessConfig {
-            enabled: true,
-            mode: Default::default(),
-            r#match: super::TunProcessMatch {
-                names: vec!["git clone https://example.com/repo.git".to_string()],
-                paths: vec![],
-                path_regex: vec![],
+    fn pool_keeps_customized_settings_outside_pool_mode() {
+        let config = Config {
+            mode: ProxyMode::Global,
+            share: PoolConfig {
+                listen: "192.168.1.10".to_string(),
+                base_port: 20000,
+                username: "alice".to_string(),
+                password: "secret".to_string(),
+                ..Default::default()
             },
-            dns_follow_process: true,
-            bypass_action: Default::default(),
+            ..Default::default()
         };
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        assert!(yaml.contains("share"));
+        assert!(yaml.contains("192.168.1.10"));
+        assert_eq!(serde_yaml::from_str::<Config>(&yaml).unwrap().share, config.share);
+    }
 
-        let err = config.normalized().unwrap_err();
+    #[test]
+    fn pool_defaults_to_all_interfaces_and_allows_no_auth() {
+        let pool = PoolConfig::default().normalized().unwrap();
 
-        assert!(err.contains("不支持命令参数"));
+        assert_eq!(pool.listen, "0.0.0.0");
+        assert!(!pool.has_auth());
+    }
+
+    #[test]
+    fn process_names_reject_command_lines() {
+        let config = ProcessProxyConfig {
+            r#match: ProcessMatch {
+                names: vec!["git clone https://example.com/repo.git".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(config.normalized().unwrap_err().contains("不支持命令参数"));
     }
 }

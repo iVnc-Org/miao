@@ -11,22 +11,31 @@ use tracing::{error, info, warn};
 
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    BypassAction, Config, RouteMode, SubStatus, TunProcessConfig, TunProcessMatch, TunProcessMode,
-    DEFAULT_SOCKS_LISTEN, DEFAULT_SOCKS_PORT,
+    BypassAction, Config, NodeInfo, PoolConfig, ProcessListMode, ProcessMatch, ProcessProxyConfig,
+    ProxyMode, DEFAULT_SOCKS_LISTEN, DEFAULT_SOCKS_PORT,
 };
 use crate::services::{
     proxy::restore_last_proxy,
+    share_ports::{
+        allocate_share_ports, load_share_port_map, reserved_system_ports, save_share_port_map,
+        share_inbound_tag, SharePortMap,
+    },
     singbox::{
-        get_sing_box_home, start_sing_internal, stop_sing_internal, validate_sing_box_config,
+        get_sing_box_home, sing_box_is_running, start_sing_internal, stop_sing_internal,
+        validate_sing_box_config,
+    },
+    sub_nodes::{
+        hydrate_sub_status, load_sub_nodes, save_sub_nodes, StoredNode, SubNodeStore,
     },
     subscription::fetch_sub,
+    write_file_atomic,
 };
 use crate::state::AppState;
 
 const CONFIG_CACHE_DIR: &str = "data/cache";
 const CONFIG_CACHE_FILE: &str = "config.json";
 const CONFIG_CACHE_META_FILE: &str = "config.meta.json";
-const CONFIG_CACHE_SCHEMA_VERSION: u32 = 5;
+const CONFIG_CACHE_SCHEMA_VERSION: u32 = 7;
 const MAX_CONCURRENT_SUBS: usize = 5;
 
 #[derive(Serialize, Deserialize)]
@@ -47,11 +56,12 @@ fn config_cache_fingerprint(config: &Config) -> AppResult<String> {
         "schema_version": CONFIG_CACHE_SCHEMA_VERSION,
         "socks_listen": &config.socks_listen,
         "socks_port": config.socks_port,
-        "route_mode": &config.route_mode,
+        "mode": &config.mode,
         "subs": &config.subs,
         "nodes": &config.nodes,
         "custom_rules": &config.custom_rules,
         "tun_process": &config.tun_process,
+        "share": &config.share,
     });
     let bytes = serde_json::to_vec(&value)?;
     let mut hasher = Sha256::new();
@@ -66,32 +76,6 @@ fn normalize_cached_sing_box_config(mut config: serde_json::Value) -> serde_json
     config
 }
 
-/// 原子写入文件：先写入临时文件，再重命名为目标文件
-async fn write_file_atomic(path: &Path, content: &str) -> AppResult<()> {
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| AppError::context("Failed to create config directory", e))?;
-    }
-
-    let temp_path = path.with_extension("tmp");
-
-    // 先写入临时文件
-    tokio::fs::write(&temp_path, content)
-        .await
-        .map_err(|e| AppError::context("Failed to write temp file", e))?;
-
-    // 原子重命名为最终文件
-    tokio::fs::rename(&temp_path, path)
-        .await
-        .map_err(|e| AppError::context("Failed to atomically rename file", e))?;
-
-    Ok(())
-}
-
 pub async fn save_config_to(path: &Path, config: &Config) -> AppResult<()> {
     let yaml = serde_yaml::to_string(config)?;
     if let Ok(existing) = tokio::fs::read_to_string(path).await {
@@ -101,7 +85,7 @@ pub async fn save_config_to(path: &Path, config: &Config) -> AppResult<()> {
         }
     }
 
-    write_file_atomic(path, &yaml).await
+    write_file_atomic(path, &yaml, "config file").await
 }
 
 pub async fn save_config_cache(config: &Config) {
@@ -130,7 +114,7 @@ pub async fn save_config_cache(config: &Config) {
         }
     };
 
-    if let Err(e) = write_file_atomic(&meta_path, &meta).await {
+    if let Err(e) = write_file_atomic(&meta_path, &meta, "config cache meta").await {
         error!("Failed to save config cache metadata: {}", e);
         return;
     }
@@ -146,6 +130,55 @@ async fn clear_generated_config_state() {
     ] {
         let _ = tokio::fs::remove_file(path).await;
     }
+}
+
+async fn restore_subscription_nodes(snapshot: &SubNodeStore) -> AppResult<()> {
+    if load_sub_nodes().await != *snapshot {
+        save_sub_nodes(snapshot).await?;
+    }
+    Ok(())
+}
+
+async fn apply_no_node_config(
+    state: &Arc<AppState>,
+    old_config: &Config,
+    new_config: Config,
+    previous_sub_nodes: &SubNodeStore,
+    stop_runtime: bool,
+) -> AppResult<()> {
+    let mut retained_sub_nodes = previous_sub_nodes.clone();
+    retained_sub_nodes.retain_urls(&new_config.subs);
+    if retained_sub_nodes != *previous_sub_nodes {
+        save_sub_nodes(&retained_sub_nodes).await?;
+    }
+
+    if let Err(save_error) = save_config_to(&state.config_path, &new_config).await {
+        let restore_error = restore_subscription_nodes(previous_sub_nodes).await.err();
+        hydrate_sub_status(state, &old_config.subs).await;
+        return match restore_error {
+            None => Err(AppError::context(
+                "Failed to persist config change; restored subscription cache",
+                save_error,
+            )),
+            Some(restore_error) => Err(AppError::message(format!(
+                "Failed to persist config change: {}. Subscription cache rollback failed: {}",
+                save_error, restore_error
+            ))),
+        };
+    }
+
+    if stop_runtime {
+        stop_sing_internal(state).await;
+    }
+    clear_generated_config_state().await;
+    {
+        let mut status_map = state.sub_status.lock().await;
+        status_map.retain(|url, _| new_config.subs.contains(url));
+    }
+    *state.config.write().await = new_config;
+    *state.config_source.lock().await = None;
+    *state.config_warning.lock().await = None;
+    Ok(())
 }
 
 pub async fn restore_config_from_cache(config: &Config) -> AppResult<()> {
@@ -172,19 +205,17 @@ pub async fn restore_config_from_cache(config: &Config) -> AppResult<()> {
         .map_err(|e| AppError::context("Failed to read cached config", e))?;
     let cached_config: serde_json::Value = serde_json::from_str(&cached_config)
         .map_err(|e| AppError::context("Failed to parse cached config", e))?;
-    let mut cached_config = normalize_cached_sing_box_config(cached_config);
-    apply_routing_to_sing_box_config(&mut cached_config, config)
-        .map_err(|e| AppError::context("Failed to update cached routing config", e))?;
+    let cached_config = normalize_cached_sing_box_config(cached_config);
     let cached_config = serde_json::to_string(&cached_config)?;
 
     let config_path = get_sing_box_home().join("config.json");
-    write_file_atomic(&config_path, &cached_config)
+    write_file_atomic(&config_path, &cached_config, "sing-box config")
         .await
         .map_err(|e| AppError::context("Failed to restore config from cache", e))?;
     validate_sing_box_config()
         .await
         .map_err(|e| AppError::context("Cached config validation failed", e))?;
-    write_file_atomic(&cache, &cached_config)
+    write_file_atomic(&cache, &cached_config, "config cache")
         .await
         .map_err(|e| AppError::context("Failed to update normalized config cache", e))?;
     info!(cache = ?cache, "Restored config from cache");
@@ -194,8 +225,9 @@ pub async fn restore_config_from_cache(config: &Config) -> AppResult<()> {
 pub async fn regenerate_and_restart_runtime(
     config: &Config,
     state: &Arc<AppState>,
-) -> AppResult<bool> {
-    let has_sub_nodes = gen_config(config, state)
+    policy: SubFetchPolicy,
+) -> AppResult<GenOutcome> {
+    let outcome = gen_config(config, state, policy)
         .await
         .map_err(|e| AppError::context("Failed to regenerate config", e))?;
     info!("Config regenerated successfully");
@@ -211,21 +243,23 @@ pub async fn regenerate_and_restart_runtime(
         .map_err(|e| AppError::context("Failed to restart sing-box", e))?;
     info!("sing-box restarted successfully");
 
-    Ok(has_sub_nodes)
+    Ok(outcome)
 }
 
-pub async fn regenerate_and_restart(config: &Config, state: &Arc<AppState>) -> AppResult<()> {
-    let route_override = *state.route_mode_override.read().await;
-    let runtime_config = config_with_route_override(config, route_override);
-    let has_sub_nodes = regenerate_and_restart_runtime(&runtime_config, state).await?;
+/// 用户显式点击"刷新订阅"。这是少数几条允许联网的路径之一。
+pub async fn regenerate_and_restart(
+    config: &Config,
+    state: &Arc<AppState>,
+) -> AppResult<GenOutcome> {
+    let outcome = regenerate_and_restart_runtime(config, state, SubFetchPolicy::FetchAll).await?;
 
-    finalize_started_config(&runtime_config, state, has_sub_nodes).await;
+    finalize_started_config(config, state, &outcome).await;
 
-    Ok(())
+    Ok(outcome)
 }
 
-pub async fn finalize_started_config(config: &Config, state: &Arc<AppState>, has_sub_nodes: bool) {
-    update_config_warning(config, state, has_sub_nodes).await;
+pub async fn finalize_started_config(config: &Config, state: &Arc<AppState>, outcome: &GenOutcome) {
+    update_config_warning(config, state, outcome).await;
 
     let state_for_proxy = state.clone();
     tokio::spawn(async move {
@@ -233,27 +267,30 @@ pub async fn finalize_started_config(config: &Config, state: &Arc<AppState>, has
     });
 }
 
-async fn update_config_warning(config: &Config, state: &Arc<AppState>, has_sub_nodes: bool) {
+async fn update_config_warning(config: &Config, state: &Arc<AppState>, outcome: &GenOutcome) {
     *state.config_source.lock().await = Some("generated".to_string());
 
-    if has_sub_nodes || config.subs.is_empty() {
+    if outcome.has_sub_nodes() || config.subs.is_empty() {
         save_config_cache(config).await;
     }
 
-    if has_sub_nodes {
-        *state.config_warning.lock().await = None;
-    } else if !config.subs.is_empty() {
-        *state.config_warning.lock().await = Some("所有订阅获取失败，请检查当前订阅".to_string());
+    // 只有"一个节点都没有"才是需要用户处理的状态。链接失效但仍有缓存节点
+    // 是常态（链接本就只有几分钟有效期），不能报成告警——前端会把 warning
+    // 渲染成红色 toast。失效状态只体现在订阅行上。
+    let warning = if outcome.has_sub_nodes() || config.subs.is_empty() {
+        None
     } else {
-        *state.config_warning.lock().await = None;
-    }
+        Some("订阅节点缓存为空，请点击刷新订阅".to_string())
+    };
+    *state.config_warning.lock().await = warning;
 }
 
 pub async fn regenerate_without_restart_runtime(
     config: &Config,
     state: &Arc<AppState>,
-) -> AppResult<bool> {
-    let has_sub_nodes = gen_config(config, state)
+    policy: SubFetchPolicy,
+) -> AppResult<GenOutcome> {
+    let outcome = gen_config(config, state, policy)
         .await
         .map_err(|e| AppError::context("Failed to regenerate config", e))?;
     info!("Config regenerated successfully");
@@ -262,10 +299,10 @@ pub async fn regenerate_without_restart_runtime(
         .await
         .map_err(|e| AppError::context("Config validation failed", e))?;
 
-    Ok(has_sub_nodes)
+    Ok(outcome)
 }
 
-async fn read_existing_sing_box_config() -> AppResult<serde_json::Value> {
+pub(crate) async fn read_existing_sing_box_config() -> AppResult<serde_json::Value> {
     let config_path = get_sing_box_home().join("config.json");
     let source_path = if config_path.exists() {
         config_path
@@ -281,113 +318,119 @@ async fn read_existing_sing_box_config() -> AppResult<serde_json::Value> {
         .map_err(|e| AppError::context("Failed to parse existing sing-box config", e))
 }
 
-fn apply_routing_to_sing_box_config(
-    sing_box_config: &mut serde_json::Value,
-    config: &Config,
-) -> AppResult<()> {
-    let tun_process = config.tun_process.normalized().map_err(AppError::message)?;
-    let route_rules = build_route_rules(config.route_mode, &tun_process, &config.custom_rules)?;
-    let dns_rules = build_dns_rules(config.route_mode);
-
-    let Some(route) = sing_box_config["route"].as_object_mut() else {
-        return Err(AppError::message(
-            "Existing sing-box config missing route section",
-        ));
+/// 从已生成的 sing-box 配置里读回 (节点 tag, 分享端口)。
+///
+/// 已部署的配置才是"实际在监听什么"的唯一真相；`SharePortMap` 只是分配账本。
+pub(crate) fn extract_share_bindings_from_sing_box(
+    sing_box_config: &serde_json::Value,
+) -> Vec<(String, u16)> {
+    let mut bindings = Vec::new();
+    let Some(rules) = sing_box_config["route"]["rules"].as_array() else {
+        return bindings;
     };
-    route.insert("rules".to_string(), serde_json::Value::Array(route_rules));
-    route.insert(
-        "final".to_string(),
-        serde_json::Value::String(route_final(&tun_process).to_string()),
-    );
-    route.insert(
-        "default_domain_resolver".to_string(),
-        serde_json::Value::String("local".to_string()),
-    );
 
-    let Some(dns) = sing_box_config["dns"].as_object_mut() else {
-        return Err(AppError::message(
-            "Existing sing-box config missing dns section",
-        ));
-    };
-    dns.insert("rules".to_string(), serde_json::Value::Array(dns_rules));
+    for rule in rules {
+        let Some(inbounds) = rule.get("inbound").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        if inbounds.len() != 1 {
+            continue;
+        }
+        let Some(inbound) = inbounds[0].as_str() else {
+            continue;
+        };
+        let Some(port_str) = inbound.strip_prefix("share-") else {
+            continue;
+        };
+        let Ok(port) = port_str.parse::<u16>() else {
+            continue;
+        };
+        let Some(outbound) = rule.get("outbound").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        bindings.push((outbound.to_string(), port));
+    }
 
-    Ok(())
-}
-
-async fn rewrite_existing_sing_box_routing(config: &Config) -> AppResult<()> {
-    let mut sing_box_config = read_existing_sing_box_config().await?;
-    apply_routing_to_sing_box_config(&mut sing_box_config, config)?;
-    let config_path = get_sing_box_home().join("config.json");
-    write_file_atomic(&config_path, &serde_json::to_string(&sing_box_config)?).await?;
-    validate_sing_box_config()
-        .await
-        .map_err(|e| AppError::context("Config validation failed", e))?;
-    Ok(())
-}
-
-fn config_with_route_override(config: &Config, route_mode: Option<RouteMode>) -> Config {
-    let mut config = config.clone();
-    config.route_mode = route_mode.unwrap_or_default();
-    config
+    bindings
 }
 
 pub async fn apply_config_change(
     state: &Arc<AppState>,
     old_config: &Config,
     new_config: &Config,
+    policy: SubFetchPolicy,
 ) -> AppResult<()> {
-    let route_override = *state.route_mode_override.read().await;
-    let runtime_old_config = config_with_route_override(old_config, route_override);
-    let runtime_new_config = config_with_route_override(new_config, route_override);
-    let persisted_new_config = config_with_route_override(new_config, None);
+    let persisted_new_config = new_config.clone();
+    let previous_sub_nodes = load_sub_nodes().await;
 
     if config_has_no_nodes(new_config) {
-        save_config_to(&state.config_path, &persisted_new_config).await?;
-        stop_sing_internal(state).await;
-        clear_generated_config_state().await;
-        {
-            let mut status_map = state.sub_status.lock().await;
-            status_map.retain(|url, _| new_config.subs.contains(url));
-        }
-        *state.config.write().await = persisted_new_config;
-        *state.config_source.lock().await = None;
-        *state.config_warning.lock().await = None;
-        return Ok(());
+        return apply_no_node_config(
+            state,
+            old_config,
+            persisted_new_config,
+            &previous_sub_nodes,
+            true,
+        )
+        .await;
     }
 
-    match regenerate_and_restart_runtime(&runtime_new_config, state).await {
-        Ok(has_sub_nodes) => {
-            match save_config_to(&state.config_path, &persisted_new_config).await {
-                Ok(()) => {
-                    *state.config.write().await = persisted_new_config;
-                    finalize_started_config(&runtime_new_config, state, has_sub_nodes).await;
-                    Ok(())
-                }
-                Err(save_err) => {
-                    error!(error = %save_err, "Runtime config applied but persistent config write failed, attempting runtime rollback");
-                    match restart_with_previous_config(&runtime_old_config, state).await {
-                        Ok(()) => Err(AppError::context(
-                            "Failed to persist config change; restored previous runtime config",
-                            save_err,
-                        )),
-                        Err(rollback_err) => Err(AppError::message(format!(
-                            "Failed to persist config change: {}. Runtime rollback failed: {}",
-                            save_err, rollback_err
-                        ))),
-                    }
+    match regenerate_and_restart_runtime(new_config, state, policy).await {
+        Ok(outcome) => match save_config_to(&state.config_path, &persisted_new_config).await {
+            Ok(()) => {
+                *state.config.write().await = persisted_new_config;
+                finalize_started_config(new_config, state, &outcome).await;
+                Ok(())
+            }
+            Err(save_err) => {
+                error!(error = %save_err, "Runtime config applied but persistent config write failed, attempting runtime rollback");
+                let store_restore_error = restore_subscription_nodes(&previous_sub_nodes)
+                    .await
+                    .err()
+                    .map(|error| error.to_string());
+                match restart_with_previous_config(old_config, state).await {
+                    Ok(()) if store_restore_error.is_none() => Err(AppError::context(
+                        "Failed to persist config change; restored previous runtime config",
+                        save_err,
+                    )),
+                    Ok(()) => Err(AppError::message(format!(
+                        "Failed to persist config change: {}. Runtime rollback succeeded, but subscription cache rollback failed: {}",
+                        save_err,
+                        store_restore_error.unwrap()
+                    ))),
+                    Err(rollback_err) => Err(AppError::message(format!(
+                        "Failed to persist config change: {}. Runtime rollback failed: {}{}",
+                        save_err,
+                        rollback_err,
+                        store_restore_error
+                            .map(|error| format!(". Subscription cache rollback failed: {error}"))
+                            .unwrap_or_default()
+                    ))),
                 }
             }
-        }
+        },
         Err(apply_err) => {
             error!(error = %apply_err, "Failed to apply runtime config change, attempting runtime rollback");
-            match restore_previous_running_config(&runtime_old_config, state).await {
-                Ok(()) => Err(AppError::context(
+            let store_restore_error = restore_subscription_nodes(&previous_sub_nodes)
+                .await
+                .err()
+                .map(|error| error.to_string());
+            match restore_previous_running_config(old_config, state).await {
+                Ok(()) if store_restore_error.is_none() => Err(AppError::context(
                     "Failed to apply config change; restored previous runtime config",
                     apply_err,
                 )),
+                Ok(()) => Err(AppError::message(format!(
+                    "Failed to apply config change: {}. Runtime rollback succeeded, but subscription cache rollback failed: {}",
+                    apply_err,
+                    store_restore_error.unwrap()
+                ))),
                 Err(rollback_err) => Err(AppError::message(format!(
-                    "Failed to apply config change: {}. Runtime rollback failed: {}",
-                    apply_err, rollback_err
+                    "Failed to apply config change: {}. Runtime rollback failed: {}{}",
+                    apply_err,
+                    rollback_err,
+                    store_restore_error
+                        .map(|error| format!(". Subscription cache rollback failed: {error}"))
+                        .unwrap_or_default()
                 ))),
             }
         }
@@ -399,53 +442,61 @@ pub async fn apply_persistent_config_change(
     old_config: &Config,
     new_config: &Config,
     restart_if_running: bool,
+    policy: SubFetchPolicy,
 ) -> AppResult<()> {
-    if routing_only_change(old_config, new_config) {
-        return apply_routing_config_change(state, old_config, new_config, restart_if_running)
-            .await;
-    }
-
     if restart_if_running {
-        return apply_config_change(state, old_config, new_config).await;
+        return apply_config_change(state, old_config, new_config, policy).await;
     }
 
-    let route_override = *state.route_mode_override.read().await;
-    let runtime_old_config = config_with_route_override(old_config, route_override);
-    let runtime_new_config = config_with_route_override(new_config, route_override);
-    let persisted_new_config = config_with_route_override(new_config, None);
+    let persisted_new_config = new_config.clone();
+    let previous_sub_nodes = load_sub_nodes().await;
 
     if config_has_no_nodes(new_config) {
-        save_config_to(&state.config_path, &persisted_new_config).await?;
-        clear_generated_config_state().await;
-        *state.config.write().await = persisted_new_config;
-        *state.config_source.lock().await = None;
-        *state.config_warning.lock().await = None;
-        return Ok(());
+        return apply_no_node_config(
+            state,
+            old_config,
+            persisted_new_config,
+            &previous_sub_nodes,
+            false,
+        )
+        .await;
     }
 
-    match regenerate_without_restart_runtime(&runtime_new_config, state).await {
-        Ok(has_sub_nodes) => {
-            match save_config_to(&state.config_path, &persisted_new_config).await {
-                Ok(()) => {
-                    *state.config.write().await = persisted_new_config;
-                    update_config_warning(&runtime_new_config, state, has_sub_nodes).await;
-                    Ok(())
-                }
-                Err(save_err) => {
-                    let _ = restore_previous_stopped_config(&runtime_old_config, state).await;
-                    Err(AppError::context(
+    match regenerate_without_restart_runtime(new_config, state, policy).await {
+        Ok(outcome) => match save_config_to(&state.config_path, &persisted_new_config).await {
+            Ok(()) => {
+                *state.config.write().await = persisted_new_config;
+                update_config_warning(new_config, state, &outcome).await;
+                Ok(())
+            }
+            Err(save_err) => {
+                let store_restore = restore_subscription_nodes(&previous_sub_nodes).await;
+                let _ = restore_previous_stopped_config(old_config, state).await;
+                match store_restore {
+                    Ok(()) => Err(AppError::context(
                         "Failed to persist config change; restored previous stopped config",
                         save_err,
-                    ))
+                    )),
+                    Err(store_err) => Err(AppError::message(format!(
+                        "Failed to persist config change: {}. Subscription cache rollback failed: {}",
+                        save_err, store_err
+                    ))),
                 }
             }
-        }
+        },
         Err(apply_err) => {
-            let _ = restore_previous_stopped_config(&runtime_old_config, state).await;
-            Err(AppError::context(
-                "Failed to apply config change; restored previous stopped config",
-                apply_err,
-            ))
+            let store_restore = restore_subscription_nodes(&previous_sub_nodes).await;
+            let _ = restore_previous_stopped_config(old_config, state).await;
+            match store_restore {
+                Ok(()) => Err(AppError::context(
+                    "Failed to apply config change; restored previous stopped config",
+                    apply_err,
+                )),
+                Err(store_err) => Err(AppError::message(format!(
+                    "Failed to apply config change: {}. Subscription cache rollback failed: {}",
+                    apply_err, store_err
+                ))),
+            }
         }
     }
 }
@@ -454,148 +505,9 @@ fn config_has_no_nodes(config: &Config) -> bool {
     config.subs.is_empty() && config.nodes.is_empty()
 }
 
-fn routing_only_change(old_config: &Config, new_config: &Config) -> bool {
-    old_config.port == new_config.port
-        && old_config.socks_listen == new_config.socks_listen
-        && old_config.socks_port == new_config.socks_port
-        && old_config.subs == new_config.subs
-        && old_config.vps_ip == new_config.vps_ip
-        && old_config.nodes == new_config.nodes
-        && old_config.custom_rules == new_config.custom_rules
-        && (old_config.route_mode != new_config.route_mode
-            || old_config.tun_process != new_config.tun_process)
-}
-
-pub async fn apply_routing_config_change(
-    state: &Arc<AppState>,
-    old_config: &Config,
-    new_config: &Config,
-    restart: bool,
-) -> AppResult<()> {
-    if config_has_no_nodes(new_config) {
-        return Err(AppError::message(
-            "No nodes available: add a subscription or manual node before changing routing",
-        ));
-    }
-
-    let persisted_new_config = config_with_route_override(new_config, None);
-
-    match rewrite_existing_sing_box_routing(new_config).await {
-        Ok(()) => {
-            if let Err(save_err) = save_config_to(&state.config_path, &persisted_new_config).await {
-                let _ = if restart {
-                    restart_with_previous_config(old_config, state).await
-                } else {
-                    restore_previous_stopped_config(old_config, state).await
-                };
-                return Err(AppError::context(
-                    "Failed to persist routing change; restored previous runtime config",
-                    save_err,
-                ));
-            }
-
-            if restart {
-                stop_sing_internal(state).await;
-                if let Err(start_err) = start_sing_internal(state).await {
-                    let _ = restart_with_previous_config(old_config, state).await;
-                    return Err(AppError::context(
-                        "Failed to restart sing-box after routing change",
-                        start_err,
-                    ));
-                }
-                finalize_started_config(new_config, state, true).await;
-            } else {
-                update_config_warning(new_config, state, true).await;
-            }
-
-            *state.config.write().await = persisted_new_config;
-            *state.route_mode_override.write().await = Some(new_config.route_mode);
-            Ok(())
-        }
-        Err(apply_err) => {
-            let rollback = if restart {
-                restart_with_previous_config(old_config, state).await
-            } else {
-                restore_previous_stopped_config(old_config, state).await
-            };
-            match rollback {
-                Ok(()) => Err(AppError::context(
-                    "Failed to apply routing change; restored previous runtime config",
-                    apply_err,
-                )),
-                Err(rollback_err) => Err(AppError::message(format!(
-                    "Failed to apply routing change: {}. Runtime rollback failed: {}",
-                    apply_err, rollback_err
-                ))),
-            }
-        }
-    }
-}
-
-pub async fn apply_runtime_config_change(
-    state: &Arc<AppState>,
-    old_config: &Config,
-    new_config: &Config,
-    restart: bool,
-) -> AppResult<()> {
-    if routing_only_change(old_config, new_config) {
-        return apply_routing_config_change(state, old_config, new_config, restart).await;
-    }
-
-    if restart {
-        match regenerate_and_restart_runtime(new_config, state).await {
-            Ok(has_sub_nodes) => {
-                *state.route_mode_override.write().await = Some(new_config.route_mode);
-                finalize_started_config(new_config, state, has_sub_nodes).await;
-                Ok(())
-            }
-            Err(apply_err) => {
-                error!(error = %apply_err, "Failed to apply runtime-only config change, attempting runtime rollback");
-                match restore_previous_running_config(old_config, state).await {
-                    Ok(()) => Err(AppError::context(
-                        "Failed to apply runtime-only config change; restored previous runtime config",
-                        apply_err,
-                    )),
-                    Err(rollback_err) => Err(AppError::message(format!(
-                        "Failed to apply runtime-only config change: {}. Runtime rollback failed: {}",
-                        apply_err, rollback_err
-                    ))),
-                }
-            }
-        }
-    } else {
-        match regenerate_without_restart_runtime(new_config, state).await {
-            Ok(has_sub_nodes) => {
-                *state.route_mode_override.write().await = Some(new_config.route_mode);
-                update_config_warning(new_config, state, has_sub_nodes).await;
-                Ok(())
-            }
-            Err(apply_err) => {
-                let _ = restore_previous_stopped_config(old_config, state).await;
-                Err(AppError::context(
-                    "Failed to apply runtime-only config change",
-                    apply_err,
-                ))
-            }
-        }
-    }
-}
-
-async fn sing_box_is_running(state: &Arc<AppState>) -> bool {
-    let mut lock = state.sing_process.lock().await;
-    match &mut *lock {
-        Some(proc) => match proc.child.try_wait() {
-            Ok(Some(_)) => {
-                *lock = None;
-                false
-            }
-            Ok(None) => true,
-            Err(_) => false,
-        },
-        None => false,
-    }
-}
-
+/// 回滚路径。**故意不接受 policy 参数**：回滚时联网抓订阅是灾难性的——
+/// 一次失效期内的失败变更会因为抓不到订阅而彻底恢复不了，最终让 sing-box
+/// 停在无配置状态。这三个函数一律只用本地缓存。
 async fn restore_previous_running_config(
     old_config: &Config,
     state: &Arc<AppState>,
@@ -605,10 +517,16 @@ async fn restore_previous_running_config(
             Ok(()) => {}
             Err(cache_err) => {
                 warn!(error = %cache_err, "Failed to restore runtime config from cache while previous sing-box process is still running");
-                let has_sub_nodes = regenerate_without_restart_runtime(old_config, state).await?;
-                update_config_warning(old_config, state, has_sub_nodes).await;
+                let outcome = regenerate_without_restart_runtime(
+                    old_config,
+                    state,
+                    SubFetchPolicy::CacheOnly,
+                )
+                .await?;
+                update_config_warning(old_config, state, &outcome).await;
             }
         }
+        hydrate_sub_status(state, &old_config.subs).await;
         return Ok(());
     }
 
@@ -623,7 +541,10 @@ async fn restart_with_previous_config(old_config: &Config, state: &Arc<AppState>
     } else {
         match start_sing_internal(state).await {
             Ok(()) => {
-                finalize_started_config(old_config, state, true).await;
+                let store = load_sub_nodes().await;
+                let outcome = gen_outcome_from_store(old_config, &store);
+                finalize_started_config(old_config, state, &outcome).await;
+                hydrate_sub_status(state, &old_config.subs).await;
                 return Ok(());
             }
             Err(start_err) => {
@@ -632,11 +553,12 @@ async fn restart_with_previous_config(old_config: &Config, state: &Arc<AppState>
         }
     }
 
-    let has_sub_nodes = regenerate_without_restart_runtime(old_config, state).await?;
+    let outcome =
+        regenerate_without_restart_runtime(old_config, state, SubFetchPolicy::CacheOnly).await?;
     start_sing_internal(state)
         .await
         .map_err(|e| AppError::context("Failed to restart sing-box with previous config", e))?;
-    finalize_started_config(old_config, state, has_sub_nodes).await;
+    finalize_started_config(old_config, state, &outcome).await;
     Ok(())
 }
 
@@ -644,24 +566,80 @@ async fn restore_previous_stopped_config(
     old_config: &Config,
     state: &Arc<AppState>,
 ) -> AppResult<()> {
-    let has_sub_nodes = regenerate_without_restart_runtime(old_config, state).await?;
-    update_config_warning(old_config, state, has_sub_nodes).await;
+    let outcome =
+        regenerate_without_restart_runtime(old_config, state, SubFetchPolicy::CacheOnly).await?;
+    update_config_warning(old_config, state, &outcome).await;
     Ok(())
 }
 
-/// Returns `true` if at least one subscription node was fetched successfully.
-pub async fn gen_config(config: &Config, state: &Arc<AppState>) -> AppResult<bool> {
-    let (my_outbounds, my_names) = collect_manual_outbounds(config);
-    let mut final_outbounds: Vec<serde_json::Value> = vec![];
-    let mut final_node_names: Vec<String> = vec![];
+/// 什么时候允许联网抓订阅。
+///
+/// 订阅链接常常只有几分钟有效期，所以"顺手刷新一下"不是善意而是破坏：抓取必然失败，
+/// 而失败会连锁触发回滚。默认一律走本地缓存，只有用户明确要求时才联网。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SubFetchPolicy {
+    /// 永不联网。除下面三种情形外的所有路径都用这个。
+    CacheOnly,
+    /// 仅当缓存里一个节点都没有时抓一次（首装、用户删了 data/cache、缓存 schema 升级）。
+    /// 这是唯一无需用户手势即可联网的路径。
+    CacheOrBootstrap,
+    /// 只抓指定的订阅，其余读缓存。用于"新增订阅"。
+    FetchOnly(Vec<String>),
+    /// 抓取全部。仅由用户点击"刷新订阅"触发。
+    FetchAll,
+}
 
-    {
-        let mut status_map = state.sub_status.lock().await;
-        status_map.retain(|url, _| config.subs.contains(url));
+impl SubFetchPolicy {
+    fn urls_to_fetch(&self, store: &SubNodeStore, subs: &[String]) -> Vec<String> {
+        match self {
+            SubFetchPolicy::CacheOnly => Vec::new(),
+            SubFetchPolicy::CacheOrBootstrap => {
+                if store.is_empty_for(subs) {
+                    subs.to_vec()
+                } else {
+                    Vec::new()
+                }
+            }
+            SubFetchPolicy::FetchOnly(urls) => {
+                subs.iter().filter(|u| urls.contains(u)).cloned().collect()
+            }
+            SubFetchPolicy::FetchAll => subs.to_vec(),
+        }
     }
+}
 
-    let sub_futures: Vec<_> = config
-        .subs
+/// 一次配置生成的结果。
+pub struct GenOutcome {
+    /// 订阅节点总数（含缓存命中的）。
+    pub sub_nodes: usize,
+    /// 至少有一个订阅处于失效状态。用于展示，不作为错误。
+    pub any_expired: bool,
+}
+
+impl GenOutcome {
+    pub fn has_sub_nodes(&self) -> bool {
+        self.sub_nodes > 0
+    }
+}
+
+fn gen_outcome_from_store(config: &Config, store: &SubNodeStore) -> GenOutcome {
+    GenOutcome {
+        sub_nodes: config.subs.iter().map(|url| store.node_count(url)).sum(),
+        any_expired: config
+            .subs
+            .iter()
+            .any(|url| store.subs.get(url).is_some_and(|entry| entry.stale)),
+    }
+}
+
+async fn fetch_subscriptions(
+    urls: &[String],
+    state: &Arc<AppState>,
+) -> Vec<(
+    String,
+    Result<crate::services::subscription::FetchResult, String>,
+)> {
+    let sub_futures: Vec<_> = urls
         .iter()
         .map(|sub| {
             let sub = sub.clone();
@@ -696,11 +674,11 @@ pub async fn gen_config(config: &Config, state: &Arc<AppState>) -> AppResult<boo
                         (sub.clone(), Ok(fetch_result))
                     }
                     Ok(Err(e)) => {
-                        error!(url = %sub, error = %e, "Failed to fetch subscription");
+                        warn!(url = %sub, error = %e, "Subscription fetch failed, keeping cached nodes");
                         (sub.clone(), Err(e.to_string()))
                     }
                     Err(_) => {
-                        error!(url = %sub, timeout_secs = 30, "Subscription fetch timed out");
+                        warn!(url = %sub, timeout_secs = 30, "Subscription fetch timed out, keeping cached nodes");
                         (sub.clone(), Err("Request timeout".to_string()))
                     }
                 }
@@ -708,59 +686,247 @@ pub async fn gen_config(config: &Config, state: &Arc<AppState>) -> AppResult<boo
         })
         .collect();
 
-    // 使用 buffer_unordered 限制并发数，避免同时发起过多请求
-    let mut results: Vec<_> = stream::iter(sub_futures)
+    // 限制并发，避免同时发起过多请求。
+    stream::iter(sub_futures)
         .buffer_unordered(MAX_CONCURRENT_SUBS)
         .collect()
-        .await;
+        .await
+}
 
-    // 按原始顺序排序结果
-    let subs_order: Vec<String> = config.subs.clone();
-    results.sort_by_key(|(url, _)| {
-        subs_order
-            .iter()
-            .position(|s| s == url)
-            .unwrap_or(usize::MAX)
-    });
+pub(crate) struct FetchedSubscriptionNodes {
+    pub nodes: Vec<StoredNode>,
+    pub fetched_at: String,
+    pub parse_warning: Option<String>,
+}
 
-    for (url, result) in results {
-        let status = match result {
-            Ok(fetch_result) => {
-                let count = fetch_result.node_names.len();
-                final_node_names.extend(fetch_result.node_names);
-                final_outbounds.extend(fetch_result.outbounds);
-
-                let error_info = if !fetch_result.parse_errors.is_empty() {
-                    Some(format!(
-                        "{} nodes skipped due to parse errors",
-                        fetch_result.parse_errors.len()
-                    ))
-                } else if count == 0 && fetch_result.total_count > 0 {
-                    Some("All nodes invalid (missing required fields)".into())
-                } else if count == 0 {
-                    Some("No nodes found".into())
-                } else {
-                    None
-                };
-
-                SubStatus {
-                    url: url.clone(),
-                    success: count > 0,
-                    node_count: count,
-                    error: error_info,
-                }
-            }
-            Err(e) => SubStatus {
-                url: url.clone(),
-                success: false,
-                node_count: 0,
-                error: Some(e),
-            },
-        };
-        state.sub_status.lock().await.insert(url, status);
+pub(crate) async fn fetch_subscription_nodes(
+    url: &str,
+    state: &Arc<AppState>,
+) -> AppResult<FetchedSubscriptionNodes> {
+    let mut results = fetch_subscriptions(&[url.to_string()], state).await;
+    let (_, result) = results
+        .pop()
+        .ok_or_else(|| AppError::message("Subscription fetch returned no result"))?;
+    let fetch_result = result.map_err(AppError::message)?;
+    if fetch_result.node_names.is_empty() {
+        return Err(AppError::message("Subscription returned no nodes"));
     }
 
-    let has_sub_nodes = !final_node_names.is_empty();
+    let parse_warning = if fetch_result.parse_errors.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "{} nodes skipped due to parse errors",
+            fetch_result.parse_errors.len()
+        ))
+    };
+    let nodes = fetch_result
+        .node_names
+        .into_iter()
+        .zip(fetch_result.outbounds)
+        .map(|(name, outbound)| StoredNode { name, outbound })
+        .collect();
+
+    Ok(FetchedSubscriptionNodes {
+        nodes,
+        fetched_at: now_rfc3339(),
+        parse_warning,
+    })
+}
+
+fn extract_legacy_subscription_nodes(
+    config: &Config,
+    sing_box_config: &serde_json::Value,
+) -> Vec<StoredNode> {
+    let Some(outbounds) = sing_box_config.get("outbounds").and_then(|value| value.as_array()) else {
+        return Vec::new();
+    };
+    let Some(selector) = outbounds.iter().find(|outbound| {
+        outbound.get("type").and_then(|value| value.as_str()) == Some("selector")
+            && outbound.get("tag").and_then(|value| value.as_str()) == Some("proxy")
+    }) else {
+        return Vec::new();
+    };
+    let Some(selector_tags) = selector.get("outbounds").and_then(|value| value.as_array()) else {
+        return Vec::new();
+    };
+
+    let (manual_outbounds, manual_names) = collect_manual_outbounds(config);
+    let (manual_names, _) = normalize_outbound_tags(manual_names, manual_outbounds);
+    let selector_names: Vec<&str> = selector_tags.iter().filter_map(|tag| tag.as_str()).collect();
+    if selector_names.len() < manual_names.len()
+        || selector_names[..manual_names.len()]
+            .iter()
+            .copied()
+            .ne(manual_names.iter().map(String::as_str))
+    {
+        warn!("Legacy config cache does not match current manual nodes; skipping subscription node import");
+        return Vec::new();
+    }
+
+    selector_names[manual_names.len()..]
+        .iter()
+        .filter_map(|tag| {
+            outbounds
+                .iter()
+                .find(|outbound| outbound.get("tag").and_then(|value| value.as_str()) == Some(*tag))
+                .cloned()
+                .map(|outbound| StoredNode {
+                    name: (*tag).to_string(),
+                    outbound,
+                })
+        })
+        .collect()
+}
+
+pub async fn migrate_legacy_subscription_nodes(config: &Config) -> AppResult<bool> {
+    if config.subs.is_empty() {
+        return Ok(false);
+    }
+
+    let mut store = load_sub_nodes().await;
+    if !store.is_empty_for(&config.subs) {
+        return Ok(false);
+    }
+
+    let cache_path = get_config_cache_path();
+    let cached = match tokio::fs::read_to_string(&cache_path).await {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            warn!(path = ?cache_path, error = %error, "Failed to read legacy config cache for subscription node import");
+            return Ok(false);
+        }
+    };
+    let cached: serde_json::Value = match serde_json::from_str(&cached) {
+        Ok(value) => value,
+        Err(error) => {
+            warn!(path = ?cache_path, error = %error, "Failed to parse legacy config cache for subscription node import");
+            return Ok(false);
+        }
+    };
+    let nodes = extract_legacy_subscription_nodes(config, &cached);
+    if nodes.is_empty() {
+        return Ok(false);
+    }
+
+    let url = &config.subs[0];
+    let node_count = nodes.len();
+    store.record_success(url, nodes, None);
+    save_sub_nodes(&store).await?;
+    info!(url = %url, nodes = node_count, "Imported subscription nodes from legacy config cache");
+    Ok(true)
+}
+
+pub async fn gen_config(
+    config: &Config,
+    state: &Arc<AppState>,
+    policy: SubFetchPolicy,
+) -> AppResult<GenOutcome> {
+    let (my_outbounds, my_names) = collect_manual_outbounds(config);
+
+    migrate_legacy_subscription_nodes(config).await?;
+    let mut store = load_sub_nodes().await;
+    let store_before = store.clone();
+    // 订阅被删掉时，它的节点也要跟着走——这一步不需要联网。
+    store.retain_urls(&config.subs);
+
+    let to_fetch = policy.urls_to_fetch(&store, &config.subs);
+    if to_fetch.is_empty() {
+        info!(
+            subs = config.subs.len(),
+            "Using cached subscription nodes, not fetching"
+        );
+    }
+
+    // 本轮节点列表是否完整——决定分享端口账本能不能回收失效条目。
+    //
+    // 判定刻意保守：抓取失败、解析丢节点、以及"订阅返回了 0 个节点"都算不完整。
+    // 最后一条是必须的：机场限额/过期时经常返回 HTTP 200 + 一个错误 JSON，
+    // 解析得到零节点且零错误，看起来和"订阅确实空了"一模一样。
+    // 两种误判的代价不对等——误判成不完整只会让账本多留几条废记录（真装满了
+    // 会在分配时明确报错），误判成完整则会把用户已经分发出去的端口收走。
+    let mut node_list_is_complete = true;
+    let mut fetch_errors: std::collections::HashMap<String, Option<String>> = Default::default();
+
+    let results = fetch_subscriptions(&to_fetch, state).await;
+    for (url, result) in results {
+        match result {
+            Ok(fetch_result) => {
+                let count = fetch_result.node_names.len();
+                if count == 0 {
+                    // 抓到了但一个节点都没有：多半是限额/过期返回的错误页。
+                    // 当成失败处理，保留缓存里的节点。
+                    node_list_is_complete = false;
+                    store.record_failure(&url, "Subscription returned no nodes".to_string());
+                    fetch_errors.insert(url, None);
+                    continue;
+                }
+
+                if !fetch_result.parse_errors.is_empty() {
+                    node_list_is_complete = false;
+                    fetch_errors.insert(
+                        url.clone(),
+                        Some(format!(
+                            "{} nodes skipped due to parse errors",
+                            fetch_result.parse_errors.len()
+                        )),
+                    );
+                } else {
+                    fetch_errors.insert(url.clone(), None);
+                }
+
+                let nodes = fetch_result
+                    .node_names
+                    .into_iter()
+                    .zip(fetch_result.outbounds)
+                    .map(|(name, outbound)| StoredNode { name, outbound })
+                    .collect();
+                store.record_success(&url, nodes, Some(now_rfc3339()));
+            }
+            Err(e) => {
+                // 关键：不动已有节点。链接失效不该让用户失去已经拿到的节点。
+                node_list_is_complete = false;
+                store.record_failure(&url, e);
+                fetch_errors.insert(url, None);
+            }
+        }
+    }
+
+    // 任何一个订阅还没有缓存条目，也算列表不完整。
+    if config
+        .subs
+        .iter()
+        .any(|url| store.node_count(url) == 0 || store.subs.get(url).is_some_and(|e| e.stale))
+    {
+        node_list_is_complete = false;
+    }
+
+    {
+        let mut status_map = state.sub_status.lock().await;
+        status_map.retain(|url, _| config.subs.contains(url));
+        for url in &config.subs {
+            let mut status = store.status_for(url);
+            if let Some(err) = fetch_errors.get(url) {
+                // 本轮确实抓过：区分"刚抓成功"和"抓失败但有缓存"。
+                if !status.state.eq(&crate::models::SubState::Expired) {
+                    status.state = crate::models::SubState::Ok;
+                }
+                status.error = err.clone();
+            }
+            status_map.insert(url.clone(), status);
+        }
+    }
+
+    let outcome = gen_outcome_from_store(config, &store);
+    let (final_node_names, final_outbounds) = store.nodes_in_order(&config.subs);
+
+    let mut share_map = if config.mode == ProxyMode::Pool {
+        load_share_port_map().await
+    } else {
+        SharePortMap::default()
+    };
+    let share_map_before = share_map.clone();
 
     let sing_box_config = build_sing_box_config(
         config,
@@ -768,6 +934,8 @@ pub async fn gen_config(config: &Config, state: &Arc<AppState>) -> AppResult<boo
         my_outbounds,
         final_node_names,
         final_outbounds,
+        &mut share_map,
+        node_list_is_complete,
     )?;
 
     let sing_box_home = get_sing_box_home();
@@ -775,10 +943,27 @@ pub async fn gen_config(config: &Config, state: &Arc<AppState>) -> AppResult<boo
     write_file_atomic(
         &config_output_loc,
         &serde_json::to_string(&sing_box_config)?,
+        "sing-box config",
     )
     .await?;
 
-    Ok(has_sub_nodes)
+    if config.mode == ProxyMode::Pool && share_map != share_map_before {
+        save_share_port_map(&share_map).await?;
+    }
+    if store != store_before {
+        save_sub_nodes(&store).await?;
+    }
+
+    Ok(outcome)
+}
+
+fn now_rfc3339() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("@{secs}")
 }
 
 fn collect_manual_outbounds(config: &Config) -> (Vec<serde_json::Value>, Vec<String>) {
@@ -876,12 +1061,49 @@ fn normalize_outbound_tags(
     (unique_names, unique_outbounds)
 }
 
+pub(crate) fn resolve_node_inventory(config: &Config, store: &SubNodeStore) -> Vec<NodeInfo> {
+    let (manual_outbounds, manual_names) = collect_manual_outbounds(config);
+    let (subscription_names, subscription_outbounds) = store.nodes_in_order(&config.subs);
+    let (_, outbounds) = normalize_outbound_tags(
+        manual_names.into_iter().chain(subscription_names).collect(),
+        manual_outbounds
+            .into_iter()
+            .chain(subscription_outbounds)
+            .collect(),
+    );
+
+    outbounds
+        .iter()
+        .filter_map(|outbound| {
+            crate::services::node_parser::node_display_info(outbound)
+                .map(|info| NodeInfo {
+                    tag: info.tag,
+                    server: info.server,
+                    server_port: info.server_port,
+                    node_type: info.node_type,
+                    sni: info.sni,
+                })
+                .map_err(|error| {
+                    warn!(error = %error, "Skipping invalid cached node in inventory");
+                })
+                .ok()
+        })
+        .collect()
+}
+
+/// 构建 sing-box 配置。纯函数：不碰磁盘。
+///
+/// `share_map` 是分享端口的分配账本，就地更新；落盘由调用方在构建成功之后完成，
+/// 这样一次失败的构建不会留下已经改过的账本。`prune_share_ports` 表示本次传入的
+/// 节点列表是否完整（所有订阅都抓取成功），只有完整时才允许回收失效 tag 的端口。
 fn build_sing_box_config(
     config: &Config,
     my_names: Vec<String>,
     my_outbounds: Vec<serde_json::Value>,
     final_node_names: Vec<String>,
     final_outbounds: Vec<serde_json::Value>,
+    share_map: &mut SharePortMap,
+    prune_share_ports: bool,
 ) -> AppResult<serde_json::Value> {
     let total_nodes = my_outbounds.len() + final_outbounds.len();
     if total_nodes == 0 {
@@ -912,9 +1134,34 @@ fn build_sing_box_config(
         my_outbounds.into_iter().chain(final_outbounds).collect(),
     );
 
-    let tun_process = config.tun_process.normalized().map_err(AppError::message)?;
-    let mut sing_box_config =
-        get_config_template(config.route_mode, &tun_process, &config.custom_rules)?;
+    let process_proxy = config
+        .tun_process
+        .normalized()
+        .map_err(AppError::message)?;
+    let pool = config.share.normalized().map_err(AppError::message)?;
+    if config.mode == ProxyMode::Process {
+        process_proxy.validate_active().map_err(AppError::message)?;
+    }
+
+    let share_bindings = if config.mode == ProxyMode::Pool {
+        let reserved = reserved_system_ports(config.port, Some(socks_port));
+        allocate_share_ports(
+            share_map,
+            &node_names,
+            pool.base_port,
+            &reserved,
+            prune_share_ports,
+        )?
+    } else {
+        Vec::new()
+    };
+
+    let mut sing_box_config = get_config_template(
+        config.mode,
+        &process_proxy,
+        &config.custom_rules,
+        &share_bindings,
+    )?;
     if let Some(inbounds) = sing_box_config["inbounds"].as_array_mut() {
         inbounds.push(serde_json::json!({
             "type": "socks",
@@ -922,6 +1169,24 @@ fn build_sing_box_config(
             "listen": socks_listen,
             "listen_port": socks_port
         }));
+        for (_tag, port) in &share_bindings {
+            let mut inbound = serde_json::json!({
+                "type": "socks",
+                "tag": share_inbound_tag(*port),
+                "listen": pool.listen,
+                "listen_port": port
+            });
+            if pool.has_auth() {
+                inbound.as_object_mut().unwrap().insert(
+                    "users".to_string(),
+                    serde_json::json!([{
+                        "username": pool.username,
+                        "password": pool.password
+                    }]),
+                );
+            }
+            inbounds.push(inbound);
+        }
     }
     if let Some(selector_outbounds) = sing_box_config["outbounds"][0].get_mut("outbounds") {
         if let Some(arr) = selector_outbounds.as_array_mut() {
@@ -948,7 +1213,7 @@ fn parse_custom_rules(custom_rules: &[String]) -> Vec<serde_json::Value> {
 }
 
 fn process_match_fields(
-    process_match: &TunProcessMatch,
+    process_match: &ProcessMatch,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut fields = serde_json::Map::new();
     if !process_match.names.is_empty() {
@@ -972,7 +1237,7 @@ fn process_match_fields(
     fields
 }
 
-fn process_rule(process_match: &TunProcessMatch, extras: serde_json::Value) -> serde_json::Value {
+fn process_rule(process_match: &ProcessMatch, extras: serde_json::Value) -> serde_json::Value {
     let mut rule = process_match_fields(process_match);
     if let Some(extras) = extras.as_object() {
         for (key, value) in extras {
@@ -986,15 +1251,28 @@ fn socks_in_proxy_rule() -> serde_json::Value {
     serde_json::json!({"inbound": ["socks-in"], "action": "route", "outbound": "proxy"})
 }
 
-fn route_prelude_rules() -> Vec<serde_json::Value> {
-    vec![
-        serde_json::json!({"action": "sniff"}),
-        socks_in_proxy_rule(),
-    ]
+fn share_inbound_route_rules(share_bindings: &[(String, u16)]) -> Vec<serde_json::Value> {
+    share_bindings
+        .iter()
+        .map(|(tag, port)| {
+            serde_json::json!({
+                "inbound": [share_inbound_tag(*port)],
+                "action": "route",
+                "outbound": tag
+            })
+        })
+        .collect()
+}
+
+fn route_prelude_rules(share_bindings: &[(String, u16)]) -> Vec<serde_json::Value> {
+    let mut rules = vec![serde_json::json!({"action": "sniff"})];
+    rules.extend(share_inbound_route_rules(share_bindings));
+    rules.push(socks_in_proxy_rule());
+    rules
 }
 
 fn bypass_or_direct_rule(
-    process_match: &TunProcessMatch,
+    process_match: &ProcessMatch,
     bypass_action: BypassAction,
     protocol: Option<&str>,
 ) -> serde_json::Value {
@@ -1018,7 +1296,7 @@ fn bypass_or_direct_rule(
 
 fn merge_process_match_into_rule(
     mut rule: serde_json::Value,
-    process_match: &TunProcessMatch,
+    process_match: &ProcessMatch,
 ) -> AppResult<serde_json::Value> {
     let Some(obj) = rule.as_object_mut() else {
         return Ok(rule);
@@ -1027,7 +1305,7 @@ fn merge_process_match_into_rule(
     for key in ["process_name", "process_path", "process_path_regex"] {
         if obj.contains_key(key) {
             return Err(AppError::message(format!(
-                "process_only 模式下 custom_rules 不能包含 {key}，请使用进程代理清单统一控制"
+                "白名单模式下 custom_rules 不能包含 {key}，请使用进程代理清单统一控制"
             )));
         }
     }
@@ -1038,125 +1316,87 @@ fn merge_process_match_into_rule(
     Ok(rule)
 }
 
-fn build_dns_rules(route_mode: RouteMode) -> Vec<serde_json::Value> {
-    match route_mode {
-        RouteMode::Tunnel => Vec::new(),
-        RouteMode::Global | RouteMode::Rule => {
-            vec![serde_json::json!({
-                "rule_set": ["chinasite"],
-                "action": "route",
-                "server": "local"
-            })]
-        }
-    }
+fn build_dns_rules() -> Vec<serde_json::Value> {
+    vec![serde_json::json!({
+        "rule_set": ["chinasite"],
+        "action": "route",
+        "server": "local"
+    })]
 }
 
-fn build_default_route_rules(
-    route_mode: RouteMode,
-    custom_rules: &[String],
-) -> Vec<serde_json::Value> {
-    let mut route_rules = route_prelude_rules();
-    append_default_route_tail(&mut route_rules, route_mode, custom_rules);
-
-    route_rules
-}
-
-fn append_default_route_tail(
+fn append_global_route_tail(
     route_rules: &mut Vec<serde_json::Value>,
-    route_mode: RouteMode,
     custom_rules: &[String],
 ) {
     route_rules.push(serde_json::json!({"protocol": "dns", "action": "hijack-dns"}));
-
-    if route_mode == RouteMode::Rule {
-        route_rules.extend(parse_custom_rules(custom_rules));
-    }
-
+    route_rules.extend(parse_custom_rules(custom_rules));
     route_rules
         .push(serde_json::json!({"ip_is_private": true, "action": "route", "outbound": "direct"}));
-
-    if route_mode == RouteMode::Rule {
-        route_rules.push(serde_json::json!({
-            "rule_set": ["chinaip", "chinasite"],
-            "action": "route",
-            "outbound": "direct"
-        }));
-    }
 }
 
-fn build_global_bypass_route_rules(
-    route_mode: RouteMode,
-    tun_process: &TunProcessConfig,
+fn build_global_route_rules(custom_rules: &[String]) -> Vec<serde_json::Value> {
+    let mut route_rules = route_prelude_rules(&[]);
+    append_global_route_tail(&mut route_rules, custom_rules);
+    route_rules
+}
+
+fn build_blacklist_route_rules(
+    process_proxy: &ProcessProxyConfig,
     custom_rules: &[String],
 ) -> Vec<serde_json::Value> {
-    let mut route_rules = route_prelude_rules();
+    let mut route_rules = route_prelude_rules(&[]);
 
-    if tun_process.dns_follow_process {
+    if process_proxy.dns_follow_process {
         route_rules.push(bypass_or_direct_rule(
-            &tun_process.r#match,
-            tun_process.bypass_action,
+            &process_proxy.r#match,
+            process_proxy.bypass_action,
             Some("dns"),
         ));
     }
     route_rules.push(bypass_or_direct_rule(
-        &tun_process.r#match,
-        tun_process.bypass_action,
+        &process_proxy.r#match,
+        process_proxy.bypass_action,
         None,
     ));
-    append_default_route_tail(&mut route_rules, route_mode, custom_rules);
+    append_global_route_tail(&mut route_rules, custom_rules);
 
     route_rules
 }
 
-fn build_process_only_route_rules(
-    route_mode: RouteMode,
-    tun_process: &TunProcessConfig,
+fn build_whitelist_route_rules(
+    process_proxy: &ProcessProxyConfig,
     custom_rules: &[String],
 ) -> AppResult<Vec<serde_json::Value>> {
-    let mut route_rules = route_prelude_rules();
+    let mut route_rules = route_prelude_rules(&[]);
 
-    if tun_process.dns_follow_process {
+    if process_proxy.dns_follow_process {
         route_rules.push(process_rule(
-            &tun_process.r#match,
+            &process_proxy.r#match,
             serde_json::json!({"protocol": "dns", "action": "hijack-dns"}),
         ));
     }
 
-    if route_mode == RouteMode::Rule {
-        for custom_rule in parse_custom_rules(custom_rules) {
-            route_rules.push(merge_process_match_into_rule(
-                custom_rule,
-                &tun_process.r#match,
-            )?);
-        }
+    for custom_rule in parse_custom_rules(custom_rules) {
+        route_rules.push(merge_process_match_into_rule(
+            custom_rule,
+            &process_proxy.r#match,
+        )?);
     }
 
     route_rules.push(process_rule(
-        &tun_process.r#match,
+        &process_proxy.r#match,
         serde_json::json!({"ip_is_private": true, "action": "route", "outbound": "direct"}),
     ));
-
-    if route_mode == RouteMode::Rule {
-        route_rules.push(process_rule(
-            &tun_process.r#match,
-            serde_json::json!({
-                "rule_set": ["chinaip", "chinasite"],
-                "action": "route",
-                "outbound": "direct"
-            }),
-        ));
-    }
-
     route_rules.push(process_rule(
-        &tun_process.r#match,
+        &process_proxy.r#match,
         serde_json::json!({"action": "route", "outbound": "proxy"}),
     ));
 
     Ok(route_rules)
 }
 
-fn route_final(tun_process: &TunProcessConfig) -> &'static str {
-    if tun_process.enabled && tun_process.mode == TunProcessMode::ProcessOnly {
+fn route_final(mode: ProxyMode, process_proxy: &ProcessProxyConfig) -> &'static str {
+    if mode == ProxyMode::Process && process_proxy.mode == ProcessListMode::Whitelist {
         "direct"
     } else {
         "proxy"
@@ -1164,35 +1404,50 @@ fn route_final(tun_process: &TunProcessConfig) -> &'static str {
 }
 
 fn build_route_rules(
-    route_mode: RouteMode,
-    tun_process: &TunProcessConfig,
+    mode: ProxyMode,
+    process_proxy: &ProcessProxyConfig,
     custom_rules: &[String],
+    share_bindings: &[(String, u16)],
 ) -> AppResult<Vec<serde_json::Value>> {
-    if !tun_process.enabled {
-        return Ok(build_default_route_rules(route_mode, custom_rules));
-    }
-
-    match tun_process.mode {
-        TunProcessMode::GlobalBypass => Ok(build_global_bypass_route_rules(
-            route_mode,
-            tun_process,
-            custom_rules,
-        )),
-        TunProcessMode::ProcessOnly => {
-            build_process_only_route_rules(route_mode, tun_process, custom_rules)
-        }
+    match mode {
+        ProxyMode::Global => Ok(build_global_route_rules(custom_rules)),
+        ProxyMode::Process => match process_proxy.mode {
+            ProcessListMode::Blacklist => {
+                Ok(build_blacklist_route_rules(process_proxy, custom_rules))
+            }
+            ProcessListMode::Whitelist => {
+                build_whitelist_route_rules(process_proxy, custom_rules)
+            }
+        },
+        ProxyMode::Pool => Ok(route_prelude_rules(share_bindings)),
     }
 }
 
 fn get_config_template(
-    route_mode: RouteMode,
-    tun_process: &TunProcessConfig,
+    mode: ProxyMode,
+    process_proxy: &ProcessProxyConfig,
     custom_rules: &[String],
+    share_bindings: &[(String, u16)],
 ) -> AppResult<serde_json::Value> {
-    let route_rules = build_route_rules(route_mode, tun_process, custom_rules)?;
-    let dns_rules = build_dns_rules(route_mode);
+    let route_rules = build_route_rules(mode, process_proxy, custom_rules, share_bindings)?;
+    let dns_rules = build_dns_rules();
     let default_domain_resolver = "local";
-    let route_final = route_final(tun_process);
+    let route_final = route_final(mode, process_proxy);
+    let inbounds = if mode == ProxyMode::Pool {
+        Vec::new()
+    } else {
+        vec![serde_json::json!({
+            "type": "tun",
+            "tag": "tun-in",
+            "interface_name": "sing-tun",
+            "address": ["172.18.0.1/30"],
+            "mtu": 9000,
+            "auto_route": true,
+            "strict_route": true,
+            "auto_redirect": true,
+            "dns_mode": "disabled"
+        })]
+    };
 
     Ok(serde_json::json!({
         "log": {"disabled": false, "timestamp": true, "level": "info"},
@@ -1207,9 +1462,7 @@ fn get_config_template(
             ],
             "rules": dns_rules
         },
-        "inbounds": [
-            {"type": "tun", "tag": "tun-in", "interface_name": "sing-tun", "address": ["172.18.0.1/30"], "mtu": 9000, "auto_route": true, "strict_route": true, "auto_redirect": true, "dns_mode": "disabled"}
-        ],
+        "inbounds": inbounds,
         "outbounds": [
             {"type": "selector", "tag": "proxy", "outbounds": []},
             {"type": "direct", "tag": "direct"}
@@ -1230,12 +1483,146 @@ fn get_config_template(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_routing_to_sing_box_config, build_sing_box_config, collect_manual_outbounds,
-        config_cache_fingerprint, config_with_route_override, normalize_cached_sing_box_config,
-        routing_only_change, save_config_to,
+        collect_manual_outbounds, config_cache_fingerprint, normalize_cached_sing_box_config,
+        extract_legacy_subscription_nodes, resolve_node_inventory, save_config_to, SubFetchPolicy,
     };
-    use crate::models::{Config, RouteMode, TunProcessConfig, TunProcessMatch, TunProcessMode};
+    use crate::error::AppResult;
+    use crate::models::{
+        Config, PoolConfig, ProcessListMode, ProcessMatch, ProcessProxyConfig, ProxyMode,
+    };
+    use crate::services::share_ports::SharePortMap;
+    use crate::services::sub_nodes::SubNodeStore;
     use serde_json::json;
+
+    #[test]
+    fn cache_only_never_fetches() {
+        let store = SubNodeStore::default();
+        let subs = vec!["a".to_string(), "b".to_string()];
+
+        // 即使缓存彻底是空的，CacheOnly 也不许联网。
+        assert!(SubFetchPolicy::CacheOnly
+            .urls_to_fetch(&store, &subs)
+            .is_empty());
+    }
+
+    #[test]
+    fn bootstrap_fetches_only_when_cache_is_empty() {
+        let subs = vec!["a".to_string(), "b".to_string()];
+        let empty = SubNodeStore::default();
+        assert_eq!(
+            SubFetchPolicy::CacheOrBootstrap.urls_to_fetch(&empty, &subs),
+            subs,
+            "缓存为空时做一次首装抓取"
+        );
+
+        let mut primed = SubNodeStore::default();
+        primed.record_success(
+            "a",
+            vec![crate::services::sub_nodes::StoredNode {
+                name: "n1".to_string(),
+                outbound: json!({}),
+            }],
+            None,
+        );
+        assert!(
+            SubFetchPolicy::CacheOrBootstrap
+                .urls_to_fetch(&primed, &subs)
+                .is_empty(),
+            "只要有任何缓存节点就不再自动抓取"
+        );
+    }
+
+    #[test]
+    fn fetch_only_targets_the_named_subscription() {
+        let store = SubNodeStore::default();
+        let subs = vec!["a".to_string(), "b".to_string()];
+
+        let picked = SubFetchPolicy::FetchOnly(vec!["b".to_string()]).urls_to_fetch(&store, &subs);
+        assert_eq!(picked, vec!["b".to_string()], "新增订阅只抓新增的那一个");
+
+        // 不在配置里的 URL 不会被抓。
+        let bogus = SubFetchPolicy::FetchOnly(vec!["zzz".to_string()]).urls_to_fetch(&store, &subs);
+        assert!(bogus.is_empty());
+    }
+
+    #[test]
+    fn fetch_all_targets_every_subscription() {
+        let store = SubNodeStore::default();
+        let subs = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(SubFetchPolicy::FetchAll.urls_to_fetch(&store, &subs), subs);
+    }
+
+    #[test]
+    fn legacy_config_cache_imports_nodes_after_manual_selector_entries() {
+        let config = Config {
+            subs: vec!["https://example.com/sub".to_string()],
+            nodes: vec![
+                r#"{"type":"socks","tag":"manual","server":"127.0.0.1","server_port":1081}"#
+                    .to_string(),
+            ],
+            ..Default::default()
+        };
+        let cached = json!({
+            "outbounds": [
+                {"type":"selector","tag":"proxy","outbounds":["manual","sub-a","sub-b"]},
+                {"type":"direct","tag":"direct"},
+                {"type":"socks","tag":"manual","server":"127.0.0.1","server_port":1081},
+                {"type":"socks","tag":"sub-a","server":"a.example.com","server_port":1080},
+                {"type":"http","tag":"sub-b","server":"b.example.com","server_port":8080}
+            ]
+        });
+
+        let imported = extract_legacy_subscription_nodes(&config, &cached);
+
+        assert_eq!(
+            imported.iter().map(|node| node.name.as_str()).collect::<Vec<_>>(),
+            vec!["sub-a", "sub-b"]
+        );
+        assert_eq!(imported[0].outbound["server"], "a.example.com");
+    }
+
+    #[test]
+    fn legacy_config_cache_rejects_a_different_manual_node_prefix() {
+        let config = Config {
+            subs: vec!["https://example.com/sub".to_string()],
+            nodes: vec![
+                r#"{"type":"socks","tag":"manual","server":"127.0.0.1","server_port":1081}"#
+                    .to_string(),
+            ],
+            ..Default::default()
+        };
+        let cached = json!({
+            "outbounds": [
+                {"type":"selector","tag":"proxy","outbounds":["different-manual","sub-a"]},
+                {"type":"direct","tag":"direct"},
+                {"type":"socks","tag":"different-manual","server":"127.0.0.1","server_port":1081},
+                {"type":"socks","tag":"sub-a","server":"a.example.com","server_port":1080}
+            ]
+        });
+
+        assert!(extract_legacy_subscription_nodes(&config, &cached).is_empty());
+    }
+
+    /// 构建器现在是纯函数，账本由调用方持有。绝大多数用例不关心分享模式，
+    /// 给它们一本一次性的空账本即可——不再需要环境变量注入和全局测试锁。
+    fn build_sing_box_config(
+        config: &Config,
+        my_names: Vec<String>,
+        my_outbounds: Vec<serde_json::Value>,
+        final_node_names: Vec<String>,
+        final_outbounds: Vec<serde_json::Value>,
+    ) -> AppResult<serde_json::Value> {
+        let mut share_map = SharePortMap::default();
+        super::build_sing_box_config(
+            config,
+            my_names,
+            my_outbounds,
+            final_node_names,
+            final_outbounds,
+            &mut share_map,
+            true,
+        )
+    }
 
     fn manual_outbound() -> serde_json::Value {
         json!({
@@ -1247,35 +1634,25 @@ mod tests {
         })
     }
 
-    fn tun_process(mode: TunProcessMode) -> TunProcessConfig {
-        TunProcessConfig {
-            enabled: true,
+    fn process_proxy(mode: ProcessListMode) -> ProcessProxyConfig {
+        ProcessProxyConfig {
             mode,
-            r#match: TunProcessMatch {
+            r#match: ProcessMatch {
                 names: vec!["curl".to_string(), "git-remote-https".to_string()],
                 paths: vec![],
                 path_regex: vec![],
             },
             dns_follow_process: true,
             bypass_action: Default::default(),
+            legacy_enabled: false,
         }
     }
 
     #[test]
     fn collect_manual_outbounds_ignores_invalid_json_nodes() {
         let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![
-                r#"{"type":"hysteria2","tag":"manual-a","server":"a.example.com","server_port":443,"password":"p","up_mbps":40,"down_mbps":350,"tls":{"enabled":true,"insecure":true}}"#.to_string(),
-                "{invalid-json".to_string(),
-            ],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
+            nodes: vec![ r#"{"type":"hysteria2","tag":"manual-a","server":"a.example.com","server_port":443,"password":"p","up_mbps":40,"down_mbps":350,"tls":{"enabled":true,"insecure":true}}"#.to_string(), "{invalid-json".to_string(), ],
+            ..Default::default()
         };
 
         let (outbounds, names) = collect_manual_outbounds(&config);
@@ -1289,18 +1666,11 @@ mod tests {
     fn collect_manual_outbounds_preserves_hysteria2_without_default_bandwidth() {
         // 测试：Hysteria2 节点不强制包含带宽默认值
         let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
             nodes: vec![
-                // 不包含 up_mbps/down_mbps 的节点
-                r#"{"type":"hysteria2","tag":"no-bandwidth","server":"example.com","server_port":443,"password":"secret","tls":{"enabled":true}}"#.to_string(),
-            ],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
+    // 不包含 up_mbps/down_mbps 的节点
+    r#"{"type":"hysteria2","tag":"no-bandwidth","server":"example.com","server_port":443,"password":"secret","tls":{"enabled":true}}"#.to_string(),
+],
+            ..Default::default()
         };
 
         let (outbounds, names) = collect_manual_outbounds(&config);
@@ -1315,18 +1685,8 @@ mod tests {
     #[test]
     fn collect_manual_outbounds_preserves_socks_and_http_nodes() {
         let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![
-                r#"{"type":"socks","tag":"socks-a","server":"socks.example.com","server_port":1080}"#.to_string(),
-                r#"{"type":"http","tag":"http-a","server":"http.example.com","server_port":8080,"username":"user","password":"pass"}"#.to_string(),
-            ],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
+            nodes: vec![ r#"{"type":"socks","tag":"socks-a","server":"socks.example.com","server_port":1080}"#.to_string(), r#"{"type":"http","tag":"http-a","server":"http.example.com","server_port":8080,"username":"user","password":"pass"}"#.to_string(), ],
+            ..Default::default()
         };
 
         let (outbounds, names) = collect_manual_outbounds(&config);
@@ -1343,19 +1703,14 @@ mod tests {
     #[test]
     fn build_sing_box_config_merges_nodes_and_valid_custom_rules() {
         let config = Config {
-            port: None,
-            socks_listen: None,
             socks_port: Some(1080),
-            subs: vec![],
-            nodes: vec![],
             custom_rules: vec![
                 r#"{"domain_suffix":["example.com"],"action":"route","outbound":"proxy"}"#
                     .to_string(),
                 "not-json".to_string(),
             ],
-            tun_process: Default::default(),
-            route_mode: RouteMode::Rule,
-            vps_ip: None,
+            mode: ProxyMode::Global,
+            ..Default::default()
         };
 
         let my_outbounds = vec![json!({
@@ -1412,17 +1767,11 @@ mod tests {
     }
 
     #[test]
-    fn build_sing_box_config_global_bypass_adds_process_rules_before_dns_hijack() {
+    fn build_sing_box_config_blacklist_adds_process_rules_before_dns_hijack() {
         let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: tun_process(TunProcessMode::GlobalBypass),
-            route_mode: RouteMode::Global,
-            vps_ip: None,
+            mode: ProxyMode::Process,
+            tun_process: process_proxy(ProcessListMode::Blacklist),
+            ..Default::default()
         };
 
         let built = build_sing_box_config(
@@ -1453,17 +1802,11 @@ mod tests {
     }
 
     #[test]
-    fn build_sing_box_config_process_only_scopes_dns_and_uses_direct_final() {
+    fn build_sing_box_config_whitelist_scopes_dns_and_uses_direct_final() {
         let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: tun_process(TunProcessMode::ProcessOnly),
-            route_mode: RouteMode::Rule,
-            vps_ip: None,
+            mode: ProxyMode::Process,
+            tun_process: process_proxy(ProcessListMode::Whitelist),
+            ..Default::default()
         };
 
         let built = build_sing_box_config(
@@ -1496,17 +1839,11 @@ mod tests {
     }
 
     #[test]
-    fn build_sing_box_config_process_only_forces_socks_in_to_proxy() {
+    fn build_sing_box_config_whitelist_forces_socks_in_to_proxy() {
         let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: tun_process(TunProcessMode::ProcessOnly),
-            route_mode: RouteMode::Global,
-            vps_ip: None,
+            mode: ProxyMode::Process,
+            tun_process: process_proxy(ProcessListMode::Whitelist),
+            ..Default::default()
         };
 
         let built = build_sing_box_config(
@@ -1528,20 +1865,15 @@ mod tests {
     }
 
     #[test]
-    fn build_sing_box_config_process_only_scopes_custom_rules_to_processes() {
+    fn build_sing_box_config_whitelist_scopes_custom_rules_to_processes() {
         let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
             custom_rules: vec![
                 r#"{"domain_suffix":["example.com"],"action":"route","outbound":"direct"}"#
                     .to_string(),
             ],
-            tun_process: tun_process(TunProcessMode::ProcessOnly),
-            route_mode: RouteMode::Rule,
-            vps_ip: None,
+            mode: ProxyMode::Process,
+            tun_process: process_proxy(ProcessListMode::Whitelist),
+            ..Default::default()
         };
 
         let built = build_sing_box_config(
@@ -1565,23 +1897,11 @@ mod tests {
     }
 
     #[test]
-    fn build_sing_box_config_errors_when_enabled_tun_process_has_empty_match() {
+    fn build_sing_box_config_errors_when_active_process_has_empty_match() {
         let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: TunProcessConfig {
-                enabled: true,
-                mode: TunProcessMode::ProcessOnly,
-                r#match: TunProcessMatch::default(),
-                dns_follow_process: true,
-                bypass_action: Default::default(),
-            },
-            route_mode: RouteMode::Rule,
-            vps_ip: None,
+            mode: ProxyMode::Process,
+            tun_process: ProcessProxyConfig::default(),
+            ..Default::default()
         };
 
         let err = build_sing_box_config(
@@ -1597,96 +1917,14 @@ mod tests {
     }
 
     #[test]
-    fn apply_routing_to_sing_box_config_replaces_rules_without_touching_outbounds() {
-        let mut sing_box_config = json!({
-            "dns": {
-                "servers": [{"tag": "local", "type": "udp", "server": "223.5.5.5"}],
-                "rules": []
-            },
-            "route": {
-                "final": "proxy",
-                "default_domain_resolver": "local",
-                "rules": [{"action": "sniff"}],
-                "rule_set": []
-            },
-            "outbounds": [
-                {"type": "selector", "tag": "proxy", "outbounds": ["node-a"]},
-                {"type": "direct", "tag": "direct"},
-                {"type": "hysteria2", "tag": "node-a", "server": "node.example.com", "server_port": 443}
-            ]
-        });
+    fn build_sing_box_config_global_mode_keeps_custom_rules_without_domestic_split() {
         let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec!["https://example.com/sub".to_string()],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: tun_process(TunProcessMode::ProcessOnly),
-            route_mode: RouteMode::Rule,
-            vps_ip: None,
-        };
-
-        apply_routing_to_sing_box_config(&mut sing_box_config, &config).unwrap();
-
-        assert_eq!(sing_box_config["outbounds"][2]["tag"], "node-a");
-        let rules = sing_box_config["route"]["rules"].as_array().unwrap();
-        assert_eq!(
-            rules[1],
-            json!({"inbound": ["socks-in"], "action": "route", "outbound": "proxy"})
-        );
-        assert_eq!(
-            rules[2]["process_name"],
-            json!(["curl", "git-remote-https"])
-        );
-        assert_eq!(rules.last().unwrap()["action"], "route");
-        assert_eq!(rules.last().unwrap()["outbound"], "proxy");
-        assert_eq!(sing_box_config["route"]["final"], "direct");
-    }
-
-    #[test]
-    fn routing_only_change_detects_route_mode_and_tun_process_changes() {
-        let mut old_config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec!["https://example.com/sub".to_string()],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            route_mode: RouteMode::Global,
-            vps_ip: None,
-        };
-        let mut new_config = old_config.clone();
-        new_config.route_mode = RouteMode::Rule;
-
-        assert!(routing_only_change(&old_config, &new_config));
-
-        old_config.route_mode = RouteMode::Rule;
-        new_config.tun_process = tun_process(TunProcessMode::ProcessOnly);
-        assert!(routing_only_change(&old_config, &new_config));
-
-        new_config
-            .subs
-            .push("https://example.com/other".to_string());
-        assert!(!routing_only_change(&old_config, &new_config));
-    }
-
-    #[test]
-    fn build_sing_box_config_global_mode_removes_split_rules() {
-        let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
             custom_rules: vec![
                 r#"{"domain_suffix":["example.com"],"action":"route","outbound":"direct"}"#
                     .to_string(),
             ],
-            tun_process: Default::default(),
-            route_mode: RouteMode::Global,
-            vps_ip: None,
+            mode: ProxyMode::Global,
+            ..Default::default()
         };
 
         let my_outbounds = vec![json!({
@@ -1707,13 +1945,15 @@ mod tests {
         .unwrap();
 
         let rules = built["route"]["rules"].as_array().unwrap();
-        assert_eq!(rules.len(), 4);
+        assert_eq!(rules.len(), 5);
         assert_eq!(rules[0]["action"], "sniff");
         assert_eq!(rules[1]["inbound"], json!(["socks-in"]));
         assert_eq!(rules[1]["outbound"], "proxy");
         assert_eq!(rules[2]["action"], "hijack-dns");
-        assert_eq!(rules[3]["ip_is_private"], true);
-        assert_eq!(rules[3]["outbound"], "direct");
+        assert_eq!(rules[3]["domain_suffix"][0], "example.com");
+        assert_eq!(rules[4]["ip_is_private"], true);
+        assert_eq!(rules[4]["outbound"], "direct");
+        assert!(!rules.iter().any(|rule| rule.get("rule_set").is_some()));
 
         let dns_rules = built["dns"]["rules"].as_array().unwrap();
         assert_eq!(dns_rules.len(), 1);
@@ -1721,37 +1961,8 @@ mod tests {
     }
 
     #[test]
-    fn config_with_route_override_defaults_to_global_mode() {
-        let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            route_mode: RouteMode::Global,
-            vps_ip: None,
-        };
-
-        let runtime_config = config_with_route_override(&config, None);
-
-        assert_eq!(runtime_config.route_mode, RouteMode::Global);
-    }
-
-    #[test]
     fn build_sing_box_config_renames_duplicate_outbound_tags() {
-        let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
-        };
+        let config = Config::default();
 
         let my_outbounds = vec![json!({
             "type": "hysteria2",
@@ -1801,18 +2012,61 @@ mod tests {
     }
 
     #[test]
-    fn build_sing_box_config_renames_tags_reserved_by_template() {
+    fn node_inventory_uses_the_same_normalized_tags_as_selector() {
         let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
+            subs: vec!["sub".to_string()],
+            nodes: vec![serde_json::to_string(&json!({
+                "type": "hysteria2",
+                "tag": "dup",
+                "server": "manual.example.com",
+                "server_port": 443,
+                "password": "manual-secret"
+            }))
+            .unwrap()],
+            ..Default::default()
         };
+        let mut store = SubNodeStore::default();
+        store.record_success(
+            "sub",
+            vec![crate::services::sub_nodes::StoredNode {
+                name: "dup".to_string(),
+                outbound: json!({
+                    "type": "hysteria2",
+                    "tag": "dup",
+                    "server": "sub.example.com",
+                    "server_port": 443,
+                    "password": "sub-secret"
+                }),
+            }],
+            None,
+        );
+
+        let inventory = resolve_node_inventory(&config, &store);
+        let (manual_outbounds, manual_names) = collect_manual_outbounds(&config);
+        let (sub_names, sub_outbounds) = store.nodes_in_order(&config.subs);
+        let built = build_sing_box_config(
+            &config,
+            manual_names,
+            manual_outbounds,
+            sub_names,
+            sub_outbounds,
+        )
+        .unwrap();
+        let selector: Vec<_> = built["outbounds"][0]["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect();
+        let inventory_tags: Vec<_> = inventory.iter().map(|node| node.tag.as_str()).collect();
+
+        assert_eq!(inventory_tags, selector);
+        assert_eq!(inventory_tags, vec!["dup", "dup (2)"]);
+    }
+
+    #[test]
+    fn build_sing_box_config_renames_tags_reserved_by_template() {
+        let config = Config::default();
 
         let my_outbounds = vec![
             json!({
@@ -1857,15 +2111,9 @@ mod tests {
     #[test]
     fn build_sing_box_config_uses_configured_socks_listen_and_port() {
         let config = Config {
-            port: None,
             socks_listen: Some("0.0.0.0".to_string()),
             socks_port: Some(2080),
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
+            ..Default::default()
         };
         let my_outbounds = vec![json!({
             "type": "hysteria2",
@@ -1892,17 +2140,7 @@ mod tests {
 
     #[test]
     fn build_sing_box_config_defaults_to_global_mode_with_local_socks() {
-        let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
-        };
+        let config = Config::default();
 
         let built = build_sing_box_config(
             &config,
@@ -1944,15 +2182,8 @@ mod tests {
     #[test]
     fn build_sing_box_config_supports_global_mode_private_direct() {
         let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            tun_process: Default::default(),
-            route_mode: RouteMode::Global,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            vps_ip: None,
+            mode: ProxyMode::Global,
+            ..Default::default()
         };
 
         let built = build_sing_box_config(
@@ -1984,60 +2215,13 @@ mod tests {
     }
 
     #[test]
-    fn build_sing_box_config_supports_rule_mode_domestic_bypass() {
-        let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            tun_process: Default::default(),
-            route_mode: RouteMode::Rule,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            vps_ip: None,
-        };
-
-        let built = build_sing_box_config(
-            &config,
-            vec!["manual-a".to_string()],
-            vec![json!({
-                "type": "hysteria2",
-                "tag": "manual-a",
-                "server": "manual.example.com",
-                "server_port": 443,
-                "password": "secret"
-            })],
-            vec![],
-            vec![],
-        )
-        .unwrap();
-
-        let dns_rules = built["dns"]["rules"].as_array().unwrap();
-        assert_eq!(dns_rules.len(), 1);
-        assert_eq!(dns_rules[0]["server"], "local");
-
-        let route_rules = built["route"]["rules"].as_array().unwrap();
-        assert_eq!(route_rules.len(), 5);
-        assert_eq!(route_rules[1]["inbound"], json!(["socks-in"]));
-        assert_eq!(route_rules[1]["outbound"], "proxy");
-        assert_eq!(route_rules[3]["ip_is_private"], true);
-        assert_eq!(route_rules[4]["outbound"], "direct");
-        assert_eq!(route_rules[4]["rule_set"][0], "chinaip");
-        assert_eq!(built["route"]["default_domain_resolver"], "local");
-    }
-
-    #[test]
     fn config_cache_fingerprint_ignores_web_port() {
         let mut first = Config {
             port: Some(6161),
-            socks_listen: None,
             socks_port: Some(1080),
-            tun_process: Default::default(),
-            route_mode: RouteMode::Tunnel,
+            mode: ProxyMode::Process,
             subs: vec!["https://example.com/sub".to_string()],
-            nodes: vec![],
-            custom_rules: vec![],
-            vps_ip: None,
+            ..Default::default()
         };
         let mut second = first.clone();
         second.port = Some(7777);
@@ -2069,17 +2253,7 @@ mod tests {
 
     #[test]
     fn build_sing_box_config_errors_when_no_nodes_available() {
-        let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
-        };
+        let config = Config::default();
 
         let err = build_sing_box_config(&config, vec![], vec![], vec![], vec![]).unwrap_err();
 
@@ -2090,56 +2264,22 @@ mod tests {
 
     #[test]
     fn config_has_no_nodes_only_when_subs_and_manual_nodes_empty() {
-        assert!(super::config_has_no_nodes(&Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
-        }));
+        assert!(super::config_has_no_nodes(&Config::default()));
 
         assert!(!super::config_has_no_nodes(&Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
             subs: vec!["https://example.com/sub".to_string()],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
+            ..Default::default()
         }));
 
         assert!(!super::config_has_no_nodes(&Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
             nodes: vec![r#"{"tag":"manual"}"#.to_string()],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
+            ..Default::default()
         }));
     }
 
     #[test]
     fn collect_manual_outbounds_handles_empty_nodes() {
-        let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
-        };
+        let config = Config::default();
 
         let (outbounds, names) = collect_manual_outbounds(&config);
 
@@ -2150,19 +2290,12 @@ mod tests {
     #[test]
     fn collect_manual_outbounds_handles_all_invalid_nodes() {
         let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
             nodes: vec![
                 "not-json".to_string(),
-                r#"{}"#.to_string(),                   // Valid JSON but no tag
-                r#"{"type":"hysteria2"}"#.to_string(), // Valid JSON but no tag
+                r#"{}"#.to_string(),
+                // Valid JSON but no tag r#"{"type":"hysteria2"}"#.to_string(),
             ],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
+            ..Default::default()
         };
 
         let (outbounds, names) = collect_manual_outbounds(&config);
@@ -2174,17 +2307,7 @@ mod tests {
 
     #[test]
     fn build_sing_box_config_preserves_node_order() {
-        let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
-        };
+        let config = Config::default();
 
         let my_outbounds = vec![
             json!({"type": "hysteria2", "tag": "node-1", "server": "s1.example.com", "server_port": 443, "password": "p1"}),
@@ -2214,17 +2337,7 @@ mod tests {
 
     #[test]
     fn build_sing_box_config_handles_no_custom_rules() {
-        let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
-        };
+        let config = Config::default();
 
         let my_outbounds = vec![json!({
             "type": "hysteria2",
@@ -2251,84 +2364,8 @@ mod tests {
     }
 
     #[test]
-    fn build_sing_box_config_splits_direct_route_rules() {
-        let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            route_mode: RouteMode::Rule,
-            vps_ip: None,
-        };
-
-        let my_outbounds = vec![json!({
-            "type": "hysteria2",
-            "tag": "manual-a",
-            "server": "manual.example.com",
-            "server_port": 443,
-            "password": "secret"
-        })];
-
-        let built = build_sing_box_config(
-            &config,
-            vec!["manual-a".to_string()],
-            my_outbounds,
-            vec![],
-            vec![],
-        )
-        .unwrap();
-
-        let rules = built["route"]["rules"].as_array().unwrap();
-
-        assert_eq!(rules[1]["inbound"], json!(["socks-in"]));
-        assert_eq!(rules[1]["outbound"], "proxy");
-
-        assert_eq!(rules[3]["ip_is_private"], true);
-        assert_eq!(rules[3]["outbound"], "direct");
-        assert!(rules[3].get("rule_set").is_none());
-
-        assert_eq!(rules[4]["rule_set"], json!(["chinaip", "chinasite"]));
-        assert_eq!(rules[4]["outbound"], "direct");
-
-        let dns_rules = built["dns"]["rules"].as_array().unwrap();
-        assert!(!dns_rules.is_empty());
-
-        assert_eq!(built["dns"]["disable_cache"], false);
-        assert!(built["dns"].get("cache_capacity").is_none());
-        assert!(built["dns"].get("optimistic").is_none());
-
-        let dns_servers = built["dns"]["servers"].as_array().unwrap();
-        let cfdns = dns_servers
-            .iter()
-            .find(|server| server["tag"] == "cfdns")
-            .unwrap();
-        assert_eq!(cfdns["type"], "udp");
-        assert_eq!(cfdns["server"], "1.1.1.1");
-        assert_eq!(cfdns["detour"], "proxy");
-
-        assert!(dns_servers
-            .iter()
-            .all(|server| server["type"] != "fakeip" && server["tag"] != "fakeip"));
-
-        assert!(built["experimental"].get("cache_file").is_none());
-    }
-
-    #[test]
     fn build_sing_box_config_binds_clash_api_to_localhost() {
-        let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
-        };
+        let config = Config::default();
 
         let built = build_sing_box_config(
             &config,
@@ -2354,19 +2391,12 @@ mod tests {
     #[test]
     fn build_sing_box_config_ignores_all_invalid_custom_rules() {
         let config = Config {
-            port: None,
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
             custom_rules: vec![
                 "not-json".to_string(),
                 "{invalid".to_string(),
                 "".to_string(),
             ],
-            tun_process: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
+            ..Default::default()
         };
 
         let my_outbounds = vec![json!({
@@ -2404,14 +2434,11 @@ mod tests {
 
         let config = Config {
             port: Some(8080),
-            socks_listen: None,
             socks_port: Some(1080),
             subs: vec!["https://example.com/sub".to_string()],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            route_mode: RouteMode::Rule,
-            vps_ip: None,
+            mode: ProxyMode::Process,
+            tun_process: process_proxy(ProcessListMode::Whitelist),
+            ..Default::default()
         };
 
         save_config_to(&config_path, &config).await.unwrap();
@@ -2420,8 +2447,7 @@ mod tests {
         let parsed: Config = serde_yaml::from_str(&content).unwrap();
         assert_eq!(parsed.port, Some(8080));
         assert_eq!(parsed.socks_port, Some(1080));
-        // route_mode is runtime-only and not persisted, parsed value is the default
-        assert_eq!(parsed.route_mode, RouteMode::default());
+        assert_eq!(parsed.mode, ProxyMode::Process);
         assert_eq!(parsed.subs.len(), 1);
 
         // 清理
@@ -2442,7 +2468,7 @@ mod tests {
         // 先创建旧配置
         tokio::fs::write(
             &config_path,
-            "port: 9999\nsocks_port: 1080\nroute_mode: tunnel\nsubs: []\nnodes: []\ncustom_rules: []",
+            "port: 9999\nsocks_port: 1080\nmode: global\nsubs: []\nnodes: []\ncustom_rules: []",
         )
         .await
         .unwrap();
@@ -2450,14 +2476,9 @@ mod tests {
         // 使用原子写入保存新配置
         let config = Config {
             port: Some(7777),
-            socks_listen: None,
             socks_port: Some(2080),
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            route_mode: RouteMode::Rule,
-            vps_ip: None,
+            mode: ProxyMode::Pool,
+            ..Default::default()
         };
         save_config_to(&config_path, &config).await.unwrap();
 
@@ -2479,14 +2500,7 @@ mod tests {
         let config_path = temp_dir.join("config.yaml");
         let config = Config {
             port: Some(6161),
-            socks_listen: None,
-            socks_port: None,
-            subs: vec![],
-            nodes: vec![],
-            custom_rules: vec![],
-            tun_process: Default::default(),
-            route_mode: Default::default(),
-            vps_ip: None,
+            ..Default::default()
         };
 
         save_config_to(&config_path, &config).await.unwrap();
@@ -2507,5 +2521,177 @@ mod tests {
         assert_eq!(before, after);
 
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[test]
+    fn build_sing_box_config_pool_has_no_tun_and_adds_fixed_routes() {
+        let config = Config {
+            socks_port: Some(1080),
+            mode: ProxyMode::Pool,
+            share: PoolConfig {
+                listen: "0.0.0.0".to_string(),
+                base_port: 15000,
+                username: "user".to_string(),
+                password: "pass".to_string(),
+                legacy_enabled: false,
+            },
+            ..Default::default()
+        };
+
+        let mut share_map = SharePortMap::default();
+        let built = super::build_sing_box_config(
+            &config,
+            vec!["node-a".to_string(), "node-b".to_string()],
+            vec![
+                json!({
+                    "type": "hysteria2",
+                    "tag": "node-a",
+                    "server": "a.example.com",
+                    "server_port": 443,
+                    "password": "secret"
+                }),
+                json!({
+                    "type": "hysteria2",
+                    "tag": "node-b",
+                    "server": "b.example.com",
+                    "server_port": 443,
+                    "password": "secret"
+                }),
+            ],
+            vec![],
+            vec![],
+            &mut share_map,
+            true,
+        )
+        .unwrap();
+
+        let inbounds = built["inbounds"].as_array().unwrap();
+        assert_eq!(inbounds.len(), 3);
+        assert!(inbounds.iter().all(|inbound| inbound["type"] != "tun"));
+        assert_eq!(inbounds[1]["tag"], "share-15000");
+        assert_eq!(inbounds[1]["listen_port"], 15000);
+        assert_eq!(inbounds[1]["users"][0]["username"], "user");
+        assert_eq!(inbounds[2]["tag"], "share-15001");
+
+        let rules = built["route"]["rules"].as_array().unwrap();
+        assert_eq!(rules[0]["action"], "sniff");
+        assert_eq!(rules[1]["inbound"], json!(["share-15000"]));
+        assert_eq!(rules[1]["outbound"], "node-a");
+        assert_eq!(rules[2]["inbound"], json!(["share-15001"]));
+        assert_eq!(rules[2]["outbound"], "node-b");
+        assert_eq!(
+            rules[3],
+            json!({"inbound": ["socks-in"], "action": "route", "outbound": "proxy"})
+        );
+
+        // 账本落在调用方手里，构建本身没有碰过磁盘。
+        assert_eq!(share_map.base_port, 15000);
+        assert_eq!(share_map.ports.get("node-a"), Some(&15000));
+        assert_eq!(share_map.ports.get("node-b"), Some(&15001));
+    }
+
+    #[test]
+    fn build_sing_box_config_pool_without_auth_omits_users() {
+        let config = Config {
+            socks_port: Some(1080),
+            mode: ProxyMode::Pool,
+            share: PoolConfig {
+                listen: "0.0.0.0".to_string(),
+                base_port: 16000,
+                username: String::new(),
+                password: String::new(),
+                legacy_enabled: false,
+            },
+            ..Default::default()
+        };
+
+        let built = build_sing_box_config(
+            &config,
+            vec!["solo".to_string()],
+            vec![manual_outbound()],
+            vec![],
+            vec![],
+        )
+        .unwrap();
+
+        let inbound = &built["inbounds"].as_array().unwrap()[1];
+        assert_eq!(inbound["tag"], "share-16000");
+        assert_eq!(inbound["listen"], "0.0.0.0");
+        assert!(inbound.get("users").is_none());
+    }
+
+    #[test]
+    fn config_cache_fingerprint_includes_mode_and_pool_settings() {
+        let mut first = Config::default();
+        let second = first.clone();
+        assert_eq!(
+            config_cache_fingerprint(&first).unwrap(),
+            config_cache_fingerprint(&second).unwrap()
+        );
+
+        first.mode = ProxyMode::Pool;
+        first.share.base_port = 13000;
+        assert_ne!(
+            config_cache_fingerprint(&first).unwrap(),
+            config_cache_fingerprint(&second).unwrap()
+        );
+    }
+
+    #[test]
+    fn pool_port_allocations_survive_mode_roundtrip() {
+        let mut config = Config {
+            mode: ProxyMode::Pool,
+            share: PoolConfig {
+                base_port: 17000,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut share_map = SharePortMap::default();
+        let names = vec!["node-a".to_string(), "node-b".to_string()];
+        let outbounds = vec![manual_outbound(), json!({
+            "type": "hysteria2",
+            "tag": "node-b",
+            "server": "b.example.com",
+            "server_port": 443,
+            "password": "secret"
+        })];
+
+        super::build_sing_box_config(
+            &config,
+            names.clone(),
+            outbounds.clone(),
+            vec![],
+            vec![],
+            &mut share_map,
+            true,
+        )
+        .unwrap();
+        let assigned = share_map.ports.clone();
+
+        config.mode = ProxyMode::Global;
+        super::build_sing_box_config(
+            &config,
+            names.clone(),
+            outbounds.clone(),
+            vec![],
+            vec![],
+            &mut share_map,
+            true,
+        )
+        .unwrap();
+        config.mode = ProxyMode::Pool;
+        super::build_sing_box_config(
+            &config,
+            names,
+            outbounds,
+            vec![],
+            vec![],
+            &mut share_map,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(share_map.ports, assigned);
     }
 }

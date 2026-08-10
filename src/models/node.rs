@@ -139,7 +139,7 @@ pub struct DeleteNodeRequest {
     pub tag: String,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct NodeInfo {
     pub tag: String,
     pub server: String,
@@ -147,6 +147,13 @@ pub struct NodeInfo {
     pub node_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sni: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct NodeInventory {
+    pub nodes: Vec<NodeInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current: Option<String>,
 }
 
 #[cfg(test)]

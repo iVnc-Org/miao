@@ -93,6 +93,26 @@ pub async fn validate_sing_box_config() -> AppResult<()> {
     Ok(())
 }
 
+/// 判断 sing-box 是否仍在运行。
+///
+/// 顺带回收已退出的子进程句柄（把 `sing_process` 置空），所以这是一次带副作用的查询，
+/// 语义变更必须集中在这里改，不要再复制到调用方。
+pub async fn sing_box_is_running(state: &Arc<AppState>) -> bool {
+    let mut lock = state.sing_process.lock().await;
+
+    match &mut *lock {
+        Some(proc) => match proc.child.try_wait() {
+            Ok(Some(_)) => {
+                *lock = None;
+                false
+            }
+            Ok(None) => true,
+            Err(_) => false,
+        },
+        None => false,
+    }
+}
+
 pub async fn start_sing_internal(state: &Arc<AppState>) -> AppResult<()> {
     let _ = extract_sing_box()?;
 

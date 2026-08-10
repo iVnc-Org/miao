@@ -41,7 +41,7 @@ export function useStatus() {
     pid: null,
     uptime_secs: null,
     initializing: false,
-    route_mode: 'tunnel',
+    mode: 'global',
     config_source: null,
     warning: null
   })
@@ -52,10 +52,12 @@ export function useStatus() {
       const payload = await response.json()
       if (payload.success && payload.data) {
         setStatus(payload.data)
+        return payload.data
       }
     } catch {
       // ignore
     }
+    return null
   }, [])
 
   return { status, setStatus, fetchStatus }
@@ -93,9 +95,32 @@ export function useNodes() {
   return { nodes, setNodes, fetchNodes }
 }
 
-export const DEFAULT_TUN_PROCESS = {
-  enabled: false,
-  mode: 'global_bypass',
+export function useNodeInventory() {
+  const [nodeInventory, setNodeInventory] = useState({ nodes: [], current: null })
+
+  const fetchNodeInventory = useCallback(async () => {
+    try {
+      const response = await fetch('/api/proxies')
+      const payload = await response.json()
+      if (payload.success && payload.data) {
+        const inventory = {
+          nodes: Array.isArray(payload.data.nodes) ? payload.data.nodes : [],
+          current: payload.data.current || null,
+        }
+        setNodeInventory(inventory)
+        return inventory
+      }
+    } catch {
+      // ignore
+    }
+    return null
+  }, [])
+
+  return { nodeInventory, setNodeInventory, fetchNodeInventory }
+}
+
+export const DEFAULT_PROCESS_PROXY = {
+  mode: 'blacklist',
   match: {
     names: [],
     paths: [],
@@ -105,27 +130,27 @@ export const DEFAULT_TUN_PROCESS = {
   bypass_action: 'bypass',
 }
 
-export function normalizeTunProcessConfig(config) {
+export function normalizeProcessProxyConfig(config) {
   return {
-    ...DEFAULT_TUN_PROCESS,
+    ...DEFAULT_PROCESS_PROXY,
     ...(config || {}),
     match: {
-      ...DEFAULT_TUN_PROCESS.match,
+      ...DEFAULT_PROCESS_PROXY.match,
       ...((config && config.match) || {}),
     },
   }
 }
 
-export function useTunProcess() {
-  const [tunProcess, setTunProcess] = useState(DEFAULT_TUN_PROCESS)
+export function useProcessProxy() {
+  const [processProxy, setProcessProxy] = useState(DEFAULT_PROCESS_PROXY)
 
-  const fetchTunProcess = useCallback(async () => {
+  const fetchProcessProxy = useCallback(async () => {
     try {
       const response = await fetch('/api/tun-process')
       const payload = await response.json()
       if (payload.success && payload.data) {
-        const config = normalizeTunProcessConfig(payload.data)
-        setTunProcess(config)
+        const config = normalizeProcessProxyConfig(payload.data)
+        setProcessProxy(config)
         return config
       }
     } catch {
@@ -134,7 +159,78 @@ export function useTunProcess() {
     return null
   }, [])
 
-  return { tunProcess, setTunProcess, fetchTunProcess }
+  return { processProxy, setProcessProxy, fetchProcessProxy }
+}
+
+// 与后端 DEFAULT_SHARE_LISTEN 保持一致，默认供局域网设备直接连接。
+export const DEFAULT_POOL = {
+  listen: '0.0.0.0',
+  base_port: 12000,
+  username: '',
+  password: '',
+}
+
+export function normalizePoolConfig(config) {
+  return {
+    ...DEFAULT_POOL,
+    ...(config || {}),
+  }
+}
+
+export function usePool(mode) {
+  const [pool, setPoolState] = useState(DEFAULT_POOL)
+  const [poolEndpoints, setPoolEndpoints] = useState([])
+  const modeRef = useRef(mode)
+
+  useEffect(() => {
+    modeRef.current = mode
+    if (mode !== 'pool') setPoolEndpoints([])
+  }, [mode])
+
+  const setPool = useCallback((config) => {
+    const normalized = normalizePoolConfig(config)
+    setPoolState(normalized)
+    return normalized
+  }, [])
+
+  const fetchPool = useCallback(async () => {
+    try {
+      const response = await fetch('/api/share')
+      const payload = await response.json()
+      if (payload.success && payload.data) {
+        return setPool(payload.data)
+      }
+    } catch {
+      // ignore
+    }
+    return null
+  }, [setPool])
+
+  const fetchPoolEndpoints = useCallback(async (modeOverride) => {
+    if ((modeOverride || modeRef.current) !== 'pool') {
+      setPoolEndpoints([])
+      return []
+    }
+    try {
+      const response = await fetch('/api/share/endpoints')
+      const payload = await response.json()
+      if (payload.success && Array.isArray(payload.data)) {
+        setPoolEndpoints(payload.data)
+        return payload.data
+      }
+    } catch {
+      // ignore
+    }
+    return []
+  }, [])
+
+  return {
+    pool,
+    setPool,
+    poolEndpoints,
+    fetchPool,
+    fetchPoolEndpoints,
+  }
 }
 
 export function useProxies(status) {

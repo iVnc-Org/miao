@@ -2,8 +2,9 @@ import {
   ArrowUp, 
   ArrowDown, 
   Globe2,
+  ListFilter,
   Power,
-  Route
+  Share2,
 } from 'lucide-react'
 import { Button, SectionCard } from './ui.jsx'
 import { classNames, formatUptime, formatSpeed } from '../utils.js'
@@ -13,7 +14,7 @@ export function StatusCard({
   traffic,
   loadingAction,
   onToggleService,
-  onSetRouteMode,
+  onSetMode,
   onOpenConnections
 }) {
   const sourceText = status.config_source === 'cache'
@@ -22,9 +23,14 @@ export function StatusCard({
       ? '最新配置'
       : null
   const runningText = `PID: ${status.pid ?? '--'} · 运行时长: ${formatUptime(status.uptime_secs)}${sourceText ? ` · ${sourceText}` : ''}`
-  const isGlobalMode = status.route_mode === 'global'
-  const modeSwitching = loadingAction === 'routeMode'
+  const currentMode = status.mode || 'global'
+  const modeSwitching = loadingAction === 'mode'
   const modeControlDisabled = modeSwitching || status.initializing
+  const modes = [
+    { value: 'global', label: '全局代理', icon: Globe2 },
+    { value: 'process', label: '进程代理', icon: ListFilter },
+    { value: 'pool', label: '代理池', icon: Share2 },
+  ]
 
   return (
     <SectionCard className="status-card" bodyClassName="status-card-body" header={null}>
@@ -57,30 +63,19 @@ export function StatusCard({
 
       <div className="status-card-spacer" />
       <div className="route-mode-segment" role="group" aria-label="代理模式">
-        <button
-          type="button"
-          className={classNames('route-mode-option', !isGlobalMode && 'active')}
-          disabled={modeControlDisabled}
-          aria-pressed={!isGlobalMode}
-          onClick={() => {
-            if (isGlobalMode) onSetRouteMode('rule')
-          }}
-        >
-          <Route size={13} />
-          <span>分流模式</span>
-        </button>
-        <button
-          type="button"
-          className={classNames('route-mode-option', isGlobalMode && 'active')}
-          disabled={modeControlDisabled}
-          aria-pressed={isGlobalMode}
-          onClick={() => {
-            if (!isGlobalMode) onSetRouteMode('global')
-          }}
-        >
-          <Globe2 size={13} />
-          <span>{modeSwitching ? '切换中' : '全局代理'}</span>
-        </button>
+        {modes.map(({ value, label, icon: ModeIcon }) => (
+          <button
+            key={value}
+            type="button"
+            className={classNames('route-mode-option', currentMode === value && 'active')}
+            disabled={modeControlDisabled}
+            aria-pressed={currentMode === value}
+            onClick={() => onSetMode(value)}
+          >
+            <ModeIcon size={13} />
+            <span>{label}</span>
+          </button>
+        ))}
       </div>
       <Button 
         tone={status.running ? 'danger' : 'success'} 
