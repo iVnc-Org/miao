@@ -5,9 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
 use crate::models::{DEFAULT_PORT, DEFAULT_SOCKS_PORT};
+use crate::paths::data_file;
 use crate::services::write_file_atomic;
 
-const SHARE_PORTS_DIR: &str = "data/cache";
 const SHARE_PORTS_FILE: &str = "share_ports.json";
 const CLASH_API_PORT: u16 = 6262;
 
@@ -27,7 +27,7 @@ pub struct SharePortMap {
 }
 
 pub fn share_ports_path() -> PathBuf {
-    PathBuf::from(SHARE_PORTS_DIR).join(SHARE_PORTS_FILE)
+    data_file(SHARE_PORTS_FILE)
 }
 
 pub async fn load_share_port_map() -> SharePortMap {

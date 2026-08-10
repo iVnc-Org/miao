@@ -282,6 +282,8 @@ async fn main() -> AppResult<()> {
         std::process::exit(1);
     }
 
+    paths::prepare_data_dir().await?;
+
     if let Ok(current_exe) = std::env::current_exe() {
         let backup_path = format!("{}.bak", current_exe.display());
         if std::path::Path::new(&backup_path).exists() {

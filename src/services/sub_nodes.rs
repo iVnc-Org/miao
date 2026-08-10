@@ -6,10 +6,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
 use crate::models::{SubState, SubStatus};
+use crate::paths::data_file;
 use crate::services::write_file_atomic;
 use crate::state::AppState;
 
-const SUB_NODES_DIR: &str = "data/cache";
 const SUB_NODES_FILE: &str = "sub_nodes.json";
 const SUB_NODES_SCHEMA_VERSION: u32 = 1;
 
@@ -142,7 +142,7 @@ impl SubNodeStore {
 }
 
 pub fn sub_nodes_path() -> PathBuf {
-    PathBuf::from(SUB_NODES_DIR).join(SUB_NODES_FILE)
+    data_file(SUB_NODES_FILE)
 }
 
 pub async fn load_sub_nodes() -> SubNodeStore {
@@ -179,7 +179,7 @@ pub async fn save_sub_nodes_to(path: &Path, store: &SubNodeStore) -> AppResult<(
     let content = serde_json::to_string_pretty(store)
         .map_err(|e| AppError::context("Failed to serialize subscription node cache", e))?;
     write_file_atomic(path, &content, "subscription node cache").await?;
-    // 这个文件含节点密码/UUID，和 data/cache/config.json 同级敏感。
+    // 这个文件含节点密码/UUID，和 ~/.miao/config.json 同级敏感。
     restrict_permissions(path).await;
     Ok(())
 }

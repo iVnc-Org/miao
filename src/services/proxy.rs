@@ -6,15 +6,12 @@ use tracing::{error, info, warn};
 
 use crate::error::AppResult;
 use crate::models::LastProxy;
-use crate::services::config::get_config_cache_path;
+use crate::paths::data_file;
 use crate::services::singbox::get_sing_box_home;
 use crate::state::AppState;
 
 fn get_last_proxy_path() -> PathBuf {
-    get_config_cache_path()
-        .parent()
-        .map(|dir| dir.join("last_proxy.json"))
-        .unwrap_or_else(|| PathBuf::from("data/cache/last_proxy.json"))
+    data_file("last_proxy.json")
 }
 
 fn get_legacy_last_proxy_path() -> PathBuf {
@@ -115,7 +112,7 @@ mod tests {
     fn last_proxy_path_uses_persistent_cache_dir() {
         assert_eq!(
             get_last_proxy_path(),
-            std::path::PathBuf::from("data/cache/last_proxy.json")
+            crate::paths::data_dir().join("last_proxy.json")
         );
     }
 }

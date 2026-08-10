@@ -46,15 +46,19 @@ Miao 会按以下顺序选择配置文件：
 
 1. 命令行 `--config /path/to/config.yaml`
 2. 可执行文件同目录下已有的 `config.yaml`
-3. `/etc/miao/config.yaml`
+3. `$HOME/.miao/config.yaml`
+
+为兼容旧部署，如果 `$HOME/.miao/config.yaml` 尚不存在但 `/etc/miao/config.yaml` 已存在，Miao 会继续使用 `/etc/miao/config.yaml`。新安装及后续通过面板创建的默认配置均写入 `$HOME/.miao/config.yaml`。
 
 如果启动时没有找到配置文件，Miao 只会使用内存中的默认配置并进入引导页面，不会主动写入空配置文件。只有通过面板添加订阅、添加节点、自动初始化 VPS，或其它需要持久化的配置变更时，才会写入配置文件。
 
-sing-box 二进制和生成的 `config.json` 放在 `/tmp/miao-sing-box`；订阅节点缓存、最后选择的节点和运行状态放在运行目录下的 `data/cache`。代理模式写入 `config.yaml`，Miao 重启后会恢复上次的启动/停止状态和代理模式。旧版 `runtime.json` 中的 `route_mode` 会被忽略。
+所有需要跨重启保留的数据默认集中在 `$HOME/.miao`：主配置 `config.yaml`、生成配置缓存 `config.json`、缓存元数据 `config.meta.json`、订阅节点 `sub_nodes.json`、代理池端口账本 `share_ports.json`、最后选择节点 `last_proxy.json` 和运行状态 `runtime.json`。目录权限在启动时收紧为 `0700`。从旧版本升级时，Miao 会把当前工作目录 `data/cache` 中尚未迁移的文件复制到该目录，不覆盖已经存在的新文件。
+
+sing-box 二进制和本次运行生成的 `config.json` 仍放在 `/tmp/miao-sing-box`，它们是可重建的运行产物，不属于持久化数据。Miao 重启后会从 `$HOME/.miao` 恢复上次的启动/停止状态、代理模式和节点选择；旧版 `runtime.json` 中的 `route_mode` 会被忽略。
 
 ### 进阶：手动编写配置文件
 
-你也可以在可执行文件同目录或 `/etc/miao/config.yaml` 预先创建配置文件跳过引导：
+你也可以在 `$HOME/.miao/config.yaml`、可执行文件同目录，或兼容路径 `/etc/miao/config.yaml` 预先创建配置文件跳过引导：
 
 ```yaml
 port: 6161  # Web 面板端口，默认 6161
@@ -112,7 +116,7 @@ tun_process:
 mode: pool
 share:
   listen: 0.0.0.0      # 分享端口监听地址，默认监听所有 IPv4 网卡
-  base_port: 12000     # 端口分配起点；分配结果按节点名持久化到 data/cache/share_ports.json
+  base_port: 12000     # 端口分配起点；分配结果按节点名持久化到 $HOME/.miao/share_ports.json
   username: ""         # 可选；填写时需和密码同时填写
   password: ""         # 可选；填写时需和用户名同时填写
 ```
@@ -125,15 +129,15 @@ share:
 
 ### 订阅缓存
 
-miao 会把成功解析的订阅节点持久化到 `data/cache/sub_nodes.json`。添加订阅、替换失效链接或手动点击“刷新”时才会请求订阅链接；添加/删除手动节点、删除订阅、切换模式、启停服务和修改代理池/进程代理设置都只读取本地缓存。仅当本地一个订阅节点都没有时，启动流程才会做一次初始化抓取。
+miao 会把成功解析的订阅节点持久化到 `$HOME/.miao/sub_nodes.json`。添加订阅、替换失效链接或手动点击“刷新”时才会请求订阅链接；添加/删除手动节点、删除订阅、切换模式、启停服务和修改代理池/进程代理设置都只读取本地缓存。仅当本地一个订阅节点都没有时，启动流程才会做一次初始化抓取。
 
 刷新失败不会删除旧节点。面板会把该订阅标记为“订阅链接已失效”，继续使用上次成功保存的节点，也不会弹出红色错误提示。停止 sing-box 后，节点清单仍由持久缓存提供；节点切换和延迟测试会保持禁用，直到服务重新启动。
 
-上一次成功生成的完整 sing-box 配置仍会保存到 `data/cache/config.json`，`data/cache/config.meta.json` 记录当前配置指纹。升级自旧版本而 `sub_nodes.json` 尚不存在时，miao 会先从旧 `config.json` 导入其中的订阅节点，避免短时效链接已经过期后丢失现有节点。
+上一次成功生成的完整 sing-box 配置仍会保存到 `$HOME/.miao/config.json`，`$HOME/.miao/config.meta.json` 记录当前配置指纹。升级自旧版本而 `sub_nodes.json` 尚不存在时，miao 会先从旧 `config.json` 导入其中的订阅节点，避免短时效链接已经过期后丢失现有节点。
 
-节点选择会持久化到 `data/cache/last_proxy.json`，启动/停止状态持久化到 `data/cache/runtime.json`，代理模式持久化到 `config.yaml`。重启后 sing-box 启动成功时，miao 会自动恢复上次选择的节点；如果订阅刷新后该节点不存在，则跳过恢复并保留默认选择。
+节点选择会持久化到 `$HOME/.miao/last_proxy.json`，启动/停止状态持久化到 `$HOME/.miao/runtime.json`，代理模式持久化到 `$HOME/.miao/config.yaml`。重启后 sing-box 启动成功时，miao 会自动恢复上次选择的节点；如果订阅刷新后该节点不存在，则跳过恢复并保留默认选择。
 
-如果订阅链接是短时效链接，建议在链接有效期内完成首次添加或手动刷新。之后只要 `data/cache` 被持久化，重启不会依赖订阅链接仍然有效。容器部署时需要把运行目录或至少 `data/cache` 挂载到持久卷。
+如果订阅链接是短时效链接，建议在链接有效期内完成首次添加或手动刷新。之后只要 `$HOME/.miao` 被持久化，重启不会依赖订阅链接仍然有效。容器部署时应把 `$HOME/.miao` 挂载到持久卷。
 
 ## 实验性功能
 

@@ -2,9 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tracing::warn;
 
-use crate::{error::AppResult, services::write_file_atomic};
+use crate::{error::AppResult, paths::data_file, services::write_file_atomic};
 
-const RUNTIME_STATE_DIR: &str = "data/cache";
 const RUNTIME_STATE_FILE: &str = "runtime.json";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,7 +25,7 @@ fn default_running() -> bool {
 }
 
 fn runtime_state_path() -> PathBuf {
-    PathBuf::from(RUNTIME_STATE_DIR).join(RUNTIME_STATE_FILE)
+    data_file(RUNTIME_STATE_FILE)
 }
 
 pub async fn load_runtime_state() -> RuntimeState {

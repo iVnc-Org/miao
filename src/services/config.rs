@@ -14,6 +14,7 @@ use crate::models::{
     BypassAction, Config, NodeInfo, ProcessListMode, ProcessMatch, ProcessProxyConfig, ProxyMode,
     DEFAULT_SOCKS_LISTEN, DEFAULT_SOCKS_PORT,
 };
+use crate::paths::{data_dir, data_file};
 use crate::services::{
     proxy::restore_last_proxy,
     share_ports::{
@@ -32,7 +33,6 @@ use crate::services::{
 };
 use crate::state::AppState;
 
-const CONFIG_CACHE_DIR: &str = "data/cache";
 const CONFIG_CACHE_FILE: &str = "config.json";
 const CONFIG_CACHE_META_FILE: &str = "config.meta.json";
 const CONFIG_CACHE_SCHEMA_VERSION: u32 = 7;
@@ -44,11 +44,11 @@ struct ConfigCacheMeta {
 }
 
 pub fn get_config_cache_path() -> PathBuf {
-    PathBuf::from(CONFIG_CACHE_DIR).join(CONFIG_CACHE_FILE)
+    data_file(CONFIG_CACHE_FILE)
 }
 
 fn get_config_cache_meta_path() -> PathBuf {
-    PathBuf::from(CONFIG_CACHE_DIR).join(CONFIG_CACHE_META_FILE)
+    data_file(CONFIG_CACHE_META_FILE)
 }
 
 fn config_cache_fingerprint(config: &Config) -> AppResult<String> {
@@ -93,7 +93,7 @@ pub async fn save_config_cache(config: &Config) {
     let cache_path = get_config_cache_path();
     let meta_path = get_config_cache_meta_path();
 
-    if let Err(e) = tokio::fs::create_dir_all(CONFIG_CACHE_DIR).await {
+    if let Err(e) = tokio::fs::create_dir_all(data_dir()).await {
         error!("Failed to create config cache directory: {}", e);
         return;
     }
@@ -580,7 +580,7 @@ async fn restore_previous_stopped_config(
 pub enum SubFetchPolicy {
     /// 永不联网。除下面三种情形外的所有路径都用这个。
     CacheOnly,
-    /// 仅当缓存里一个节点都没有时抓一次（首装、用户删了 data/cache、缓存 schema 升级）。
+    /// 仅当缓存里一个节点都没有时抓一次（首装、用户删了 ~/.miao、缓存 schema 升级）。
     /// 这是唯一无需用户手势即可联网的路径。
     CacheOrBootstrap,
     /// 只抓指定的订阅，其余读缓存。用于"新增订阅"。
