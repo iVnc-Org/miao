@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::{
     handlers::apply_config_section,
-    models::{ApiResponse, PoolConfig, ShareEndpoint},
+    models::{ApiResponse, PoolConfig, ProxyMode, ShareEndpoint},
     responses::{status_error, success, HandlerResult},
     services::{
         config::{extract_share_bindings_from_sing_box, read_existing_sing_box_config},

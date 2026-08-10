@@ -11,8 +11,8 @@ use tracing::{error, info, warn};
 
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    BypassAction, Config, NodeInfo, PoolConfig, ProcessListMode, ProcessMatch, ProcessProxyConfig,
-    ProxyMode, DEFAULT_SOCKS_LISTEN, DEFAULT_SOCKS_PORT,
+    BypassAction, Config, NodeInfo, ProcessListMode, ProcessMatch, ProcessProxyConfig, ProxyMode,
+    DEFAULT_SOCKS_LISTEN, DEFAULT_SOCKS_PORT,
 };
 use crate::services::{
     proxy::restore_last_proxy,
