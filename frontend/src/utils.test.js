@@ -5,6 +5,8 @@ import {
   formatSpeed,
   formatUptime,
   maskSubscription,
+  manualNodeToForm,
+  nodeTypeDefaults,
   protocolLabel,
   validateHysteria2Obfs,
   validateNodeTag,
@@ -67,6 +69,97 @@ describe('validation', () => {
 })
 
 describe('payload helpers', () => {
+  it('uses protocol-specific ports for fresh manual node forms', () => {
+    expect(nodeTypeDefaults('socks').server_port).toBe(1080)
+    expect(nodeTypeDefaults('http').server_port).toBe(8080)
+    expect(nodeTypeDefaults('vless').server_port).toBe(443)
+  })
+
+  it('restores a VLESS manual node with TLS, Reality, and WebSocket fields', () => {
+    const { nodeType, form } = manualNodeToForm({
+      tag: 'edge',
+      node_type: 'vless',
+      outbound: {
+        type: 'vless',
+        tag: 'edge',
+        server: 'edge.example.com',
+        server_port: 8443,
+        uuid: '123e4567-e89b-12d3-a456-426614174000',
+        flow: 'xtls-rprx-vision',
+        packet_encoding: 'xudp',
+        tls: {
+          enabled: true,
+          server_name: 'origin.example.com',
+          insecure: true,
+          alpn: ['h2', 'http/1.1'],
+          utls: { enabled: true, fingerprint: 'chrome' },
+          reality: { enabled: true, public_key: 'public-key', short_id: 'abcd' },
+        },
+        transport: {
+          type: 'ws',
+          path: '/socket',
+          headers: { Host: 'cdn.example.com' },
+        },
+      },
+    })
+
+    expect(nodeType).toBe('vless')
+    expect(form).toMatchObject({
+      tag: 'edge',
+      server: 'edge.example.com',
+      server_port: 8443,
+      uuid: '123e4567-e89b-12d3-a456-426614174000',
+      flow: 'xtls-rprx-vision',
+      packet_encoding: 'xudp',
+      tls_enabled: true,
+      sni: 'origin.example.com',
+      skip_cert_verify: true,
+      alpn: 'h2, http/1.1',
+      client_fingerprint: 'chrome',
+      reality_public_key: 'public-key',
+      reality_short_id: 'abcd',
+      transport_type: 'ws',
+      transport_path: '/socket',
+      transport_host: 'cdn.example.com',
+    })
+  })
+
+  it('restores protocol-specific Shadowsocks and VMess fields', () => {
+    const shadowsocks = manualNodeToForm({
+      outbound: {
+        type: 'shadowsocks',
+        tag: 'ss-node',
+        server: 'ss.example.com',
+        server_port: 8388,
+        method: 'aes-256-gcm',
+        password: 'password123',
+      },
+    })
+    const vmess = manualNodeToForm({
+      outbound: {
+        type: 'vmess',
+        tag: 'vmess-node',
+        server: 'vmess.example.com',
+        server_port: 443,
+        uuid: '123e4567-e89b-12d3-a456-426614174000',
+        security: 'none',
+        alter_id: 4,
+        transport: { type: 'grpc', service_name: 'proxy-service' },
+      },
+    })
+
+    expect(shadowsocks.nodeType).toBe('ss')
+    expect(shadowsocks.form).toMatchObject({ cipher: 'aes-256-gcm', password: 'password123' })
+    expect(vmess.nodeType).toBe('vmess')
+    expect(vmess.form).toMatchObject({
+      vmess_cipher: 'none',
+      alter_id: 4,
+      tls_enabled: false,
+      transport_type: 'grpc',
+      grpc_service_name: 'proxy-service',
+    })
+  })
+
   it('drops stale transport fields for the selected transport type', () => {
     expect(buildTransportPayload({
       transport_type: 'grpc',

@@ -9,9 +9,11 @@ import {
   FileText,
   Link2,
   Network,
+  Pencil,
   RefreshCw,
   Route,
   Rss,
+  Save,
   Search,
   Trash2,
 } from 'lucide-react'
@@ -229,7 +231,7 @@ export function PoolTestResultModal({ result, onClose }) {
   )
 }
 
-export function NodeModal({ open, nodeType, setNodeType, form, setForm, loading, onClose, onSubmit }) {
+export function NodeModal({ open, editing, nodeType, setNodeType, form, setForm, loading, onClose, onSubmit }) {
   if (!open) return null
 
   const activeLabel = NODE_TYPE_OPTIONS.find((option) => option.value === nodeType)?.label || nodeType
@@ -258,10 +260,12 @@ export function NodeModal({ open, nodeType, setNodeType, form, setForm, loading,
       <div className="modal-card node-modal" onClick={(event) => event.stopPropagation()}>
         <div className="modal-title-row">
           <div className="modal-title-wrap">
-            <Plus size={18} className="icon-accent" />
-            <h3>添加节点</h3>
+            {editing
+              ? <Pencil size={18} className="icon-accent" />
+              : <Plus size={18} className="icon-accent" />}
+            <h3>{editing ? '编辑节点' : '添加节点'}</h3>
           </div>
-          <button className="icon-button" onClick={onClose}>
+          <button className="icon-button" onClick={onClose} title="关闭" aria-label="关闭节点弹窗">
             <X size={16} />
           </button>
         </div>
@@ -462,6 +466,16 @@ export function NodeModal({ open, nodeType, setNodeType, form, setForm, loading,
               </label>
             </div>
             <div className="form-grid single">
+              <label className="field">
+                <span>ALPN（可选）</span>
+                <input
+                  value={form.alpn}
+                  onChange={(event) => setForm((prev) => ({ ...prev, alpn: event.target.value }))}
+                  placeholder="h2, http/1.1"
+                />
+              </label>
+            </div>
+            <div className="form-grid single">
               <label className="field checkbox-field">
                 <input
                   type="checkbox"
@@ -644,11 +658,11 @@ export function NodeModal({ open, nodeType, setNodeType, form, setForm, loading,
         <Button 
           tone="primary" 
           loading={loading} 
-          icon={<Plus size={14} />} 
+          icon={editing ? <Save size={14} /> : <Plus size={14} />}
           disabled={!canSubmit || loading} 
           onClick={onSubmit}
         >
-          添加 {activeLabel} 节点
+          {editing ? `保存 ${activeLabel} 节点` : `添加 ${activeLabel} 节点`}
         </Button>
       </div>
     </div>

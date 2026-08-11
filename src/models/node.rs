@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Hysteria2 {
@@ -135,8 +136,26 @@ pub struct NodeRequest {
 }
 
 #[derive(Deserialize)]
+pub struct UpdateNodeRequest {
+    pub original_tag: String,
+    #[serde(flatten)]
+    pub node: NodeRequest,
+}
+
+#[derive(Deserialize)]
 pub struct DeleteNodeRequest {
     pub tag: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ManualNodeInfo {
+    pub tag: String,
+    pub server: String,
+    pub server_port: u16,
+    pub node_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sni: Option<String>,
+    pub outbound: JsonValue,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

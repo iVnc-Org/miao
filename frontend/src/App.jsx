@@ -34,6 +34,7 @@ import {
 } from './hooks/index.js'
 import {
   EMPTY_NODE_FORM,
+  manualNodeToForm,
   nodeTypeDefaults,
   validateSubscriptionUrl,
   validateNodeTag,
@@ -69,6 +70,7 @@ export default function App() {
   const [nodeForm, setNodeForm] = useState(EMPTY_NODE_FORM)
   const [nodeType, setNodeType] = useState('hysteria2')
   const [showNodeModal, setShowNodeModal] = useState(false)
+  const [editingNodeTag, setEditingNodeTag] = useState(null)
   const [showConnectionsModal, setShowConnectionsModal] = useState(false)
   const [modeSetup, setModeSetup] = useState(null)
   const [confirmState, setConfirmState] = useState({ open: false, title: '', message: '', onConfirm: null })
@@ -162,10 +164,25 @@ export default function App() {
 
   const handleNodeTypeChange = useCallback((nextType) => {
     setNodeType(nextType)
-    setNodeForm((prev) => {
-      const nextPort = nextType === 'socks' ? 1080 : nextType === 'http' ? 8080 : 443
-      return { ...prev, server_port: nextPort }
-    })
+  }, [])
+
+  const handleOpenAddNode = useCallback(() => {
+    setEditingNodeTag(null)
+    setNodeForm({ ...EMPTY_NODE_FORM, ...nodeTypeDefaults(nodeType) })
+    setShowNodeModal(true)
+  }, [nodeType])
+
+  const handleOpenEditNode = useCallback((node) => {
+    const editor = manualNodeToForm(node)
+    setEditingNodeTag(node.tag)
+    setNodeType(editor.nodeType)
+    setNodeForm(editor.form)
+    setShowNodeModal(true)
+  }, [])
+
+  const handleCloseNodeModal = useCallback(() => {
+    setShowNodeModal(false)
+    setEditingNodeTag(null)
   }, [])
 
   // 首次加载：获取初始状态后再决定显示 onboarding 还是 dashboard
@@ -470,7 +487,7 @@ export default function App() {
     }
   }, [apiCall, fetchSubs, refreshProxyViews, showToast])
 
-  const handleAddNode = useCallback(async () => {
+  const handleSaveNode = useCallback(async () => {
     const isSimpleProxy = nodeType === 'socks' || nodeType === 'http'
     const requiresPassword = ['hysteria2', 'anytls', 'ss', 'trojan', 'tuic'].includes(nodeType)
     const requiresUuid = ['vmess', 'vless', 'tuic'].includes(nodeType)
@@ -568,6 +585,8 @@ export default function App() {
     } else if (!isSimpleProxy) {
       if (nodeForm.sni?.trim()) payload.sni = nodeForm.sni.trim()
       payload.skip_cert_verify = nodeForm.skip_cert_verify
+      const alpn = nodeForm.alpn.split(',').map((value) => value.trim()).filter(Boolean)
+      if (alpn.length > 0) payload.alpn = alpn
       if (nodeForm.client_fingerprint?.trim()) payload.client_fingerprint = nodeForm.client_fingerprint.trim()
       if (nodeType === 'hysteria2' && nodeForm.obfs_type) {
         payload.obfs_type = nodeForm.obfs_type
@@ -597,15 +616,22 @@ export default function App() {
     }
 
     try {
-      await apiCall('nodes', { method: 'POST', body: JSON.stringify(payload) }, 'addNode')
+      const editing = editingNodeTag !== null
+      const requestPayload = editing ? { original_tag: editingNodeTag, ...payload } : payload
+      await apiCall(
+        'nodes',
+        { method: editing ? 'PUT' : 'POST', body: JSON.stringify(requestPayload) },
+        editing ? 'updateNode' : 'addNode'
+      )
       setShowNodeModal(false)
+      setEditingNodeTag(null)
       setNodeForm({ ...EMPTY_NODE_FORM, ...nodeTypeDefaults(nodeType) })
       await Promise.all([fetchNodes(), refreshProxyViews()])
-      showToast('节点已添加', 'success')
+      showToast(editing ? '节点已更新' : '节点已添加', 'success')
     } catch (error) {
       showToast(error.message, 'error')
     }
-  }, [nodeForm, nodeType, apiCall, fetchNodes, refreshProxyViews, showToast])
+  }, [nodeForm, nodeType, editingNodeTag, apiCall, fetchNodes, refreshProxyViews, showToast])
 
   const handleDeleteNode = useCallback(async (tag) => {
     try {
@@ -712,19 +738,20 @@ export default function App() {
         <OnboardingScreen
           onAddSub={handleAddSubscription}
           loadingAction={loadingAction}
-          onOpenAddNode={() => setShowNodeModal(true)}
+          onOpenAddNode={handleOpenAddNode}
         />
         <CommitBadge versionInfo={versionInfo} />
         <ToastStack toasts={toasts} />
         <NodeModal
           open={showNodeModal}
+          editing={editingNodeTag !== null}
           nodeType={nodeType}
           setNodeType={handleNodeTypeChange}
           form={nodeForm}
           setForm={setNodeForm}
-          loading={loadingAction === 'addNode'}
-          onClose={() => setShowNodeModal(false)}
-          onSubmit={handleAddNode}
+          loading={loadingAction === 'addNode' || loadingAction === 'updateNode'}
+          onClose={handleCloseNodeModal}
+          onSubmit={handleSaveNode}
         />
       </div>
     )
@@ -765,7 +792,7 @@ export default function App() {
               onTestDelay={handleTestDelay}
               onTestGroupDelays={handleTestGroupDelays}
               onSwitchProxy={handleSwitchProxy}
-              onOpenAddNode={() => setShowNodeModal(true)}
+              onOpenAddNode={handleOpenAddNode}
             />
           </div>
 
@@ -773,7 +800,8 @@ export default function App() {
             <NodesCard 
               nodes={nodes} 
               onDeleteNode={handleOpenDeleteNodeConfirm} 
-              onOpenAddNode={() => setShowNodeModal(true)} 
+              onEditNode={handleOpenEditNode}
+              onOpenAddNode={handleOpenAddNode}
             />
 
             <SubsCard
@@ -827,13 +855,14 @@ export default function App() {
 
       <NodeModal 
         open={showNodeModal} 
+        editing={editingNodeTag !== null}
         nodeType={nodeType} 
         setNodeType={handleNodeTypeChange}
         form={nodeForm} 
         setForm={setNodeForm} 
-        loading={loadingAction === 'addNode'} 
-        onClose={() => setShowNodeModal(false)} 
-        onSubmit={handleAddNode} 
+        loading={loadingAction === 'addNode' || loadingAction === 'updateNode'}
+        onClose={handleCloseNodeModal}
+        onSubmit={handleSaveNode}
       />
 
       <ConnectionsModal

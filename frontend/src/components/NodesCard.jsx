@@ -1,9 +1,9 @@
 import { memo } from 'react'
-import { Plus, Shield, Trash2 } from 'lucide-react'
+import { Pencil, Plus, Shield, Trash2 } from 'lucide-react'
 import { Button, SectionCard } from './ui.jsx'
 import { protocolLabel } from '../utils.js'
 
-const NodeRow = memo(function NodeRow({ node, onDelete }) {
+const NodeRow = memo(function NodeRow({ node, onDelete, onEdit }) {
   return (
     <div className="list-row">
       <Shield size={13} className="list-leading-icon" />
@@ -11,17 +11,29 @@ const NodeRow = memo(function NodeRow({ node, onDelete }) {
         <div className="list-row-title">{node.tag}</div>
         <div className="list-row-meta">{node.server}:{node.server_port} · {protocolLabel(node.node_type)}</div>
       </div>
-      <button 
-        className="icon-button subtle" 
-        onClick={() => onDelete(node.tag)}
-      >
-        <Trash2 size={13} />
-      </button>
+      <div className="list-row-actions">
+        <button
+          className="icon-button subtle"
+          onClick={() => onEdit(node)}
+          title="编辑节点"
+          aria-label={`编辑节点 ${node.tag}`}
+        >
+          <Pencil size={13} />
+        </button>
+        <button
+          className="icon-button subtle"
+          onClick={() => onDelete(node.tag)}
+          title="删除节点"
+          aria-label={`删除节点 ${node.tag}`}
+        >
+          <Trash2 size={13} />
+        </button>
+      </div>
     </div>
   )
 })
 
-export function NodesCard({ nodes, onDeleteNode, onOpenAddNode }) {
+export function NodesCard({ nodes, onDeleteNode, onEditNode, onOpenAddNode }) {
   return (
     <SectionCard
       bodyClassName="panel-body-tight"
@@ -52,7 +64,12 @@ export function NodesCard({ nodes, onDeleteNode, onOpenAddNode }) {
         {nodes.length === 0 
           ? <div className="empty-block">暂无手动节点</div> 
           : nodes.map((node) => (
-            <NodeRow key={node.tag} node={node} onDelete={onDeleteNode} />
+            <NodeRow
+              key={node.tag}
+              node={node}
+              onDelete={onDeleteNode}
+              onEdit={onEditNode}
+            />
           ))}
       </div>
     </SectionCard>

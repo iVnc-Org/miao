@@ -7,7 +7,7 @@ use axum::{
 
 use crate::handlers::{
     clash::{get_proxies, switch_proxy, test_proxy_delay, traffic_ws},
-    nodes::{add_node, delete_node, get_node_inventory, get_nodes},
+    nodes::{add_node, delete_node, get_node_inventory, get_nodes, update_node},
     proxy::set_last_proxy,
     service::{get_status, set_mode, start_service, stop_service, test_connectivity},
     share::{get_share, get_share_endpoints, set_share, test_share_endpoint},
@@ -43,6 +43,7 @@ pub fn build_router(app_state: Arc<AppState>) -> Router {
         .route("/api/subs/refresh", post(refresh_subs))
         .route("/api/nodes", get(get_nodes))
         .route("/api/nodes", post(add_node))
+        .route("/api/nodes", put(update_node))
         .route("/api/nodes", delete(delete_node))
         .route("/api/proxies", get(get_node_inventory))
         .route("/api/clash/proxies", get(get_proxies))
@@ -190,6 +191,7 @@ mod tests {
         assert_eq!(json["data"][0]["tag"], "router-node");
         assert_eq!(json["data"][0]["server"], "node.example.com");
         assert_eq!(json["data"][0]["sni"], "sni.example.com");
+        assert_eq!(json["data"][0]["outbound"]["password"], "secret");
     }
 
     #[tokio::test]
@@ -364,6 +366,72 @@ mod tests {
                     "server": "node.example.com",
                     "server_port": 443,
                     "password": "password123"
+                }),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = response_json(response).await;
+        assert_eq!(json["success"], false);
+        assert!(json["message"].as_str().unwrap().contains("重复"));
+    }
+
+    #[tokio::test]
+    async fn router_returns_not_found_when_updating_missing_node() {
+        let app = test_app(Config {
+            nodes: vec![
+                r#"{"type":"socks","tag":"router-node","server":"127.0.0.1","server_port":1080}"#
+                    .to_string(),
+            ],
+            ..Default::default()
+        })
+        .await;
+
+        let response = app
+            .oneshot(json_request(
+                "PUT",
+                "/api/nodes",
+                json!({
+                    "original_tag": "missing-node",
+                    "node_type": "socks",
+                    "tag": "updated-node",
+                    "server": "127.0.0.1",
+                    "server_port": 1081
+                }),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let json = response_json(response).await;
+        assert_eq!(json["success"], false);
+        assert_eq!(json["message"], "Node not found");
+    }
+
+    #[tokio::test]
+    async fn router_rejects_node_update_with_duplicate_tag() {
+        let app = test_app(Config {
+            nodes: vec![
+                r#"{"type":"socks","tag":"first-node","server":"127.0.0.1","server_port":1080}"#
+                    .to_string(),
+                r#"{"type":"socks","tag":"second-node","server":"127.0.0.1","server_port":1081}"#
+                    .to_string(),
+            ],
+            ..Default::default()
+        })
+        .await;
+
+        let response = app
+            .oneshot(json_request(
+                "PUT",
+                "/api/nodes",
+                json!({
+                    "original_tag": "first-node",
+                    "node_type": "socks",
+                    "tag": "SECOND-NODE",
+                    "server": "127.0.0.1",
+                    "server_port": 1082
                 }),
             ))
             .await

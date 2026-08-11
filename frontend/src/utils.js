@@ -27,6 +27,7 @@ export const EMPTY_NODE_FORM = {
   transport_path: '',
   transport_host: '',
   grpc_service_name: '',
+  alpn: '',
   client_fingerprint: '',
   reality_public_key: '',
   reality_short_id: '',
@@ -107,6 +108,7 @@ export const TUIC_UDP_RELAY_OPTIONS = [
 
 export function nodeTypeDefaults(type) {
   return {
+    server_port: type === 'socks' ? 1080 : type === 'http' ? 8080 : 443,
     tls_enabled: !['ss', 'vmess'].includes(type),
     cipher: '2022-blake3-aes-128-gcm',
     vmess_cipher: 'auto',
@@ -116,6 +118,7 @@ export function nodeTypeDefaults(type) {
     transport_path: '',
     transport_host: '',
     grpc_service_name: '',
+    alpn: '',
     client_fingerprint: '',
     reality_public_key: '',
     reality_short_id: '',
@@ -126,6 +129,76 @@ export function nodeTypeDefaults(type) {
     tuic_zero_rtt: false,
     obfs_type: '',
     obfs_password: '',
+  }
+}
+
+function asRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : {}
+}
+
+function stringValue(value, fallback = '') {
+  return typeof value === 'string' ? value : fallback
+}
+
+export function manualNodeToForm(node) {
+  const outbound = asRecord(node?.outbound)
+  const storedType = stringValue(outbound.type, stringValue(node?.node_type, 'hysteria2')).toLowerCase()
+  const normalizedType = storedType === 'shadowsocks' ? 'ss' : storedType
+  const nodeType = NODE_TYPE_OPTIONS.some((option) => option.value === normalizedType)
+    ? normalizedType
+    : 'hysteria2'
+  const defaults = { ...EMPTY_NODE_FORM, ...nodeTypeDefaults(nodeType) }
+  const tls = asRecord(outbound.tls)
+  const utls = asRecord(tls.utls)
+  const reality = asRecord(tls.reality)
+  const transport = asRecord(outbound.transport)
+  const transportHeaders = asRecord(transport.headers)
+  const obfs = asRecord(outbound.obfs)
+  const storedTransportType = stringValue(transport.type).toLowerCase()
+  const transportType = ['ws', 'grpc', 'http'].includes(storedTransportType)
+    ? storedTransportType
+    : 'tcp'
+  const httpHost = Array.isArray(transport.host) ? transport.host[0] : transport.host
+  const storedPort = Number(outbound.server_port ?? node?.server_port)
+  const storedAlterId = Number(outbound.alter_id)
+  const alpn = Array.isArray(tls.alpn)
+    ? tls.alpn.filter((value) => typeof value === 'string').join(', ')
+    : stringValue(tls.alpn)
+
+  return {
+    nodeType,
+    form: {
+      ...defaults,
+      tag: stringValue(outbound.tag, stringValue(node?.tag)),
+      server: stringValue(outbound.server, stringValue(node?.server)),
+      server_port: Number.isInteger(storedPort) && storedPort > 0 ? storedPort : defaults.server_port,
+      username: stringValue(outbound.username),
+      password: stringValue(outbound.password),
+      uuid: stringValue(outbound.uuid),
+      alter_id: Number.isInteger(storedAlterId) && storedAlterId >= 0 ? storedAlterId : 0,
+      sni: stringValue(tls.server_name),
+      cipher: nodeType === 'ss' ? stringValue(outbound.method, defaults.cipher) : defaults.cipher,
+      vmess_cipher: nodeType === 'vmess' ? stringValue(outbound.security, 'auto') : defaults.vmess_cipher,
+      skip_cert_verify: tls.insecure === true,
+      tls_enabled: ['vmess', 'vless'].includes(nodeType) ? tls.enabled === true : defaults.tls_enabled,
+      transport_type: transportType,
+      transport_path: stringValue(transport.path),
+      transport_host: transportType === 'ws'
+        ? stringValue(transportHeaders.Host, stringValue(transportHeaders.host))
+        : stringValue(httpHost),
+      grpc_service_name: stringValue(transport.service_name),
+      alpn,
+      client_fingerprint: stringValue(utls.fingerprint),
+      reality_public_key: stringValue(reality.public_key),
+      reality_short_id: stringValue(reality.short_id),
+      flow: stringValue(outbound.flow),
+      packet_encoding: stringValue(outbound.packet_encoding),
+      tuic_congestion_control: stringValue(outbound.congestion_control, defaults.tuic_congestion_control),
+      tuic_udp_relay_mode: stringValue(outbound.udp_relay_mode, defaults.tuic_udp_relay_mode),
+      tuic_zero_rtt: outbound.zero_rtt_handshake === true,
+      obfs_type: stringValue(obfs.type),
+      obfs_password: stringValue(obfs.password),
+    },
   }
 }
 

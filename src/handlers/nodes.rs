@@ -3,7 +3,9 @@ use serde_json::{json, Map, Value as JsonValue};
 use std::sync::Arc;
 use tracing::warn;
 
-use crate::models::{ApiResponse, DeleteNodeRequest, NodeInfo, NodeInventory, NodeRequest};
+use crate::models::{
+    ApiResponse, DeleteNodeRequest, ManualNodeInfo, NodeInventory, NodeRequest, UpdateNodeRequest,
+};
 use crate::responses::{status_error, success, success_no_data, HandlerResult};
 use crate::services::config::{
     apply_persistent_config_change, resolve_node_inventory, SubFetchPolicy,
@@ -273,7 +275,48 @@ fn build_node_value(req: &NodeRequest, node_type: &str) -> JsonValue {
     }
 }
 
-pub async fn get_nodes(State(state): State<Arc<AppState>>) -> Json<ApiResponse<Vec<NodeInfo>>> {
+fn requested_node_type(req: &NodeRequest) -> Result<&str, String> {
+    let node_type = req.node_type.as_deref().unwrap_or("hysteria2");
+    if VALID_NODE_TYPES.contains(&node_type) {
+        Ok(node_type)
+    } else {
+        Err(format!(
+            "不支持的节点类型: {}，支持的类型: {}",
+            node_type,
+            VALID_NODE_TYPES.join(", ")
+        ))
+    }
+}
+
+fn find_duplicate_tag(
+    nodes: &[String],
+    requested_tag: &str,
+    skipped_index: Option<usize>,
+) -> Option<String> {
+    let requested_tag_lower = requested_tag.to_lowercase();
+    nodes
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| Some(*index) != skipped_index)
+        .find_map(|(_, node_str)| {
+            let value = serde_json::from_str::<JsonValue>(node_str).ok()?;
+            let existing_tag = value.get("tag").and_then(JsonValue::as_str)?;
+            (existing_tag.to_lowercase() == requested_tag_lower)
+                .then(|| existing_tag.to_string())
+        })
+}
+
+fn find_node_index(nodes: &[String], tag: &str) -> Option<usize> {
+    nodes.iter().position(|node_str| {
+        serde_json::from_str::<JsonValue>(node_str)
+            .ok()
+            .is_some_and(|value| value.get("tag").and_then(JsonValue::as_str) == Some(tag))
+    })
+}
+
+pub async fn get_nodes(
+    State(state): State<Arc<AppState>>,
+) -> Json<ApiResponse<Vec<ManualNodeInfo>>> {
     let config = state.config.read().await;
 
     let mut nodes = Vec::new();
@@ -281,13 +324,14 @@ pub async fn get_nodes(State(state): State<Arc<AppState>>) -> Json<ApiResponse<V
 
     for (idx, node_str) in config.nodes.iter().enumerate() {
         match parse_node_json(node_str) {
-            Ok((display_info, _)) => {
-                nodes.push(NodeInfo {
+            Ok((display_info, outbound)) => {
+                nodes.push(ManualNodeInfo {
                     tag: display_info.tag,
                     server: display_info.server,
                     server_port: display_info.server_port,
                     node_type: display_info.node_type,
                     sni: display_info.sni,
+                    outbound,
                 });
             }
             Err(e) => {
@@ -326,41 +370,22 @@ pub async fn add_node(
 ) -> HandlerResult {
     Validator::validate_node_request(&req).map_err(|e| status_error(StatusCode::BAD_REQUEST, e))?;
 
-    let node_type = req.node_type.as_deref().unwrap_or("hysteria2");
-
-    // 验证节点类型是否支持
-    if !VALID_NODE_TYPES.contains(&node_type) {
-        return Err(status_error(
-            StatusCode::BAD_REQUEST,
-            format!(
-                "不支持的节点类型: {}，支持的类型: {}",
-                node_type,
-                VALID_NODE_TYPES.join(", ")
-            ),
-        ));
-    }
+    let node_type = requested_node_type(&req)
+        .map_err(|message| status_error(StatusCode::BAD_REQUEST, message))?;
 
     let _config_update = state.config_update.lock().await;
     let was_running = sing_box_is_running(&state).await;
     let old_config = state.config.read().await.clone();
     let mut new_config = old_config.clone();
 
-    // 检查标签唯一性（大小写不敏感）
-    let req_tag_lower = req.tag.to_lowercase();
-    for node_str in &new_config.nodes {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(node_str) {
-            if let Some(existing_tag) = v.get("tag").and_then(|t| t.as_str()) {
-                if existing_tag.to_lowercase() == req_tag_lower {
-                    return Err(status_error(
-                        StatusCode::BAD_REQUEST,
-                        format!(
-                            "标签 '{}' 与已存在的节点 '{}' 重复（不区分大小写）",
-                            req.tag, existing_tag
-                        ),
-                    ));
-                }
-            }
-        }
+    if let Some(existing_tag) = find_duplicate_tag(&new_config.nodes, req.tag.trim(), None) {
+        return Err(status_error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "标签 '{}' 与已存在的节点 '{}' 重复（不区分大小写）",
+                req.tag, existing_tag
+            ),
+        ));
     }
 
     let node_value = build_node_value(&req, node_type);
@@ -385,6 +410,67 @@ pub async fn add_node(
     {
         Ok(_) if was_running => Ok(success_no_data("Node added and sing-box restarted")),
         Ok(_) => Ok(success_no_data("Node added")),
+        Err(e) => Err(status_error(StatusCode::INTERNAL_SERVER_ERROR, e)),
+    }
+}
+
+pub async fn update_node(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UpdateNodeRequest>,
+) -> HandlerResult {
+    let original_tag = req.original_tag.clone();
+    if original_tag.trim().is_empty() {
+        return Err(status_error(
+            StatusCode::BAD_REQUEST,
+            "Original node tag cannot be empty",
+        ));
+    }
+
+    Validator::validate_node_request(&req.node)
+        .map_err(|e| status_error(StatusCode::BAD_REQUEST, e))?;
+    let node_type = requested_node_type(&req.node)
+        .map_err(|message| status_error(StatusCode::BAD_REQUEST, message))?;
+    let node_value = build_node_value(&req.node, node_type);
+    let node_json = serde_json::to_string(&node_value).map_err(|e| {
+        status_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to serialize node: {}", e),
+        )
+    })?;
+
+    let _config_update = state.config_update.lock().await;
+    let was_running = sing_box_is_running(&state).await;
+    let old_config = state.config.read().await.clone();
+    let mut new_config = old_config.clone();
+
+    let node_index = find_node_index(&new_config.nodes, &original_tag)
+        .ok_or_else(|| status_error(StatusCode::NOT_FOUND, "Node not found"))?;
+
+    if let Some(existing_tag) =
+        find_duplicate_tag(&new_config.nodes, req.node.tag.trim(), Some(node_index))
+    {
+        return Err(status_error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "标签 '{}' 与已存在的节点 '{}' 重复（不区分大小写）",
+                req.node.tag, existing_tag
+            ),
+        ));
+    }
+
+    new_config.nodes[node_index] = node_json;
+
+    match apply_persistent_config_change(
+        &state,
+        &old_config,
+        &new_config,
+        was_running,
+        SubFetchPolicy::CacheOnly,
+    )
+    .await
+    {
+        Ok(_) if was_running => Ok(success_no_data("Node updated and sing-box restarted")),
+        Ok(_) => Ok(success_no_data("Node updated")),
         Err(e) => Err(status_error(StatusCode::INTERNAL_SERVER_ERROR, e)),
     }
 }
@@ -431,7 +517,7 @@ pub async fn delete_node(
 mod tests {
     use axum::{extract::State, response::Json};
 
-    use super::{build_node_value, get_nodes};
+    use super::{build_node_value, find_duplicate_tag, find_node_index, get_nodes};
     use crate::{
         models::{Config, NodeRequest},
         test_support::app_state,
@@ -455,6 +541,25 @@ mod tests {
         assert_eq!(nodes[0].server_port, 443);
         assert_eq!(nodes[0].node_type, "hysteria2");
         assert_eq!(nodes[0].sni.as_deref(), Some("sni.example.com"));
+        assert_eq!(nodes[0].outbound["password"], "secret");
+        assert_eq!(nodes[0].outbound["tls"]["insecure"], true);
+    }
+
+    #[test]
+    fn update_helpers_find_original_and_skip_its_tag_for_duplicates() {
+        let nodes = vec![
+            r#"{"type":"socks","tag":"First","server":"127.0.0.1","server_port":1080}"#
+                .to_string(),
+            r#"{"type":"socks","tag":"Second","server":"127.0.0.1","server_port":1081}"#
+                .to_string(),
+        ];
+
+        assert_eq!(find_node_index(&nodes, "First"), Some(0));
+        assert_eq!(find_duplicate_tag(&nodes, "first", Some(0)), None);
+        assert_eq!(
+            find_duplicate_tag(&nodes, "SECOND", Some(0)).as_deref(),
+            Some("Second")
+        );
     }
 
     #[test]
