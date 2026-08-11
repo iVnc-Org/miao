@@ -50,6 +50,7 @@ Usage:
 Options:
   -h, --help                    Show this help message
   -V, --version                 Show version information
+      --config <PATH>           Configuration file path
       --socks-listen <ADDR>     SOCKS5 listen address (default: {DEFAULT_SOCKS_LISTEN})
       --socks-port <PORT>       SOCKS5 listen port (default: {DEFAULT_SOCKS_PORT})
 
@@ -72,6 +73,14 @@ where
         match arg.as_str() {
             "-h" | "--help" => options.show_help = true,
             "-V" | "--version" => options.show_version = true,
+            "--config" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| AppError::message("--config requires a path"))?;
+                if value.trim().is_empty() {
+                    return Err(AppError::message("--config requires a path"));
+                }
+            }
             "--socks-listen" => {
                 let value = args
                     .next()
@@ -91,6 +100,12 @@ where
             _ if arg.starts_with("--socks-port=") => {
                 let value = arg.trim_start_matches("--socks-port=");
                 options.socks_port = Some(parse_socks_port(value)?);
+            }
+            _ if arg.starts_with("--config=") => {
+                let value = arg.trim_start_matches("--config=");
+                if value.trim().is_empty() {
+                    return Err(AppError::message("--config requires a path"));
+                }
             }
             _ => {
                 return Err(AppError::message(format!(
@@ -511,7 +526,7 @@ async fn shutdown_signal(state: Arc<AppState>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{config_declares_key, migrate_proxy_mode};
+    use super::{config_declares_key, migrate_proxy_mode, parse_cli_args};
     use crate::models::{Config, ProxyMode};
 
     #[test]
@@ -538,6 +553,21 @@ custom_rules:
     #[test]
     fn config_declares_key_handles_invalid_yaml() {
         assert!(!config_declares_key("mode: [", "mode"));
+    }
+
+    #[test]
+    fn cli_accepts_config_path_forms() {
+        assert!(parse_cli_args(["miao", "--config", "/tmp/miao.yaml"]).is_ok());
+        assert!(parse_cli_args(["miao", "--config=/tmp/miao.yaml"]).is_ok());
+    }
+
+    #[test]
+    fn cli_rejects_missing_config_path() {
+        let error = parse_cli_args(["miao", "--config"]).unwrap_err();
+        assert_eq!(error.to_string(), "--config requires a path");
+
+        let error = parse_cli_args(["miao", "--config="]).unwrap_err();
+        assert_eq!(error.to_string(), "--config requires a path");
     }
 
     #[test]
