@@ -1,5 +1,5 @@
 export { Button, SectionCard, ToastStack } from './ui.jsx'
-export { ConfirmModal, NodeModal, ConnectionsModal, PoolTestResultModal } from './modals.jsx'
+export { ConfirmModal, SubscriptionModal, NodeModal, ConnectionsModal, PoolTestResultModal } from './modals.jsx'
 export { TopBar } from './TopBar.jsx'
 export { StatusCard } from './StatusCard.jsx'
 export { ProxyCard } from './ProxyCard.jsx'

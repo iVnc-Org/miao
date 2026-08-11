@@ -2,6 +2,8 @@ use crate::error::{AppError, AppResult};
 use crate::services::node_parser::{parse_clash_proxies, parse_uri_subscription};
 use std::path::Path;
 
+const SUBSCRIPTION_USER_AGENT: &str = concat!("miao/", env!("CARGO_PKG_VERSION"));
+
 /// 订阅获取结果，包含节点和解析错误信息
 #[derive(Debug)]
 pub struct FetchResult {
@@ -13,14 +15,6 @@ pub struct FetchResult {
 
 pub async fn fetch_sub(link: &str, client: &reqwest::Client) -> AppResult<FetchResult> {
     let text = read_subscription_text(link, client).await?;
-
-    if text.trim().is_empty() {
-        return Err(AppError::message(format!(
-            "Subscription response is empty from {}",
-            redact_subscription_link(link)
-        )));
-    }
-
     parse_subscription_text(link, &text)
 }
 
@@ -39,6 +33,7 @@ async fn read_subscription_text(link: &str, client: &reqwest::Client) -> AppResu
 
     let res = client
         .get(link)
+        .header(reqwest::header::USER_AGENT, SUBSCRIPTION_USER_AGENT)
         .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
@@ -82,7 +77,14 @@ async fn read_subscription_text(link: &str, client: &reqwest::Client) -> AppResu
     })
 }
 
-fn parse_subscription_text(link: &str, text: &str) -> AppResult<FetchResult> {
+pub(crate) fn parse_subscription_text(link: &str, text: &str) -> AppResult<FetchResult> {
+    if text.trim().is_empty() {
+        return Err(AppError::message(format!(
+            "Subscription response is empty from {}",
+            redact_subscription_link(link)
+        )));
+    }
+
     let parse_result = match parse_uri_subscription(&text) {
         Ok(result) if !result.nodes.is_empty() => result,
         _ => parse_clash_proxies(&text).map_err(|e| {
@@ -162,6 +164,52 @@ mod tests {
 
         assert!(message.contains("Subscription server returned HTTP error"));
         assert!(message.contains("500"));
+    }
+
+    #[tokio::test]
+    async fn fetch_sub_sends_miao_user_agent() {
+        use axum::{
+            http::{header, HeaderMap, StatusCode},
+            routing::get,
+            Router,
+        };
+
+        let app = Router::new().route(
+            "/sub",
+            get(|headers: HeaderMap| async move {
+                if headers.get(header::USER_AGENT).and_then(|value| value.to_str().ok())
+                    != Some(SUBSCRIPTION_USER_AGENT)
+                {
+                    return (StatusCode::FORBIDDEN, "missing user agent");
+                }
+
+                (
+                    StatusCode::OK,
+                    r#"proxies:
+  - name: test-node
+    type: ss
+    server: example.com
+    port: 8388
+    cipher: aes-128-gcm
+    password: test-password
+"#,
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let result = fetch_sub(
+            &format!("http://{addr}/sub"),
+            &reqwest::Client::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.node_names, vec!["test-node".to_string()]);
     }
 
     #[test]

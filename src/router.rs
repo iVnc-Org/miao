@@ -12,7 +12,7 @@ use crate::handlers::{
     service::{get_status, set_mode, start_service, stop_service, test_connectivity},
     share::{get_share, get_share_endpoints, set_share, test_share_endpoint},
     static_assets::{serve_favicon, serve_index},
-    subs::{add_sub, delete_sub, get_subs, refresh_subs, replace_sub},
+    subs::{add_sub, add_sub_content, delete_sub, get_subs, refresh_subs, replace_sub},
     tun_process::{get_tun_process, set_tun_process},
     version::{get_version, upgrade},
 };
@@ -37,6 +37,7 @@ pub fn build_router(app_state: Arc<AppState>) -> Router {
         .route("/api/upgrade", post(upgrade))
         .route("/api/subs", get(get_subs))
         .route("/api/subs", post(add_sub))
+        .route("/api/subs/content", post(add_sub_content))
         .route("/api/subs", put(replace_sub))
         .route("/api/subs", delete(delete_sub))
         .route("/api/subs/refresh", post(refresh_subs))
@@ -251,7 +252,27 @@ mod tests {
         assert_eq!(json["success"], true);
         assert_eq!(json["message"], "Subscriptions loaded");
         assert_eq!(json["data"][0]["url"], "https://example.com/subscription");
+        assert_eq!(json["data"][0]["local"], false);
         assert_eq!(json["data"][0]["node_count"], 0);
+    }
+
+    #[tokio::test]
+    async fn router_rejects_empty_pasted_subscription_content() {
+        let app = test_app(Config::default()).await;
+
+        let response = app
+            .oneshot(json_request(
+                "POST",
+                "/api/subs/content",
+                json!({ "content": "  ", "name": "Local" }),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = response_json(response).await;
+        assert_eq!(json["success"], false);
+        assert_eq!(json["message"], "Subscription content cannot be empty");
     }
 
     #[tokio::test]

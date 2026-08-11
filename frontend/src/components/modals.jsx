@@ -1,5 +1,20 @@
 import { useEffect, useMemo, useState } from 'react'
-import { X, CircleAlert, Plus, Activity, ArrowDown, ArrowUp, Network, RefreshCw, Route, Search, Trash2 } from 'lucide-react'
+import {
+  X,
+  CircleAlert,
+  Plus,
+  Activity,
+  ArrowDown,
+  ArrowUp,
+  FileText,
+  Link2,
+  Network,
+  RefreshCw,
+  Route,
+  Rss,
+  Search,
+  Trash2,
+} from 'lucide-react'
 import { Button } from './ui.jsx'
 import { 
   classNames, 
@@ -34,6 +49,136 @@ export function ConfirmModal({ open, title, message, onCancel, onConfirm }) {
         <div className="modal-actions">
           <Button tone="ghost" size="sm" onClick={onCancel}>取消</Button>
           <Button tone="danger" size="sm" onClick={onConfirm}>确认</Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+export function SubscriptionModal({ open, loading, onClose, onSubmit }) {
+  const [mode, setMode] = useState('url')
+  const [url, setUrl] = useState('')
+  const [name, setName] = useState('')
+  const [content, setContent] = useState('')
+
+  if (!open) return null
+
+  const canSubmit = mode === 'url' ? Boolean(url.trim()) : Boolean(content.trim())
+  const close = () => {
+    if (!loading) onClose()
+  }
+  const submit = async () => {
+    if (!canSubmit || loading) return
+    const added = await onSubmit(
+      mode === 'url'
+        ? { mode, url: url.trim() }
+        : { mode, name: name.trim(), content: content.trim() }
+    )
+    if (added) onClose()
+  }
+
+  return (
+    <div className="modal-overlay" onClick={close}>
+      <div
+        className="modal-card subscription-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="subscription-modal-title"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="modal-title-row">
+          <div className="modal-title-wrap">
+            <Rss size={18} className="icon-accent" />
+            <h3 id="subscription-modal-title">添加订阅</h3>
+          </div>
+          <button
+            type="button"
+            className="icon-button"
+            disabled={loading}
+            onClick={close}
+            title="关闭"
+            aria-label="关闭添加订阅弹窗"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="subscription-source-switch" aria-label="订阅来源">
+          <button
+            type="button"
+            className={classNames(mode === 'url' && 'active')}
+            aria-pressed={mode === 'url'}
+            disabled={loading}
+            onClick={() => setMode('url')}
+          >
+            <Link2 size={14} />
+            <span>订阅链接</span>
+          </button>
+          <button
+            type="button"
+            className={classNames(mode === 'content' && 'active')}
+            aria-pressed={mode === 'content'}
+            disabled={loading}
+            onClick={() => setMode('content')}
+          >
+            <FileText size={14} />
+            <span>粘贴内容</span>
+          </button>
+        </div>
+
+        {mode === 'url' ? (
+          <div className="form-grid single subscription-modal-fields">
+            <label className="field">
+              <span>订阅链接</span>
+              <input
+                value={url}
+                disabled={loading}
+                onChange={(event) => setUrl(event.target.value)}
+                onKeyDown={(event) => event.key === 'Enter' && submit()}
+                placeholder="https://example.com/subscription"
+                autoFocus
+              />
+            </label>
+          </div>
+        ) : (
+          <div className="form-grid single subscription-modal-fields">
+            <label className="field">
+              <span>显示名称（可选）</span>
+              <input
+                value={name}
+                maxLength={80}
+                disabled={loading}
+                onChange={(event) => setName(event.target.value)}
+                placeholder="例如：备用订阅"
+                autoFocus
+              />
+            </label>
+            <label className="field">
+              <span>订阅内容</span>
+              <textarea
+                className="subscription-content-input"
+                value={content}
+                disabled={loading}
+                onChange={(event) => setContent(event.target.value)}
+                placeholder="Base64、URI 列表或 Clash YAML"
+                spellCheck={false}
+              />
+            </label>
+          </div>
+        )}
+
+        <div className="modal-actions">
+          <Button tone="ghost" size="sm" disabled={loading} onClick={close}>取消</Button>
+          <Button
+            tone="primary"
+            size="sm"
+            icon={<Plus size={12} />}
+            loading={loading}
+            disabled={!canSubmit}
+            onClick={submit}
+          >
+            添加
+          </Button>
         </div>
       </div>
     </div>

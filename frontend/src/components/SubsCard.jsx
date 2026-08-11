@@ -12,6 +12,7 @@ import {
   X,
 } from 'lucide-react'
 import { Button, SectionCard } from './ui.jsx'
+import { SubscriptionModal } from './modals.jsx'
 import { classNames, maskSubscription } from '../utils.js'
 
 function subscriptionStatus(sub) {
@@ -21,23 +22,42 @@ function subscriptionStatus(sub) {
 
   switch (sub.state) {
     case 'ok':
-      return { tone: 'success', icon: Check, text: `${sub.node_count} 个节点 · 已更新` }
+      return {
+        tone: 'success',
+        icon: Check,
+        text: sub.local
+          ? `${sub.node_count} 个节点 · 本地内容已载入`
+          : `${sub.node_count} 个节点 · 已更新`,
+      }
     case 'cached':
-      return { tone: 'cached', icon: Database, text: `${sub.node_count} 个节点 · 使用本地缓存` }
+      return {
+        tone: 'cached',
+        icon: Database,
+        text: sub.local
+          ? `${sub.node_count} 个节点 · 使用本地内容`
+          : `${sub.node_count} 个节点 · 使用本地缓存`,
+      }
     case 'expired':
       return {
         tone: 'warning',
         icon: CircleAlert,
-        text: `订阅链接已失效 · 仍在使用 ${sub.node_count} 个缓存节点`,
+        text: sub.local
+          ? `本地订阅内容不可用 · 仍在使用 ${sub.node_count} 个缓存节点`
+          : `订阅链接已失效 · 仍在使用 ${sub.node_count} 个缓存节点`,
       }
     default:
-      return { tone: 'pending', icon: Clock3, text: '等待首次获取' }
+      return {
+        tone: 'pending',
+        icon: Clock3,
+        text: sub.local ? '等待载入本地内容' : '等待首次获取',
+      }
   }
 }
 
 const SubRow = memo(function SubRow({ sub, disabled, onDelete, onStartReplace }) {
   const status = subscriptionStatus(sub)
   const StatusIcon = status.icon
+  const title = sub.name || (sub.local ? '本地订阅' : maskSubscription(sub.url))
 
   return (
     <div className="list-row">
@@ -45,11 +65,11 @@ const SubRow = memo(function SubRow({ sub, disabled, onDelete, onStartReplace })
         <StatusIcon size={12} />
       </div>
       <div className="list-row-content">
-        <div className="list-row-title">{maskSubscription(sub.url)}</div>
+        <div className="list-row-title">{title}</div>
         <div className={classNames('list-row-meta', status.tone)}>{status.text}</div>
       </div>
       <div className="list-row-actions">
-        {sub.state === 'expired' && (
+        {sub.state === 'expired' && !sub.local && (
           <button
             type="button"
             className="icon-button subtle"
@@ -65,7 +85,7 @@ const SubRow = memo(function SubRow({ sub, disabled, onDelete, onStartReplace })
           type="button"
           className="icon-button subtle"
           disabled={disabled}
-          onClick={() => onDelete(sub.url)}
+          onClick={() => onDelete(sub.url, title)}
           title="删除订阅"
           aria-label="删除订阅"
         >
@@ -78,8 +98,6 @@ const SubRow = memo(function SubRow({ sub, disabled, onDelete, onStartReplace })
 
 export function SubsCard({
   subs,
-  newSubUrl,
-  setNewSubUrl,
   loadingAction,
   onAddSub,
   onDeleteSub,
@@ -87,6 +105,7 @@ export function SubsCard({
   onRefreshSubs,
   isInitializing,
 }) {
+  const [addModalOpen, setAddModalOpen] = useState(false)
   const [replacingUrl, setReplacingUrl] = useState('')
   const [replacementUrl, setReplacementUrl] = useState('')
   const busy = isInitializing || Boolean(loadingAction)
@@ -178,26 +197,26 @@ export function SubsCard({
               )}
             </div>
           ))}
-        <div className="subscription-add-row">
-          <input
-            value={newSubUrl}
-            disabled={busy}
-            onChange={(event) => setNewSubUrl(event.target.value)}
-            onKeyDown={(event) => event.key === 'Enter' && onAddSub()}
-            placeholder="粘贴订阅链接..."
-          />
+        <div className="subscription-add-action">
           <Button
             tone="secondary"
             size="sm"
             icon={<Plus size={12} />}
-            loading={loadingAction === 'addSub'}
             disabled={busy}
-            onClick={onAddSub}
+            onClick={() => setAddModalOpen(true)}
           >
-            添加
+            添加订阅
           </Button>
         </div>
       </div>
+      {addModalOpen && (
+        <SubscriptionModal
+          open
+          loading={loadingAction === 'addSub'}
+          onClose={() => setAddModalOpen(false)}
+          onSubmit={onAddSub}
+        />
+      )}
     </SectionCard>
   )
 }

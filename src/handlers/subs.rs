@@ -1,18 +1,26 @@
 use axum::{extract::State, http::StatusCode, response::Json};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 use crate::models::{
-    ApiResponse, ReplaceSubRequest, SubRequest, SubState, SubStatus,
+    ApiResponse, ContentSubRequest, ReplaceSubRequest, SubRequest, SubState, SubStatus,
 };
 use crate::responses::{status_error, success, success_no_data, HandlerResult};
 use crate::services::{
     config::{
         apply_config_change, fetch_subscription_nodes, regenerate_and_restart, SubFetchPolicy,
     },
-    sub_nodes::{hydrate_sub_status, load_sub_nodes, save_sub_nodes},
+    sub_nodes::{
+        hydrate_sub_status, is_local_subscription, load_sub_nodes, save_sub_nodes, StoredNode,
+        LOCAL_SUBSCRIPTION_PREFIX,
+    },
+    subscription::parse_subscription_text,
 };
 use crate::state::AppState;
 use crate::validation::Validator;
+
+const MAX_PASTED_SUBSCRIPTION_BYTES: usize = 1024 * 1024;
+const MAX_SUBSCRIPTION_NAME_CHARS: usize = 80;
 
 pub async fn get_subs(State(state): State<Arc<AppState>>) -> Json<ApiResponse<Vec<SubStatus>>> {
     let config = state.config.read().await;
@@ -24,6 +32,8 @@ pub async fn get_subs(State(state): State<Arc<AppState>>) -> Json<ApiResponse<Ve
         .map(|url| {
             status_map.get(url).cloned().unwrap_or(SubStatus {
                 url: url.clone(),
+                name: None,
+                local: is_local_subscription(url),
                 state: SubState::Pending,
                 node_count: 0,
                 error: None,
@@ -68,6 +78,132 @@ pub async fn add_sub(
         Ok(_) => Ok(success_no_data("Subscription added and sing-box restarted")),
         Err(e) => Err(status_error(StatusCode::INTERNAL_SERVER_ERROR, e)),
     }
+}
+
+pub async fn add_sub_content(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ContentSubRequest>,
+) -> HandlerResult {
+    let content = req.content.trim().to_string();
+    if content.is_empty() {
+        return Err(status_error(
+            StatusCode::BAD_REQUEST,
+            "Subscription content cannot be empty",
+        ));
+    }
+    if content.len() > MAX_PASTED_SUBSCRIPTION_BYTES {
+        return Err(status_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Subscription content exceeds the 1 MiB limit",
+        ));
+    }
+
+    let name = req
+        .name
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty());
+    if name
+        .as_ref()
+        .is_some_and(|name| name.chars().count() > MAX_SUBSCRIPTION_NAME_CHARS)
+    {
+        return Err(status_error(
+            StatusCode::BAD_REQUEST,
+            "Subscription name exceeds 80 characters",
+        ));
+    }
+
+    let source = format!(
+        "{}{}",
+        LOCAL_SUBSCRIPTION_PREFIX,
+        hex::encode(Sha256::digest(content.as_bytes()))
+    );
+    let parsed = parse_subscription_text(&source, &content)
+        .map_err(|error| status_error(StatusCode::BAD_REQUEST, error))?;
+    if parsed.node_names.is_empty() {
+        let message = if parsed.parse_errors.is_empty() {
+            "Subscription content contains no supported nodes".to_string()
+        } else {
+            format!(
+                "Subscription content contains no valid nodes; {} entries failed to parse",
+                parsed.parse_errors.len()
+            )
+        };
+        return Err(status_error(StatusCode::BAD_REQUEST, message));
+    }
+
+    let parse_warning = if parsed.parse_errors.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "{} nodes skipped due to parse errors",
+            parsed.parse_errors.len()
+        ))
+    };
+    let nodes: Vec<StoredNode> = parsed
+        .node_names
+        .into_iter()
+        .zip(parsed.outbounds)
+        .map(|(name, outbound)| StoredNode { name, outbound })
+        .collect();
+    let node_count = nodes.len();
+
+    let _config_update = state.config_update.lock().await;
+    let old_config = state.config.read().await.clone();
+    if old_config.subs.contains(&source) {
+        return Err(status_error(
+            StatusCode::BAD_REQUEST,
+            "Subscription content already exists",
+        ));
+    }
+
+    let previous_store = load_sub_nodes().await;
+    let mut staged_store = previous_store.clone();
+    staged_store.record_local_success(
+        &source,
+        name.clone(),
+        content,
+        nodes,
+        None,
+    );
+    save_sub_nodes(&staged_store)
+        .await
+        .map_err(|error| status_error(StatusCode::INTERNAL_SERVER_ERROR, error))?;
+
+    let mut new_config = old_config.clone();
+    new_config.subs.push(source.clone());
+    if let Err(apply_error) = apply_config_change(
+        &state,
+        &old_config,
+        &new_config,
+        SubFetchPolicy::CacheOnly,
+    )
+    .await
+    {
+        if let Err(restore_error) = save_sub_nodes(&previous_store).await {
+            return Err(status_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!(
+                    "Local subscription add failed: {}. Cache rollback failed: {}",
+                    apply_error, restore_error
+                ),
+            ));
+        }
+        hydrate_sub_status(&state, &old_config.subs).await;
+        return Err(status_error(StatusCode::INTERNAL_SERVER_ERROR, apply_error));
+    }
+
+    state.sub_status.lock().await.insert(
+        source.clone(),
+        SubStatus {
+            url: source,
+            name,
+            local: true,
+            state: SubState::Ok,
+            node_count,
+            error: parse_warning,
+        },
+    );
+    Ok(success_no_data("Local subscription added"))
 }
 
 pub async fn delete_sub(
@@ -170,6 +306,8 @@ pub async fn replace_sub(
         req.new_url.clone(),
         SubStatus {
             url: req.new_url,
+            name: None,
+            local: false,
             state: SubState::Ok,
             node_count: staged_store
                 .subs

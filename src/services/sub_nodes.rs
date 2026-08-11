@@ -12,16 +12,22 @@ use crate::state::AppState;
 
 const SUB_NODES_FILE: &str = "sub_nodes.json";
 const SUB_NODES_SCHEMA_VERSION: u32 = 1;
+pub const LOCAL_SUBSCRIPTION_PREFIX: &str = "content://";
+
+pub fn is_local_subscription(url: &str) -> bool {
+    url.starts_with(LOCAL_SUBSCRIPTION_PREFIX)
+}
 
 /// 订阅节点的本地缓存。
 ///
 /// 订阅链接往往只有几分钟有效期，所以"节点"必须和"链接"解耦：链接失效之后，
 /// 上一次成功抓到的节点仍然要能用、要能显示。这里存的是**已解析的 sing-box
-/// outbound JSON**，而不是订阅原文——`build_sing_box_config` 正好消费
-/// `(Vec<String>, Vec<Value>)`，重新加载时零转换，也不会因为解析器回归而
-/// 让已经导入过的节点失效。
+/// outbound JSON**。对于用户直接粘贴的订阅，这里还会保存原文，以便刷新时
+/// 在本地重新解析，不需要访问远端链接。`build_sing_box_config` 正好消费
+/// `(Vec<String>, Vec<Value>)`，重新加载时零转换。
 ///
-/// 代价：解析器的改进不会追溯修复已存节点，要等用户手动刷新一次。
+/// URL 订阅的已存节点仍要等下次成功抓取才会应用解析器改进；本地内容订阅可由
+/// 用户点击刷新直接重新解析。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SubNodeStore {
     #[serde(default)]
@@ -41,6 +47,12 @@ impl Default for SubNodeStore {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct StoredSub {
+    /// 用户为本地内容订阅设置的显示名称。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// 粘贴的订阅原文。URL 订阅不保存该字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
     /// 上次成功抓取的时间，仅用于展示。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fetched_at: Option<String>,
@@ -99,9 +111,37 @@ impl SubNodeStore {
         nodes: Vec<StoredNode>,
         fetched_at: Option<String>,
     ) {
+        let (name, content) = self
+            .subs
+            .get(url)
+            .map(|entry| (entry.name.clone(), entry.content.clone()))
+            .unwrap_or_default();
         self.subs.insert(
             url.to_string(),
             StoredSub {
+                name,
+                content,
+                fetched_at,
+                stale: false,
+                last_error: None,
+                nodes,
+            },
+        );
+    }
+
+    pub fn record_local_success(
+        &mut self,
+        url: &str,
+        name: Option<String>,
+        content: String,
+        nodes: Vec<StoredNode>,
+        fetched_at: Option<String>,
+    ) {
+        self.subs.insert(
+            url.to_string(),
+            StoredSub {
+                name,
+                content: Some(content),
                 fetched_at,
                 stale: false,
                 last_error: None,
@@ -121,18 +161,24 @@ impl SubNodeStore {
         match self.subs.get(url) {
             Some(entry) if entry.stale => SubStatus {
                 url: url.to_string(),
+                name: entry.name.clone(),
+                local: entry.content.is_some() || is_local_subscription(url),
                 state: SubState::Expired,
                 node_count: entry.nodes.len(),
                 error: None,
             },
             Some(entry) => SubStatus {
                 url: url.to_string(),
+                name: entry.name.clone(),
+                local: entry.content.is_some() || is_local_subscription(url),
                 state: SubState::Cached,
                 node_count: entry.nodes.len(),
                 error: None,
             },
             None => SubStatus {
                 url: url.to_string(),
+                name: None,
+                local: is_local_subscription(url),
                 state: SubState::Pending,
                 node_count: 0,
                 error: None,
@@ -179,7 +225,7 @@ pub async fn save_sub_nodes_to(path: &Path, store: &SubNodeStore) -> AppResult<(
     let content = serde_json::to_string_pretty(store)
         .map_err(|e| AppError::context("Failed to serialize subscription node cache", e))?;
     write_file_atomic(path, &content, "subscription node cache").await?;
-    // 这个文件含节点密码/UUID，和 ~/.miao/config.json 同级敏感。
+    // 这个文件含订阅原文、节点密码和 UUID，和 ~/.miao/config.json 同级敏感。
     restrict_permissions(path).await;
     Ok(())
 }
@@ -281,6 +327,29 @@ mod tests {
         assert!(entry.last_error.is_none());
         assert_eq!(entry.nodes.len(), 2);
         assert_eq!(store.status_for("a").state, SubState::Cached);
+    }
+
+    #[test]
+    fn local_subscription_metadata_survives_node_refresh() {
+        let source = format!("{}digest", LOCAL_SUBSCRIPTION_PREFIX);
+        let mut store = SubNodeStore::default();
+        store.record_local_success(
+            &source,
+            Some("Local backup".to_string()),
+            "cHJveGllczogW10=".to_string(),
+            vec![node("n1")],
+            None,
+        );
+
+        store.record_success(&source, vec![node("n2")], None);
+
+        let entry = &store.subs[&source];
+        assert_eq!(entry.name.as_deref(), Some("Local backup"));
+        assert_eq!(entry.content.as_deref(), Some("cHJveGllczogW10="));
+        assert_eq!(entry.nodes[0].name, "n2");
+        let status = store.status_for(&source);
+        assert!(status.local);
+        assert_eq!(status.name.as_deref(), Some("Local backup"));
     }
 
     #[test]

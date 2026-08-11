@@ -1,22 +1,11 @@
 import { useState } from 'react'
 import { Plus, Settings } from 'lucide-react'
 import { Button, LogoIcon } from './ui.jsx'
-import { validateSubscriptionUrl } from '../utils.js'
+import { SubscriptionModal } from './modals.jsx'
 
-export function OnboardingScreen({ onAddSub, loadingAction, onOpenAddNode, showToast }) {
-  const [subUrl, setSubUrl] = useState('')
-
+export function OnboardingScreen({ onAddSub, loadingAction, onOpenAddNode }) {
+  const [showSubscriptionModal, setShowSubscriptionModal] = useState(false)
   const isLoading = loadingAction === 'addSub'
-
-  const handleAddSub = () => {
-    if (isLoading) return
-    const error = validateSubscriptionUrl(subUrl)
-    if (error) {
-      showToast(error, 'error')
-      return
-    }
-    onAddSub(subUrl.trim())
-  }
 
   return (
     <div className="onboarding">
@@ -24,27 +13,19 @@ export function OnboardingScreen({ onAddSub, loadingAction, onOpenAddNode, showT
         <div className="onboarding-header">
           <LogoIcon size={40} />
           <h1 className="onboarding-title">Miao</h1>
-          <p className="onboarding-subtitle">添加订阅链接或手动节点以开始使用</p>
+          <p className="onboarding-subtitle">添加订阅或手动节点以开始使用</p>
         </div>
 
         <div className="onboarding-section">
-          <div className="onboarding-input-row">
-            <input
-              value={subUrl}
-              onChange={(e) => setSubUrl(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleAddSub()}
-              placeholder="粘贴订阅链接..."
-            />
-            <Button
-              tone="primary"
-              size="sm"
-              icon={<Plus size={12} />}
-              loading={isLoading}
-              onClick={handleAddSub}
-            >
-              添加订阅
-            </Button>
-          </div>
+          <Button
+            tone="primary"
+            icon={<Plus size={14} />}
+            loading={isLoading}
+            onClick={() => setShowSubscriptionModal(true)}
+            className="onboarding-node-btn"
+          >
+            添加订阅
+          </Button>
         </div>
 
         <div className="onboarding-divider">
@@ -62,6 +43,14 @@ export function OnboardingScreen({ onAddSub, loadingAction, onOpenAddNode, showT
           </Button>
         </div>
       </div>
+      {showSubscriptionModal && (
+        <SubscriptionModal
+          open
+          loading={isLoading}
+          onClose={() => setShowSubscriptionModal(false)}
+          onSubmit={onAddSub}
+        />
+      )}
     </div>
   )
 }

@@ -65,6 +65,13 @@ pub struct SubRequest {
 }
 
 #[derive(Deserialize)]
+pub struct ContentSubRequest {
+    pub content: String,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+#[derive(Deserialize)]
 pub struct ReplaceSubRequest {
     pub old_url: String,
     pub new_url: String,
@@ -96,6 +103,9 @@ pub enum SubState {
 #[derive(Clone, Serialize)]
 pub struct SubStatus {
     pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub local: bool,
     pub state: SubState,
     pub node_count: usize,
     /// 只用于真正需要用户处理的问题（例如部分节点解析失败）。

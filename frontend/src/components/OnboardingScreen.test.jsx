@@ -9,7 +9,6 @@ function renderOnboarding(props = {}) {
       onAddSub={vi.fn()}
       loadingAction=""
       onOpenAddNode={vi.fn()}
-      showToast={vi.fn()}
       {...props}
     />
   )
@@ -18,28 +17,37 @@ function renderOnboarding(props = {}) {
 describe('OnboardingScreen', () => {
   it('submits a trimmed subscription URL', async () => {
     const user = userEvent.setup()
-    const onAddSub = vi.fn()
+    const onAddSub = vi.fn().mockResolvedValue(true)
 
     renderOnboarding({ onAddSub })
 
-    await user.type(screen.getByPlaceholderText('粘贴订阅链接...'), '  https://example.com/sub  ')
     await user.click(screen.getByRole('button', { name: /添加订阅/ }))
+    await user.type(
+      screen.getByPlaceholderText('https://example.com/subscription'),
+      '  https://example.com/sub  '
+    )
+    await user.click(screen.getByRole('button', { name: '添加' }))
 
-    expect(onAddSub).toHaveBeenCalledWith('https://example.com/sub')
+    expect(onAddSub).toHaveBeenCalledWith({ mode: 'url', url: 'https://example.com/sub' })
   })
 
-  it('shows validation errors instead of submitting invalid URLs', async () => {
+  it('submits pasted content with an optional display name', async () => {
     const user = userEvent.setup()
-    const onAddSub = vi.fn()
-    const showToast = vi.fn()
+    const onAddSub = vi.fn().mockResolvedValue(true)
 
-    renderOnboarding({ onAddSub, showToast })
+    renderOnboarding({ onAddSub })
 
-    await user.type(screen.getByPlaceholderText('粘贴订阅链接...'), 'not-a-url')
     await user.click(screen.getByRole('button', { name: /添加订阅/ }))
+    await user.click(screen.getByRole('button', { name: /粘贴内容/ }))
+    await user.type(screen.getByLabelText('显示名称（可选）'), '本地备用')
+    await user.type(screen.getByLabelText('订阅内容'), 'c3M6Ly9leGFtcGxl')
+    await user.click(screen.getByRole('button', { name: '添加' }))
 
-    expect(onAddSub).not.toHaveBeenCalled()
-    expect(showToast).toHaveBeenCalledWith('无效的订阅链接格式', 'error')
+    expect(onAddSub).toHaveBeenCalledWith({
+      mode: 'content',
+      name: '本地备用',
+      content: 'c3M6Ly9leGFtcGxl',
+    })
   })
 
   it('opens the manual node modal', async () => {

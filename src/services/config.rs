@@ -26,9 +26,10 @@ use crate::services::{
         validate_sing_box_config,
     },
     sub_nodes::{
-        hydrate_sub_status, load_sub_nodes, save_sub_nodes, StoredNode, SubNodeStore,
+        hydrate_sub_status, is_local_subscription, load_sub_nodes, save_sub_nodes, StoredNode,
+        SubNodeStore,
     },
-    subscription::fetch_sub,
+    subscription::{fetch_sub, parse_subscription_text},
     write_file_atomic,
 };
 use crate::state::AppState;
@@ -614,7 +615,18 @@ impl SubFetchPolicy {
                 if store.is_empty_for(subs) {
                     subs.to_vec()
                 } else {
-                    Vec::new()
+                    subs.iter()
+                        .filter(|url| {
+                            is_local_subscription(url)
+                                && store.node_count(url) == 0
+                                && store
+                                    .subs
+                                    .get(*url)
+                                    .and_then(|entry| entry.content.as_ref())
+                                    .is_some()
+                        })
+                        .cloned()
+                        .collect()
                 }
             }
             SubFetchPolicy::FetchOnly(urls) => {
@@ -651,6 +663,7 @@ fn gen_outcome_from_store(config: &Config, store: &SubNodeStore) -> GenOutcome {
 
 async fn fetch_subscriptions(
     urls: &[String],
+    store: &SubNodeStore,
     state: &Arc<AppState>,
 ) -> Vec<(
     String,
@@ -661,13 +674,36 @@ async fn fetch_subscriptions(
         .map(|sub| {
             let sub = sub.clone();
             let client = state.http_client.clone();
+            let local = is_local_subscription(&sub);
+            let local_content = store
+                .subs
+                .get(&sub)
+                .and_then(|entry| entry.content.clone());
             async move {
-                info!(url = %sub, "Fetching subscription");
-                let result =
-                    tokio::time::timeout(Duration::from_secs(30), fetch_sub(&sub, &client)).await;
+                let result = if local {
+                    info!(source = %sub, "Parsing local subscription content");
+                    local_content
+                        .as_deref()
+                        .ok_or_else(|| AppError::message("Local subscription content is missing"))
+                        .and_then(|content| parse_subscription_text(&sub, content))
+                } else {
+                    info!(url = %sub, "Fetching subscription");
+                    match tokio::time::timeout(
+                        Duration::from_secs(30),
+                        fetch_sub(&sub, &client),
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => {
+                            warn!(url = %sub, timeout_secs = 30, "Subscription fetch timed out, keeping cached nodes");
+                            return (sub, Err("Request timeout".to_string()));
+                        }
+                    }
+                };
 
                 match result {
-                    Ok(Ok(fetch_result)) => {
+                    Ok(fetch_result) => {
                         let valid_count = fetch_result.node_names.len();
                         let total_count = fetch_result.total_count;
                         let error_count = fetch_result.parse_errors.len();
@@ -690,13 +726,9 @@ async fn fetch_subscriptions(
 
                         (sub.clone(), Ok(fetch_result))
                     }
-                    Ok(Err(e)) => {
+                    Err(e) => {
                         warn!(url = %sub, error = %e, "Subscription fetch failed, keeping cached nodes");
                         (sub.clone(), Err(e.to_string()))
-                    }
-                    Err(_) => {
-                        warn!(url = %sub, timeout_secs = 30, "Subscription fetch timed out, keeping cached nodes");
-                        (sub.clone(), Err("Request timeout".to_string()))
                     }
                 }
             }
@@ -720,7 +752,8 @@ pub(crate) async fn fetch_subscription_nodes(
     url: &str,
     state: &Arc<AppState>,
 ) -> AppResult<FetchedSubscriptionNodes> {
-    let mut results = fetch_subscriptions(&[url.to_string()], state).await;
+    let empty_store = SubNodeStore::default();
+    let mut results = fetch_subscriptions(&[url.to_string()], &empty_store, state).await;
     let (_, result) = results
         .pop()
         .ok_or_else(|| AppError::message("Subscription fetch returned no result"))?;
@@ -866,7 +899,7 @@ pub async fn gen_config(
     let mut node_list_is_complete = true;
     let mut fetch_errors: std::collections::HashMap<String, Option<String>> = Default::default();
 
-    let results = fetch_subscriptions(&to_fetch, state).await;
+    let results = fetch_subscriptions(&to_fetch, &store, state).await;
     for (url, result) in results {
         match result {
             Ok(fetch_result) => {
@@ -1541,15 +1574,17 @@ fn get_config_template(
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_manual_outbounds, config_cache_fingerprint, normalize_cached_sing_box_config,
-        extract_legacy_subscription_nodes, resolve_node_inventory, save_config_to, SubFetchPolicy,
+        collect_manual_outbounds, config_cache_fingerprint, extract_legacy_subscription_nodes,
+        fetch_subscriptions, normalize_cached_sing_box_config, resolve_node_inventory,
+        save_config_to, SubFetchPolicy,
     };
     use crate::error::AppResult;
     use crate::models::{
         Config, PoolConfig, ProcessListMode, ProcessMatch, ProcessProxyConfig, ProxyMode,
     };
     use crate::services::share_ports::SharePortMap;
-    use crate::services::sub_nodes::SubNodeStore;
+    use crate::services::sub_nodes::{SubNodeStore, LOCAL_SUBSCRIPTION_PREFIX};
+    use crate::test_support::app_state;
     use serde_json::json;
 
     #[test]
@@ -1591,6 +1626,34 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_reparses_local_content_with_missing_nodes() {
+        let remote = "https://example.com/sub".to_string();
+        let local = format!("{}local", LOCAL_SUBSCRIPTION_PREFIX);
+        let subs = vec![remote.clone(), local.clone()];
+        let mut store = SubNodeStore::default();
+        store.record_success(
+            &remote,
+            vec![crate::services::sub_nodes::StoredNode {
+                name: "remote-node".to_string(),
+                outbound: json!({}),
+            }],
+            None,
+        );
+        store.record_local_success(
+            &local,
+            Some("Local".to_string()),
+            "proxies: []".to_string(),
+            Vec::new(),
+            None,
+        );
+
+        assert_eq!(
+            SubFetchPolicy::CacheOrBootstrap.urls_to_fetch(&store, &subs),
+            vec![local]
+        );
+    }
+
+    #[test]
     fn fetch_only_targets_the_named_subscription() {
         let store = SubNodeStore::default();
         let subs = vec!["a".to_string(), "b".to_string()];
@@ -1601,6 +1664,35 @@ mod tests {
         // 不在配置里的 URL 不会被抓。
         let bogus = SubFetchPolicy::FetchOnly(vec!["zzz".to_string()]).urls_to_fetch(&store, &subs);
         assert!(bogus.is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_subscription_fetch_parses_stored_content_without_network() {
+        let source = format!("{}test", LOCAL_SUBSCRIPTION_PREFIX);
+        let content = r#"proxies:
+  - name: local-node
+    type: ss
+    server: example.com
+    port: 8388
+    cipher: aes-128-gcm
+    password: test-password
+"#;
+        let mut store = SubNodeStore::default();
+        store.record_local_success(
+            &source,
+            Some("Local".to_string()),
+            content.to_string(),
+            Vec::new(),
+            None,
+        );
+        let state = app_state(Config::default());
+
+        let mut results = fetch_subscriptions(&[source.clone()], &store, &state).await;
+        let (result_source, result) = results.pop().unwrap();
+        let result = result.unwrap();
+
+        assert_eq!(result_source, source);
+        assert_eq!(result.node_names, vec!["local-node".to_string()]);
     }
 
     #[test]

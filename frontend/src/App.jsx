@@ -66,7 +66,6 @@ export default function App() {
   const [firstLoadDone, setFirstLoadDone] = useState(false)
   const [loadingAction, setLoadingAction] = useState('')
   const [upgrading, setUpgrading] = useState(false)
-  const [newSubUrl, setNewSubUrl] = useState('')
   const [nodeForm, setNodeForm] = useState(EMPTY_NODE_FORM)
   const [nodeType, setNodeType] = useState('hysteria2')
   const [showNodeModal, setShowNodeModal] = useState(false)
@@ -391,29 +390,35 @@ export default function App() {
     }
   }, [status.running, clashApiBase, fetchProxies, setNodeInventory, showToast])
 
-  const handleAddSubscription = useCallback(async () => {
-    const error = validateSubscriptionUrl(newSubUrl.trim())
-    if (error) {
-      showToast(error, 'error')
-      return
+  const handleAddSubscription = useCallback(async (input) => {
+    const isContent = input.mode === 'content'
+    if (!isContent) {
+      const error = validateSubscriptionUrl(input.url)
+      if (error) {
+        showToast(error, 'error')
+        return false
+      }
     }
-    try {
-      await apiCall('subs', { method: 'POST', body: JSON.stringify({ url: newSubUrl.trim() }) }, 'addSub')
-      setNewSubUrl('')
-      await Promise.all([fetchSubs(), refreshProxyViews()])
-      showToast('订阅已添加', 'success')
-    } catch (error) {
-      showToast(error.message, 'error')
-    }
-  }, [newSubUrl, apiCall, fetchSubs, refreshProxyViews, showToast])
 
-  const handleOnboardingAddSub = useCallback(async (url) => {
     try {
-      await apiCall('subs', { method: 'POST', body: JSON.stringify({ url }) }, 'addSub')
+      await apiCall(
+        isContent ? 'subs/content' : 'subs',
+        {
+          method: 'POST',
+          body: JSON.stringify(
+            isContent
+              ? { content: input.content, name: input.name || null }
+              : { url: input.url }
+          ),
+        },
+        'addSub'
+      )
       await Promise.all([fetchSubs(), refreshProxyViews()])
       showToast('订阅已添加', 'success')
+      return true
     } catch (error) {
       showToast(error.message, 'error')
+      return false
     }
   }, [apiCall, fetchSubs, refreshProxyViews, showToast])
 
@@ -693,8 +698,8 @@ export default function App() {
     openConfirm('删除节点', `确定要删除节点 "${tag}" 吗？`, () => handleDeleteNode(tag))
   }, [openConfirm, handleDeleteNode])
 
-  const handleOpenDeleteSubConfirm = useCallback((url) => {
-    openConfirm('删除订阅', `确定要删除此订阅吗？\n${url}`, () => handleDeleteSubscription(url))
+  const handleOpenDeleteSubConfirm = useCallback((url, label) => {
+    openConfirm('删除订阅', `确定要删除“${label}”吗？`, () => handleDeleteSubscription(url))
   }, [openConfirm, handleDeleteSubscription])
 
   if (!firstLoadDone) {
@@ -705,10 +710,9 @@ export default function App() {
     return (
       <div className="shell">
         <OnboardingScreen
-          onAddSub={handleOnboardingAddSub}
+          onAddSub={handleAddSubscription}
           loadingAction={loadingAction}
           onOpenAddNode={() => setShowNodeModal(true)}
-          showToast={showToast}
         />
         <CommitBadge versionInfo={versionInfo} />
         <ToastStack toasts={toasts} />
@@ -774,8 +778,6 @@ export default function App() {
 
             <SubsCard
               subs={subs}
-              newSubUrl={newSubUrl}
-              setNewSubUrl={setNewSubUrl}
               loadingAction={loadingAction}
               onAddSub={handleAddSubscription}
               onDeleteSub={handleOpenDeleteSubConfirm}
