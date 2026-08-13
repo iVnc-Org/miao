@@ -3,6 +3,7 @@ import { ListFilter, Save, Sparkles } from 'lucide-react'
 import { Button, SectionCard } from './ui.jsx'
 import { classNames } from '../utils.js'
 import { normalizeProcessProxyConfig } from '../hooks/useApi.js'
+import { useI18n } from '../i18n.jsx'
 
 const SUGGESTED_NAMES = ['curl', 'git', 'git-remote-https', 'ssh']
 
@@ -10,7 +11,7 @@ function namesToText(names) {
   return (names || []).join(', ')
 }
 
-function parseProcessNames(value) {
+function parseProcessNames(value, t) {
   const names = value
     .split(/[,\n，]+/)
     .map((item) => item.trim())
@@ -18,10 +19,10 @@ function parseProcessNames(value) {
 
   for (const name of names) {
     if (/\s/.test(name)) {
-      throw new Error(`进程名不支持命令参数或空格：${name}`)
+      throw new Error(t('process.nameHasArgs', { name }))
     }
     if (name.includes('/')) {
-      throw new Error(`进程名不能包含路径分隔符：${name}`)
+      throw new Error(t('process.nameHasPath', { name }))
     }
   }
 
@@ -29,6 +30,7 @@ function parseProcessNames(value) {
 }
 
 export function ProcessProxyCard({ proxyMode, config, loading, disabled, onSave, showToast }) {
+  const { t } = useI18n()
   const normalizedConfig = useMemo(() => normalizeProcessProxyConfig(config), [config])
   const [mode, setMode] = useState(normalizedConfig.mode)
   const [namesText, setNamesText] = useState(namesToText(normalizedConfig.match.names))
@@ -40,11 +42,11 @@ export function ProcessProxyCard({ proxyMode, config, loading, disabled, onSave,
 
   const parsedNames = useMemo(() => {
     try {
-      return { names: parseProcessNames(namesText), valid: true }
+      return { names: parseProcessNames(namesText, t), valid: true }
     } catch {
       return { names: [], valid: false }
     }
-  }, [namesText])
+  }, [namesText, t])
   const names = parsedNames.names
 
   const dirty = !parsedNames.valid
@@ -53,7 +55,7 @@ export function ProcessProxyCard({ proxyMode, config, loading, disabled, onSave,
 
   const handleSuggestedName = (name) => {
     try {
-      const current = parseProcessNames(namesText)
+      const current = parseProcessNames(namesText, t)
       if (!current.includes(name)) {
         setNamesText(namesToText([...current, name]))
       }
@@ -65,14 +67,14 @@ export function ProcessProxyCard({ proxyMode, config, loading, disabled, onSave,
   const handleSave = () => {
     let nextNames
     try {
-      nextNames = parseProcessNames(namesText)
+      nextNames = parseProcessNames(namesText, t)
     } catch (error) {
       showToast(error.message, 'error')
       return
     }
 
     if (nextNames.length === 0) {
-      showToast('进程代理模式至少需要填写一个进程名', 'error')
+      showToast(t('process.needName'), 'error')
       return
     }
 
@@ -97,7 +99,7 @@ export function ProcessProxyCard({ proxyMode, config, loading, disabled, onSave,
         <div className="section-header">
           <div className="section-title-wrap">
             <ListFilter size={14} className="section-icon" />
-            <span>进程代理</span>
+            <span>{t('process.title')}</span>
             <span className="counter-pill">{names.length}</span>
           </div>
           <Button
@@ -108,13 +110,13 @@ export function ProcessProxyCard({ proxyMode, config, loading, disabled, onSave,
             disabled={disabled || loading || !dirty}
             onClick={handleSave}
           >
-            保存
+            {t('process.save')}
           </Button>
         </div>
       }
     >
       <div className="tun-process-body">
-        <div className="tun-process-segment" role="group" aria-label="进程代理名单类型">
+        <div className="tun-process-segment" role="group" aria-label={t('process.listType')}>
           <button
             type="button"
             className={classNames('route-mode-option', mode === 'blacklist' && 'active')}
@@ -122,7 +124,7 @@ export function ProcessProxyCard({ proxyMode, config, loading, disabled, onSave,
             aria-pressed={mode === 'blacklist'}
             onClick={() => setMode('blacklist')}
           >
-            <span>黑名单</span>
+            <span>{t('process.blacklist')}</span>
           </button>
           <button
             type="button"
@@ -131,12 +133,12 @@ export function ProcessProxyCard({ proxyMode, config, loading, disabled, onSave,
             aria-pressed={mode === 'whitelist'}
             onClick={() => setMode('whitelist')}
           >
-            <span>白名单</span>
+            <span>{t('process.whitelist')}</span>
           </button>
         </div>
 
         <label className="field tun-process-field">
-          <span>进程/命令名</span>
+          <span>{t('process.names')}</span>
           <textarea
             value={namesText}
             disabled={disabled || loading}
@@ -162,9 +164,7 @@ export function ProcessProxyCard({ proxyMode, config, loading, disabled, onSave,
         </div>
 
         <div className="tun-process-note">
-          {mode === 'whitelist'
-            ? '仅白名单进程使用代理，其他进程直接连接。'
-            : '黑名单进程直接连接，其他进程使用当前代理节点。'}
+          {mode === 'whitelist' ? t('process.noteWhite') : t('process.noteBlack')}
         </div>
       </div>
     </SectionCard>

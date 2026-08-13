@@ -47,16 +47,12 @@ import {
   buildTransportPayload,
   validateUuid,
   validateVlessFlow,
-  CONNECTIVITY_SITES
+  CONNECTIVITY_SITES,
+  translateError,
 } from './utils.js'
+import { useI18n } from './i18n.jsx'
 
 const CONNECTIONS_MODAL_MIN_WIDTH = 841
-
-const MODE_LABELS = {
-  global: '全局代理',
-  process: '进程代理',
-  pool: '代理池',
-}
 
 function hasProcessMatch(config) {
   const match = config?.match || {}
@@ -64,6 +60,7 @@ function hasProcessMatch(config) {
 }
 
 export default function App() {
+  const { t } = useI18n()
   const [firstLoadDone, setFirstLoadDone] = useState(false)
   const [loadingAction, setLoadingAction] = useState('')
   const [upgrading, setUpgrading] = useState(false)
@@ -263,10 +260,10 @@ export default function App() {
     try {
       if (status.running) {
         await apiCall('service/stop', { method: 'POST' }, 'stop')
-        showToast('服务已停止', 'success')
+        showToast(t('toast.serviceStopped'), 'success')
       } else {
         await apiCall('service/start', { method: 'POST' }, 'start')
-        showToast('服务已启动', 'success')
+        showToast(t('toast.serviceStarted'), 'success')
       }
       const nextStatus = await fetchStatus()
       const tasks = [fetchNodeInventory(), fetchPoolEndpoints(nextStatus?.mode || status.mode)]
@@ -284,6 +281,7 @@ export default function App() {
     fetchPoolEndpoints,
     fetchProxies,
     showToast,
+    t,
   ])
 
   const applyProxyMode = useCallback(async (nextMode) => {
@@ -298,7 +296,7 @@ export default function App() {
       if (nextStatus?.running) tasks.push(fetchProxies())
       await Promise.all(tasks)
       setModeSetup(null)
-      showToast(`已切换为${MODE_LABELS[nextMode]}`, 'success')
+      showToast(t('toast.modeSwitched', { mode: t(`mode.${nextMode}`) }), 'success')
       return response
     } catch (error) {
       showToast(error.message, 'error')
@@ -310,7 +308,8 @@ export default function App() {
     fetchNodeInventory,
     fetchPoolEndpoints,
     fetchProxies,
-    showToast
+    showToast,
+    t,
   ])
 
   const handleSetMode = useCallback(async (nextMode) => {
@@ -320,13 +319,13 @@ export default function App() {
     }
     if (nextMode === 'process' && !hasProcessMatch(processProxy)) {
       setModeSetup('process')
-      showToast('请先填写进程名单并保存', 'info')
+      showToast(t('toast.fillProcessFirst'), 'info')
       return
     }
 
     setModeSetup(null)
     await applyProxyMode(nextMode)
-  }, [status.mode, processProxy, applyProxyMode, showToast])
+  }, [status.mode, processProxy, applyProxyMode, showToast, t])
 
   const handleSaveProcessProxy = useCallback(async (nextConfig) => {
     try {
@@ -340,7 +339,7 @@ export default function App() {
       if (modeSetup === 'process') {
         await applyProxyMode('process')
       } else {
-        showToast(response.message || '进程代理设置已保存', 'success')
+        showToast(response.message || t('toast.processSaved'), 'success')
       }
     } catch (error) {
       showToast(error.message, 'error')
@@ -354,6 +353,7 @@ export default function App() {
     modeSetup,
     applyProxyMode,
     showToast,
+    t,
   ])
 
   const handleSavePool = useCallback(async (nextConfig) => {
@@ -369,7 +369,7 @@ export default function App() {
         fetchStatus(),
         refreshProxyViews(),
       ])
-      showToast(response.message || '代理池设置已保存', 'success')
+      showToast(response.message || t('toast.poolSaved'), 'success')
     } catch (error) {
       showToast(error.message, 'error')
     }
@@ -380,6 +380,7 @@ export default function App() {
     fetchStatus,
     refreshProxyViews,
     showToast,
+    t,
   ])
 
   const handleSwitchProxy = useCallback(async (groupName, nodeName) => {
@@ -392,7 +393,7 @@ export default function App() {
       })
       if (!response.ok) {
         const details = (await response.text()).trim()
-        throw new Error(details || `切换节点失败 (${response.status})`)
+        throw new Error(details || t('toast.switchFailedStatus', { status: response.status }))
       }
       await fetchProxies()
       setNodeInventory((previous) => ({ ...previous, current: nodeName }))
@@ -401,18 +402,18 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ group: groupName, name: nodeName }),
       }).catch((err) => console.warn('Failed to save last proxy:', err))
-      showToast(`已切换到 ${nodeName}`, 'success')
+      showToast(t('toast.switchNode', { name: nodeName }), 'success')
     } catch {
-      showToast('切换节点失败', 'error')
+      showToast(t('toast.switchFailed'), 'error')
     }
-  }, [status.running, clashApiBase, fetchProxies, setNodeInventory, showToast])
+  }, [status.running, clashApiBase, fetchProxies, setNodeInventory, showToast, t])
 
   const handleAddSubscription = useCallback(async (input) => {
     const isContent = input.mode === 'content'
     if (!isContent) {
       const error = validateSubscriptionUrl(input.url)
       if (error) {
-        showToast(error, 'error')
+        showToast(translateError(t, error), 'error')
         return false
       }
     }
@@ -431,33 +432,33 @@ export default function App() {
         'addSub'
       )
       await Promise.all([fetchSubs(), refreshProxyViews()])
-      showToast('订阅已添加', 'success')
+      showToast(t('toast.subAdded'), 'success')
       return true
     } catch (error) {
       showToast(error.message, 'error')
       return false
     }
-  }, [apiCall, fetchSubs, refreshProxyViews, showToast])
+  }, [apiCall, fetchSubs, refreshProxyViews, showToast, t])
 
   const handleDeleteSubscription = useCallback(async (url) => {
     try {
       await apiCall('subs', { method: 'DELETE', body: JSON.stringify({ url }) }, 'deleteSub')
       await Promise.all([fetchSubs(), refreshProxyViews()])
-      showToast('订阅已删除', 'success')
+      showToast(t('toast.subDeleted'), 'success')
     } catch (error) {
       showToast(error.message, 'error')
     }
-  }, [apiCall, fetchSubs, refreshProxyViews, showToast])
+  }, [apiCall, fetchSubs, refreshProxyViews, showToast, t])
 
   const handleReplaceSubscription = useCallback(async (oldUrl, replacementUrl) => {
     const newUrl = replacementUrl.trim()
     const error = validateSubscriptionUrl(newUrl)
     if (error) {
-      showToast(error, 'error')
+      showToast(translateError(t, error), 'error')
       return false
     }
     if (newUrl === oldUrl) {
-      showToast('新订阅链接不能与原链接相同', 'error')
+      showToast(t('toast.sameSubUrl'), 'error')
       return false
     }
 
@@ -468,24 +469,24 @@ export default function App() {
         'replaceSub'
       )
       await Promise.all([fetchSubs(), refreshProxyViews()])
-      showToast('订阅链接已替换', 'success')
+      showToast(t('toast.subReplaced'), 'success')
       return true
     } catch (replaceError) {
       showToast(replaceError.message, 'error')
       return false
     }
-  }, [apiCall, fetchSubs, refreshProxyViews, showToast])
+  }, [apiCall, fetchSubs, refreshProxyViews, showToast, t])
 
   const handleRefreshSubscriptions = useCallback(async () => {
     try {
       const response = await apiCall('subs/refresh', { method: 'POST' }, 'refreshSubs')
       await Promise.all([fetchSubs(), refreshProxyViews()])
-      const expired = response.message?.includes('失效')
-      showToast(response.message || '订阅已刷新', expired ? 'info' : 'success')
+      const expired = /失效|expired/i.test(response.message || '')
+      showToast(response.message || t('subs.refreshed'), expired ? 'info' : 'success')
     } catch (error) {
       showToast(error.message, 'error')
     }
-  }, [apiCall, fetchSubs, refreshProxyViews, showToast])
+  }, [apiCall, fetchSubs, refreshProxyViews, showToast, t])
 
   const handleSaveNode = useCallback(async () => {
     const isSimpleProxy = nodeType === 'socks' || nodeType === 'http'
@@ -495,41 +496,41 @@ export default function App() {
 
     const tagError = validateNodeTag(nodeForm.tag)
     if (tagError) {
-      showToast(tagError, 'error')
+      showToast(translateError(t, tagError), 'error')
       return
     }
     const serverError = validateServer(nodeForm.server)
     if (serverError) {
-      showToast(serverError, 'error')
+      showToast(translateError(t, serverError), 'error')
       return
     }
     const portError = validatePort(nodeForm.server_port)
     if (portError) {
-      showToast(portError, 'error')
+      showToast(translateError(t, portError), 'error')
       return
     }
     if (isSimpleProxy) {
-      const passwordError = validateOptionalCredential(nodeForm.password, '密码')
+      const passwordError = validateOptionalCredential(nodeForm.password, 'fields.password')
       if (passwordError) {
-        showToast(passwordError, 'error')
+        showToast(translateError(t, passwordError), 'error')
         return
       }
-      const usernameError = validateOptionalCredential(nodeForm.username, '用户名')
+      const usernameError = validateOptionalCredential(nodeForm.username, 'fields.username')
       if (usernameError) {
-        showToast(usernameError, 'error')
+        showToast(translateError(t, usernameError), 'error')
         return
       }
     } else if (requiresPassword) {
       const passwordError = validatePassword(nodeForm.password)
       if (passwordError) {
-        showToast(passwordError, 'error')
+        showToast(translateError(t, passwordError), 'error')
         return
       }
     }
     if (requiresUuid) {
       const uuidError = validateUuid(nodeForm.uuid)
       if (uuidError) {
-        showToast(uuidError, 'error')
+        showToast(translateError(t, uuidError), 'error')
         return
       }
     }
@@ -541,19 +542,19 @@ export default function App() {
         nodeForm.grpc_service_name,
       )
       if (transportError) {
-        showToast(transportError, 'error')
+        showToast(translateError(t, transportError), 'error')
         return
       }
     }
     if (nodeType === 'vless') {
       const flowError = validateVlessFlow(nodeForm.flow)
       if (flowError) {
-        showToast(flowError, 'error')
+        showToast(translateError(t, flowError), 'error')
         return
       }
       const hasRealityConfig = nodeForm.reality_public_key?.trim() || nodeForm.reality_short_id?.trim()
       if (hasRealityConfig && !nodeForm.client_fingerprint?.trim()) {
-        showToast('Reality 节点必须配置 TLS 指纹（uTLS）', 'error')
+        showToast(t('node.realityNeedFingerprint'), 'error')
         return
       }
     }
@@ -561,7 +562,7 @@ export default function App() {
       ? validateHysteria2Obfs(nodeForm.obfs_type, nodeForm.obfs_password)
       : null
     if (obfsError) {
-      showToast(obfsError, 'error')
+      showToast(translateError(t, obfsError), 'error')
       return
     }
 
@@ -627,21 +628,21 @@ export default function App() {
       setEditingNodeTag(null)
       setNodeForm({ ...EMPTY_NODE_FORM, ...nodeTypeDefaults(nodeType) })
       await Promise.all([fetchNodes(), refreshProxyViews()])
-      showToast(editing ? '节点已更新' : '节点已添加', 'success')
+      showToast(editing ? t('toast.nodeUpdated') : t('toast.nodeAdded'), 'success')
     } catch (error) {
       showToast(error.message, 'error')
     }
-  }, [nodeForm, nodeType, editingNodeTag, apiCall, fetchNodes, refreshProxyViews, showToast])
+  }, [nodeForm, nodeType, editingNodeTag, apiCall, fetchNodes, refreshProxyViews, showToast, t])
 
   const handleDeleteNode = useCallback(async (tag) => {
     try {
       await apiCall('nodes', { method: 'DELETE', body: JSON.stringify({ tag }) }, 'deleteNode')
       await Promise.all([fetchNodes(), refreshProxyViews()])
-      showToast('节点已删除', 'success')
+      showToast(t('toast.nodeDeleted'), 'success')
     } catch (error) {
       showToast(error.message, 'error')
     }
-  }, [apiCall, fetchNodes, refreshProxyViews, showToast])
+  }, [apiCall, fetchNodes, refreshProxyViews, showToast, t])
 
   const handleTestDelay = useCallback((nodeName) => {
     if (!status.running) return
@@ -663,39 +664,42 @@ export default function App() {
 
   const handleOpenConnections = useCallback(() => {
     if (window.matchMedia(`(max-width: ${CONNECTIONS_MODAL_MIN_WIDTH - 1}px)`).matches) {
-      showToast('移动端暂不支持连接统计面板', 'info')
+      showToast(t('connections.mobileUnsupported'), 'info')
       return
     }
 
     setShowConnectionsModal(true)
     fetchConnections()
-  }, [fetchConnections, showToast])
+  }, [fetchConnections, showToast, t])
 
   const handleUpgradeClick = useCallback(async () => {
     if (!status.running) {
-      showToast('sing-box 未运行，暂不检测更新', 'info')
+      showToast(t('toast.upgradeNeedRunning'), 'info')
       return
     }
 
     if (!versionInfo.has_update) {
       const fresh = await fetchVersion()
       if (fresh?.has_update) {
-        showToast(`发现新版本 ${fresh.latest}`, 'success')
+        showToast(t('toast.updateFound', { version: fresh.latest }), 'success')
       } else {
-        showToast('当前已是最新版本', 'info')
+        showToast(t('toast.upToDate'), 'info')
       }
       return
     }
 
     const targetVersion = versionInfo.latest
     const currentVersion = versionInfo.current
-    openConfirm('更新确认', `确定要从 ${currentVersion} 更新到 ${targetVersion} 吗？更新过程中服务会短暂中断。`, async () => {
+    openConfirm(
+      t('confirm.upgradeTitle'),
+      t('confirm.upgradeMessage', { current: currentVersion, target: targetVersion }),
+      async () => {
       setUpgrading(true)
       try {
         const response = await fetch('/api/upgrade', { method: 'POST' })
         const payload = await response.json()
-        if (!payload.success) throw new Error(payload.message || '更新失败')
-        showToast('更新成功，等待服务重启…', 'success')
+        if (!payload.success) throw new Error(payload.message || t('toast.upgradeFailed'))
+        showToast(t('toast.upgradeSuccess'), 'success')
         for (let index = 0; index < 30; index += 1) {
           await new Promise((resolve) => window.setTimeout(resolve, 500))
           try {
@@ -711,25 +715,25 @@ export default function App() {
             // ignore
           }
         }
-        showToast('服务重启超时，请手动刷新页面', 'error')
+        showToast(t('toast.upgradeTimeout'), 'error')
       } catch (error) {
         showToast(error.message, 'error')
       } finally {
         setUpgrading(false)
       }
     })
-  }, [status.running, versionInfo, fetchVersion, showToast, openConfirm])
+  }, [status.running, versionInfo, fetchVersion, showToast, openConfirm, t])
 
   const handleOpenDeleteNodeConfirm = useCallback((tag) => {
-    openConfirm('删除节点', `确定要删除节点 "${tag}" 吗？`, () => handleDeleteNode(tag))
-  }, [openConfirm, handleDeleteNode])
+    openConfirm(t('confirm.deleteNodeTitle'), t('confirm.deleteNodeMessage', { tag }), () => handleDeleteNode(tag))
+  }, [openConfirm, handleDeleteNode, t])
 
   const handleOpenDeleteSubConfirm = useCallback((url, label) => {
-    openConfirm('删除订阅', `确定要删除“${label}”吗？`, () => handleDeleteSubscription(url))
-  }, [openConfirm, handleDeleteSubscription])
+    openConfirm(t('confirm.deleteSubTitle'), t('confirm.deleteSubMessage', { label }), () => handleDeleteSubscription(url))
+  }, [openConfirm, handleDeleteSubscription, t])
 
   if (!firstLoadDone) {
-    return <div className="shell"><div className="onboarding-loading">加载中…</div></div>
+    return <div className="shell"><div className="onboarding-loading">{t('app.loading')}</div></div>
   }
 
   if (needsOnboarding) {
@@ -899,8 +903,8 @@ export default function App() {
 }
 
 function CommitBadge({ versionInfo }) {
-  const commit = versionInfo.commit_short || 'unknown'
-  const label = `${versionInfo.current || 'v--'} · ${commit}`
+  const commit = versionInfo.commit_short || versionInfo.current || 'unknown'
+  const label = versionInfo.current || commit
 
   if (versionInfo.commit_url) {
     return (

@@ -1,12 +1,13 @@
 import { memo } from 'react'
 import { Radio, Zap, LoaderCircle, Plus } from 'lucide-react'
 import { Button, SectionCard } from './ui.jsx'
-import { 
-  classNames, 
-  formatDelay, 
+import {
+  classNames,
+  formatDelay,
   getDelayTone,
-  protocolLabel 
+  protocolLabel
 } from '../utils.js'
+import { useI18n } from '../i18n.jsx'
 
 const ProxyTile = memo(function ProxyTile({
   nodeName,
@@ -17,9 +18,11 @@ const ProxyTile = memo(function ProxyTile({
   onSwitchProxy,
   onTestDelay,
   group,
+  testingLabel,
+  timeoutLabel,
 }) {
   return (
-    <div 
+    <div
       className={classNames('proxy-tile', isActive && 'active', disabled && 'disabled')}
       role="button"
       tabIndex={disabled ? -1 : 0}
@@ -37,36 +40,38 @@ const ProxyTile = memo(function ProxyTile({
           ? <div className="proxy-tag"><span className="proxy-tag-dot" /><span>{nodeName}</span></div>
           : <span className="proxy-node-name">{nodeName}</span>}
       </div>
-      <button 
-        className={classNames('proxy-test-chip', getDelayTone(delay))} 
-        onClick={(event) => { event.stopPropagation(); onTestDelay(nodeName); }} 
+      <button
+        className={classNames('proxy-test-chip', getDelayTone(delay))}
+        onClick={(event) => { event.stopPropagation(); onTestDelay(nodeName); }}
         disabled={disabled || isTesting}
       >
-        {isTesting 
-          ? <LoaderCircle size={10} className="spin" /> 
+        {isTesting
+          ? <LoaderCircle size={10} className="spin" />
           : <Zap size={10} />}
-        <span>{isTesting ? '测试中…' : formatDelay(delay)}</span>
+        <span>{isTesting ? testingLabel : formatDelay(delay, timeoutLabel)}</span>
       </button>
     </div>
   )
 })
 
-export function ProxyCard({ 
-  status, 
-  primaryGroup, 
-  primaryGroupName, 
+export function ProxyCard({
+  status,
+  primaryGroup,
+  primaryGroupName,
   interactive,
   currentNodeMeta,
-  delays, 
-  testingNodes, 
+  delays,
+  testingNodes,
   testingGroup,
-  onTestDelay, 
-  onTestGroupDelays, 
+  onTestDelay,
+  onTestGroupDelays,
   onSwitchProxy,
   onOpenAddNode
 }) {
+  const { t } = useI18n()
   const currentNodeDelay = primaryGroup?.now ? delays[primaryGroup.now] : undefined
   const isTestingCurrent = primaryGroup?.now ? testingNodes[primaryGroup.now] : false
+  const timeoutLabel = t('delay.timeout')
 
   return (
     <SectionCard
@@ -76,41 +81,41 @@ export function ProxyCard({
         <div className="section-header">
           <div className="section-title-wrap">
             <Radio size={14} className="section-icon" />
-            <span>代理节点选择</span>
+            <span>{t('proxy.title')}</span>
           </div>
-          <Button 
-            tone="secondary" 
-            size="sm" 
-            icon={<Zap size={12} />} 
-            loading={testingGroup === primaryGroupName} 
+          <Button
+            tone="secondary"
+            size="sm"
+            icon={<Zap size={12} />}
+            loading={testingGroup === primaryGroupName}
             disabled={!primaryGroup || !interactive}
             onClick={() => primaryGroup && onTestGroupDelays(primaryGroupName, primaryGroup.all)}
           >
-            测试延迟
+            {t('proxy.testDelay')}
           </Button>
         </div>
       }
     >
-      <button 
-        className="current-node-banner" 
-        onClick={() => primaryGroup?.now && onTestDelay(primaryGroup.now)} 
+      <button
+        className="current-node-banner"
+        onClick={() => primaryGroup?.now && onTestDelay(primaryGroup.now)}
         disabled={!interactive || !primaryGroup?.now || Boolean(testingNodes[primaryGroup?.now])}
       >
         <div className="banner-icon-wrap"><span className="banner-dot" /></div>
         <div className="banner-copy">
-          <span className="banner-label">当前节点</span>
-          <strong>{primaryGroup?.now || '未选择'}</strong>
+          <span className="banner-label">{t('proxy.currentNode')}</span>
+          <strong>{primaryGroup?.now || t('proxy.unselected')}</strong>
           <span className="banner-meta">
             {currentNodeMeta
               ? `${currentNodeMeta.server}:${currentNodeMeta.server_port} · ${protocolLabel(currentNodeMeta.node_type)}`
-              : primaryGroup 
-                ? status.running ? `来自代理组 ${primaryGroupName}` : '来自本地节点清单'
-                : '暂无可用节点'}
+              : primaryGroup
+                ? status.running ? t('proxy.fromGroup', { name: primaryGroupName }) : t('proxy.fromInventory')
+                : t('proxy.noNodes')}
           </span>
         </div>
         <div className={classNames('banner-delay', getDelayTone(currentNodeDelay))}>
-          {isTestingCurrent 
-            ? <LoaderCircle size={20} className="spin" /> 
+          {isTestingCurrent
+            ? <LoaderCircle size={20} className="spin" />
             : <strong>{currentNodeDelay !== undefined && currentNodeDelay >= 0 ? currentNodeDelay : '--'}</strong>}
           <span>ms</span>
         </div>
@@ -130,14 +135,16 @@ export function ProxyCard({
                 group={primaryGroupName}
                 onSwitchProxy={onSwitchProxy}
                 onTestDelay={onTestDelay}
+                testingLabel={t('proxy.testing')}
+                timeoutLabel={timeoutLabel}
               />
             ))}
             <button className="proxy-tile add-tile" onClick={onOpenAddNode}>
               <Plus size={13} />
-              <span>添加节点</span>
+              <span>{t('proxy.addNode')}</span>
             </button>
           </div>
-        ) : <div className="empty-block">暂无可用代理节点。</div>}
+        ) : <div className="empty-block">{t('proxy.empty')}</div>}
       </div>
     </SectionCard>
   )

@@ -2,8 +2,9 @@ import { memo } from 'react'
 import { Pencil, Plus, Shield, Trash2 } from 'lucide-react'
 import { Button, SectionCard } from './ui.jsx'
 import { protocolLabel } from '../utils.js'
+import { useI18n } from '../i18n.jsx'
 
-const NodeRow = memo(function NodeRow({ node, onDelete, onEdit }) {
+const NodeRow = memo(function NodeRow({ node, onDelete, onEdit, editLabel, deleteLabel, editNamed, deleteNamed }) {
   return (
     <div className="list-row">
       <Shield size={13} className="list-leading-icon" />
@@ -15,16 +16,16 @@ const NodeRow = memo(function NodeRow({ node, onDelete, onEdit }) {
         <button
           className="icon-button subtle"
           onClick={() => onEdit(node)}
-          title="编辑节点"
-          aria-label={`编辑节点 ${node.tag}`}
+          title={editLabel}
+          aria-label={editNamed}
         >
           <Pencil size={13} />
         </button>
         <button
           className="icon-button subtle"
           onClick={() => onDelete(node.tag)}
-          title="删除节点"
-          aria-label={`删除节点 ${node.tag}`}
+          title={deleteLabel}
+          aria-label={deleteNamed}
         >
           <Trash2 size={13} />
         </button>
@@ -34,6 +35,7 @@ const NodeRow = memo(function NodeRow({ node, onDelete, onEdit }) {
 })
 
 export function NodesCard({ nodes, onDeleteNode, onEditNode, onOpenAddNode }) {
+  const { t } = useI18n()
   return (
     <SectionCard
       bodyClassName="panel-body-tight"
@@ -46,7 +48,7 @@ export function NodesCard({ nodes, onDeleteNode, onEditNode, onOpenAddNode }) {
               <line x1="6" x2="6.01" y1="6" y2="6"/>
               <line x1="6" x2="6.01" y1="18" y2="18"/>
             </svg>
-            <span>手动节点</span>
+            <span>{t('nodes.title')}</span>
             <span className="counter-pill">{nodes.length}</span>
           </div>
           <Button
@@ -55,20 +57,24 @@ export function NodesCard({ nodes, onDeleteNode, onEditNode, onOpenAddNode }) {
             icon={<Plus size={12} />}
             onClick={onOpenAddNode}
           >
-            添加
+            {t('nodes.add')}
           </Button>
         </div>
       }
     >
       <div className="list-stack">
-        {nodes.length === 0 
-          ? <div className="empty-block">暂无手动节点</div> 
+        {nodes.length === 0
+          ? <div className="empty-block">{t('nodes.empty')}</div>
           : nodes.map((node) => (
             <NodeRow
               key={node.tag}
               node={node}
               onDelete={onDeleteNode}
               onEdit={onEditNode}
+              editLabel={t('nodes.edit')}
+              deleteLabel={t('nodes.delete')}
+              editNamed={t('nodes.editNamed', { tag: node.tag })}
+              deleteNamed={t('nodes.deleteNamed', { tag: node.tag })}
             />
           ))}
       </div>

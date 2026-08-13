@@ -61,4 +61,4 @@ echo "✅ 已创建并推送 tag: $TAG_VERSION"
 
 echo ""
 echo "🎉 发布完成！GitHub Actions 将自动构建 Release。"
-echo "   查看进度: https://github.com/YUxiangLuo/miao/actions"
+echo "   查看进度: https://github.com/iVnc-Org/miao/actions"

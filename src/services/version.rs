@@ -14,9 +14,14 @@ use tracing::{error, info, warn};
 
 use crate::build_info::{current_version, git_commit_full, git_commit_short, git_commit_url};
 use crate::error::{AppError, AppResult};
-use crate::models::{GitHubAsset, GitHubRelease, VersionInfo};
+use crate::models::{GitHubAsset, GitHubCommit, GitHubRelease, VersionInfo};
 use crate::services::singbox::{get_sing_box_home, sing_box_is_running, stop_sing_internal};
 use crate::state::{AppState, VersionCache};
+
+const RELEASE_REPO: &str = "iVnc-Org/miao";
+const RELEASE_API_URL: &str = "https://api.github.com/repos/iVnc-Org/miao/releases/tags/latest";
+const RELEASE_COMMIT_API_URL: &str = "https://api.github.com/repos/iVnc-Org/miao/commits/latest";
+const RELEASE_DOWNLOAD_BASE: &str = "https://github.com/iVnc-Org/miao/releases/download/latest";
 
 const CACHE_TTL: Duration = Duration::from_secs(300);
 const DOWNLOAD_MAX_ATTEMPTS: u32 = 3;
@@ -202,7 +207,7 @@ async fn download_binary_streaming_retried(
 
 async fn fetch_latest_release_uncached(client: &reqwest::Client) -> AppResult<GitHubRelease> {
     let release = client
-        .get("https://api.github.com/repos/YUxiangLuo/miao/releases/latest")
+        .get(RELEASE_API_URL)
         .timeout(Duration::from_secs(60))
         .header("User-Agent", "miao")
         .send()
@@ -213,6 +218,36 @@ async fn fetch_latest_release_uncached(client: &reqwest::Client) -> AppResult<Gi
         .await?;
 
     Ok(release)
+}
+
+async fn fetch_latest_commit_short(client: &reqwest::Client) -> AppResult<String> {
+    let commit = client
+        .get(RELEASE_COMMIT_API_URL)
+        .timeout(Duration::from_secs(30))
+        .header("User-Agent", "miao")
+        .send()
+        .await?
+        .error_for_status()
+        .map_err(|e| AppError::context("GitHub commit API returned error", e))?
+        .json::<GitHubCommit>()
+        .await?;
+
+    Ok(normalize_commit_id(&commit.sha))
+}
+
+async fn resolve_latest_version(client: &reqwest::Client, release: &GitHubRelease) -> String {
+    let from_release = release_version_label(release);
+    if looks_like_commit_id(&from_release) {
+        return from_release;
+    }
+    match fetch_latest_commit_short(client).await {
+        Ok(commit) if !commit.is_empty() => commit,
+        Ok(_) => from_release,
+        Err(e) => {
+            warn!(error = %e, "Failed to resolve latest commit from GitHub");
+            from_release
+        }
+    }
 }
 
 async fn fetch_latest_release(
@@ -252,13 +287,13 @@ pub async fn get_version_info(state: &Arc<AppState>) -> VersionInfo {
 
     match fetch_latest_release(&state.http_client, state).await {
         Ok(release) => {
-            let latest = release.tag_name.clone();
+            let latest = resolve_latest_version(&state.http_client, &release).await;
             let has_update = release_is_newer_than_current(&base.current, &latest);
-            let download_url = release
-                .assets
-                .iter()
-                .find(|a| a.name == asset_name)
-                .map(|a| a.browser_download_url.clone());
+            let download_url = if asset_name.is_empty() {
+                None
+            } else {
+                Some(fixed_download_url(asset_name))
+            };
 
             VersionInfo {
                 latest: Some(latest),
@@ -317,31 +352,43 @@ fn find_binary_and_checksum_assets<'a>(
     Ok((binary, checksum))
 }
 
-/// 将 `v1.2.3` / `1.2.3` 解析为 semver；解析失败返回 `None`。
-fn parse_semver_tag(tag: &str) -> Option<semver::Version> {
-    let s = tag.strip_prefix('v').unwrap_or(tag);
-    semver::Version::parse(s).ok()
+fn fixed_download_url(asset_name: &str) -> String {
+    format!("{RELEASE_DOWNLOAD_BASE}/{asset_name}")
 }
 
-/// 当前运行版本字符串（如 `v0.12.2`）与 Release `tag_name` 比较。
-fn release_is_newer_than_current(current: &str, release_tag: &str) -> bool {
-    match (parse_semver_tag(current), parse_semver_tag(release_tag)) {
-        (Some(c), Some(r)) => r > c,
-        (None, _) => {
-            error!(
-                current = %current,
-                "Current version is not valid semver; cannot compare for updates"
-            );
-            false
-        }
-        (_, None) => {
-            warn!(
-                tag = %release_tag,
-                "Release tag is not valid semver; treating as no update"
-            );
-            false
-        }
+fn normalize_commit_id(value: &str) -> String {
+    value
+        .trim()
+        .trim_start_matches("commit:")
+        .trim()
+        .chars()
+        .take(7)
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
+fn looks_like_commit_id(value: &str) -> bool {
+    let trimmed = value.trim();
+    (7..=40).contains(&trimmed.len()) && trimmed.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn release_version_label(release: &GitHubRelease) -> String {
+    release
+        .target_commitish
+        .as_deref()
+        .filter(|value| looks_like_commit_id(value))
+        .map(normalize_commit_id)
+        .unwrap_or_else(|| normalize_commit_id(&release.tag_name))
+}
+
+/// 当前运行 commit 与 latest 发布的 commit 比较；不同即视为可更新。
+fn release_is_newer_than_current(current: &str, release_version: &str) -> bool {
+    let current_id = normalize_commit_id(current);
+    let latest_id = normalize_commit_id(release_version);
+    if current_id.is_empty() || current_id == "unknown" || latest_id.is_empty() {
+        return false;
     }
+    current_id != latest_id
 }
 
 /// 对已通过 SHA256 校验的临时文件 chmod 并执行 `--version` 核对。
@@ -405,40 +452,42 @@ pub async fn upgrade_binary(state: &Arc<AppState>) -> AppResult<String> {
     invalidate_release_cache(state).await;
     let release = fetch_latest_release(&state.http_client, state).await?;
     let current = current_version();
+    let latest = resolve_latest_version(&state.http_client, &release).await;
 
-    if !release_is_newer_than_current(&current, &release.tag_name) {
+    if !release_is_newer_than_current(&current, &latest) {
         return Ok("Already up to date".to_string());
     }
 
     let asset_name =
         current_arch_asset_name().ok_or_else(|| AppError::message("Unsupported architecture"))?;
-    let (binary_asset, checksum_asset) = find_binary_and_checksum_assets(&release, asset_name)?;
+    let (binary_asset, _checksum_asset) = find_binary_and_checksum_assets(&release, asset_name)?;
+    let binary_url = fixed_download_url(asset_name);
+    let checksum_url = format!("{}.sha256", binary_url);
 
-    let expected_hex =
-        fetch_checksum_hex_retried(&state.http_client, &checksum_asset.browser_download_url)
-            .await?;
+    let expected_hex = fetch_checksum_hex_retried(&state.http_client, &checksum_url).await?;
 
     let temp_path = get_temp_binary_path();
     let temp_path = Path::new(&temp_path);
 
     info!(
         from_version = %current,
-        to_version = %release.tag_name,
-        binary_url = %binary_asset.browser_download_url,
+        to_version = %latest,
+        repo = RELEASE_REPO,
+        binary_url = %binary_url,
         size_bytes = binary_asset.size,
         "starting upgrade download"
     );
 
     download_binary_streaming_retried(
         &state.http_client,
-        &binary_asset.browser_download_url,
+        &binary_url,
         binary_asset.size,
         &expected_hex,
         temp_path,
     )
     .await?;
 
-    if let Err(e) = verify_temp_binary_executable(temp_path, &release.tag_name).await {
+    if let Err(e) = verify_temp_binary_executable(temp_path, &latest).await {
         let _ = tokio::fs::remove_file(temp_path).await;
         return Err(e);
     }
@@ -470,11 +519,11 @@ pub async fn upgrade_binary(state: &Arc<AppState>) -> AppResult<String> {
 
     info!(
         from_version = %current,
-        to_version = %release.tag_name,
+        to_version = %latest,
         "upgrade binary installed; restarting process"
     );
 
-    let new_version = release.tag_name.clone();
+    let new_version = latest;
     let sing_box_home = get_sing_box_home();
     tokio::spawn(async move {
         sleep(Duration::from_millis(500)).await;
@@ -529,34 +578,35 @@ fn current_arch_asset_name() -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        current_arch_asset_name, parse_semver_tag, parse_sha256sum_line,
-        release_is_newer_than_current, stdout_version_matches_release,
+        current_arch_asset_name, fixed_download_url, normalize_commit_id, parse_sha256sum_line,
+        release_is_newer_than_current, release_version_label, stdout_version_matches_release,
+        GitHubRelease,
     };
 
     #[test]
-    fn parse_semver_tag_accepts_prefixed_and_unprefixed() {
-        assert!(parse_semver_tag("v1.2.3").is_some());
-        assert!(parse_semver_tag("1.2.3").is_some());
+    fn normalize_commit_id_uses_short_prefix() {
+        assert_eq!(
+            normalize_commit_id("ABCDEF1234567890"),
+            "abcdef1"
+        );
+        assert_eq!(normalize_commit_id("commit:abc1234"), "abc1234");
     }
 
     #[test]
-    fn parse_semver_tag_rejects_invalid() {
-        assert!(parse_semver_tag("v1.2").is_none());
-        assert!(parse_semver_tag("not-a-version").is_none());
+    fn release_version_label_prefers_commitish() {
+        let release = GitHubRelease {
+            tag_name: "latest".to_string(),
+            target_commitish: Some("ABCDEF1234567890".to_string()),
+            assets: vec![],
+        };
+        assert_eq!(release_version_label(&release), "abcdef1");
     }
 
     #[test]
-    fn release_is_newer_than_current_semver() {
-        assert!(release_is_newer_than_current("v0.9.9", "v0.10.0"));
-        assert!(release_is_newer_than_current("v1.2.9", "v1.3.0"));
-        assert!(!release_is_newer_than_current("v1.0.0", "v1.0.0"));
-        assert!(!release_is_newer_than_current("v2.0.0", "v1.9.9"));
-    }
-
-    #[test]
-    fn release_is_newer_than_current_pre_release() {
-        assert!(release_is_newer_than_current("v1.0.0-beta", "v1.0.0"));
-        assert!(!release_is_newer_than_current("v1.0.0", "v1.0.0-beta"));
+    fn release_is_newer_than_current_compares_commit_ids() {
+        assert!(release_is_newer_than_current("abc1234", "def5678"));
+        assert!(!release_is_newer_than_current("ABCDEF1", "abcdef123"));
+        assert!(!release_is_newer_than_current("unknown", "def5678"));
     }
 
     #[test]
@@ -575,12 +625,24 @@ mod tests {
 
     #[test]
     fn stdout_version_matches_release_requires_miao_and_tag_or_version() {
-        assert!(stdout_version_matches_release("miao v0.12.2\n", "v0.12.2"));
+        assert!(stdout_version_matches_release("miao abc1234\n", "abc1234"));
         assert!(stdout_version_matches_release(
-            "miao-rust v1.0.0\n",
-            "v1.0.0"
+            "miao-rust abc1234\n",
+            "abc1234"
         ));
-        assert!(!stdout_version_matches_release("other v1.0.0\n", "v1.0.0"));
+        assert!(!stdout_version_matches_release("other abc1234\n", "abc1234"));
+    }
+
+    #[test]
+    fn fixed_download_url_uses_latest_tag() {
+        assert_eq!(
+            fixed_download_url("miao-rust-linux-amd64"),
+            "https://github.com/iVnc-Org/miao/releases/download/latest/miao-rust-linux-amd64"
+        );
+        assert_eq!(
+            fixed_download_url("miao-rust-linux-arm64"),
+            "https://github.com/iVnc-Org/miao/releases/download/latest/miao-rust-linux-arm64"
+        );
     }
 
     #[test]

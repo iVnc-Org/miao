@@ -5,6 +5,18 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Miao 控制面板</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <script>
+      (function () {
+        try {
+          var theme = localStorage.getItem('miao.theme')
+          var locale = localStorage.getItem('miao.locale')
+          document.documentElement.setAttribute('data-theme', theme === 'light' ? 'light' : 'dark')
+          document.documentElement.lang = locale === 'en' ? 'en' : 'zh-CN'
+        } catch (e) {
+          document.documentElement.setAttribute('data-theme', 'dark')
+        }
+      })()
+    </script>
     <script type="module" src="/src/main.jsx"></script>
   </head>
   <body>

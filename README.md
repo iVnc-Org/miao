@@ -9,13 +9,13 @@
 ```bash
 mkdir ~/miao && cd ~/miao
 # amd64
-wget https://github.com/YUxiangLuo/miao/releases/latest/download/miao-rust-linux-amd64 -O miao && chmod +x miao
+wget https://github.com/iVnc-Org/miao/releases/download/latest/miao-rust-linux-amd64 -O miao && chmod +x miao
 ```
 
 ```bash
 mkdir ~/miao && cd ~/miao
 # arm64
-wget https://github.com/YUxiangLuo/miao/releases/latest/download/miao-rust-linux-arm64 -O miao && chmod +x miao
+wget https://github.com/iVnc-Org/miao/releases/download/latest/miao-rust-linux-arm64 -O miao && chmod +x miao
 ```
 
 运行（需要 root 权限以创建 TUN 网卡）：

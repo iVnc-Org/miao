@@ -14,8 +14,9 @@ import {
 import { Button, SectionCard } from './ui.jsx'
 import { SubscriptionModal } from './modals.jsx'
 import { classNames, maskSubscription } from '../utils.js'
+import { useI18n } from '../i18n.jsx'
 
-function subscriptionStatus(sub) {
+function subscriptionStatus(sub, t) {
   if (sub.error) {
     return { tone: 'error', icon: CircleX, text: sub.error }
   }
@@ -26,38 +27,38 @@ function subscriptionStatus(sub) {
         tone: 'success',
         icon: Check,
         text: sub.local
-          ? `${sub.node_count} 个节点 · 本地内容已载入`
-          : `${sub.node_count} 个节点 · 已更新`,
+          ? t('subs.statusOkLocal', { count: sub.node_count })
+          : t('subs.statusOkRemote', { count: sub.node_count }),
       }
     case 'cached':
       return {
         tone: 'cached',
         icon: Database,
         text: sub.local
-          ? `${sub.node_count} 个节点 · 使用本地内容`
-          : `${sub.node_count} 个节点 · 使用本地缓存`,
+          ? t('subs.statusCachedLocal', { count: sub.node_count })
+          : t('subs.statusCachedRemote', { count: sub.node_count }),
       }
     case 'expired':
       return {
         tone: 'warning',
         icon: CircleAlert,
         text: sub.local
-          ? `本地订阅内容不可用 · 仍在使用 ${sub.node_count} 个缓存节点`
-          : `订阅链接已失效 · 仍在使用 ${sub.node_count} 个缓存节点`,
+          ? t('subs.statusExpiredLocal', { count: sub.node_count })
+          : t('subs.statusExpiredRemote', { count: sub.node_count }),
       }
     default:
       return {
         tone: 'pending',
         icon: Clock3,
-        text: sub.local ? '等待载入本地内容' : '等待首次获取',
+        text: sub.local ? t('subs.statusPendingLocal') : t('subs.statusPendingRemote'),
       }
   }
 }
 
-const SubRow = memo(function SubRow({ sub, disabled, onDelete, onStartReplace }) {
-  const status = subscriptionStatus(sub)
+const SubRow = memo(function SubRow({ sub, disabled, onDelete, onStartReplace, t }) {
+  const status = subscriptionStatus(sub, t)
   const StatusIcon = status.icon
-  const title = sub.name || (sub.local ? '本地订阅' : maskSubscription(sub.url))
+  const title = sub.name || (sub.local ? t('subs.localName') : maskSubscription(sub.url))
 
   return (
     <div className="list-row">
@@ -75,8 +76,8 @@ const SubRow = memo(function SubRow({ sub, disabled, onDelete, onStartReplace })
             className="icon-button subtle"
             disabled={disabled}
             onClick={() => onStartReplace(sub.url)}
-            title="替换链接"
-            aria-label="替换订阅链接"
+            title={t('subs.replaceLink')}
+            aria-label={t('subs.replaceLinkAria')}
           >
             <Link2 size={13} />
           </button>
@@ -86,8 +87,8 @@ const SubRow = memo(function SubRow({ sub, disabled, onDelete, onStartReplace })
           className="icon-button subtle"
           disabled={disabled}
           onClick={() => onDelete(sub.url, title)}
-          title="删除订阅"
-          aria-label="删除订阅"
+          title={t('subs.delete')}
+          aria-label={t('subs.delete')}
         >
           <X size={13} />
         </button>
@@ -105,6 +106,7 @@ export function SubsCard({
   onRefreshSubs,
   isInitializing,
 }) {
+  const { t } = useI18n()
   const [addModalOpen, setAddModalOpen] = useState(false)
   const [replacingUrl, setReplacingUrl] = useState('')
   const [replacementUrl, setReplacementUrl] = useState('')
@@ -133,7 +135,7 @@ export function SubsCard({
         <div className="section-header">
           <div className="section-title-wrap">
             <Rss size={14} className="section-icon" />
-            <span>订阅管理</span>
+            <span>{t('subs.title')}</span>
           </div>
           <Button
             tone="secondary"
@@ -143,14 +145,14 @@ export function SubsCard({
             disabled={subs.length === 0 || busy}
             onClick={onRefreshSubs}
           >
-            刷新
+            {t('subs.refresh')}
           </Button>
         </div>
       }
     >
       <div className="list-stack">
         {subs.length === 0
-          ? <div className="empty-block">暂无订阅</div>
+          ? <div className="empty-block">{t('subs.empty')}</div>
           : subs.map((sub) => (
             <div key={sub.url} className="subscription-entry">
               <SubRow
@@ -158,6 +160,7 @@ export function SubsCard({
                 disabled={busy}
                 onDelete={onDeleteSub}
                 onStartReplace={startReplacement}
+                t={t}
               />
               {replacingUrl === sub.url && (
                 <div className="subscription-replace-row">
@@ -169,8 +172,8 @@ export function SubsCard({
                       if (event.key === 'Enter') submitReplacement()
                       if (event.key === 'Escape') cancelReplacement()
                     }}
-                    placeholder="粘贴新的订阅链接..."
-                    aria-label="新的订阅链接"
+                    placeholder={t('subs.replacePlaceholder')}
+                    aria-label={t('subs.replaceAria')}
                     autoFocus
                   />
                   <Button
@@ -181,15 +184,15 @@ export function SubsCard({
                     disabled={!replacementUrl.trim() || busy}
                     onClick={submitReplacement}
                   >
-                    替换
+                    {t('subs.replace')}
                   </Button>
                   <button
                     type="button"
                     className="icon-button subtle"
                     disabled={busy}
                     onClick={cancelReplacement}
-                    title="取消替换"
-                    aria-label="取消替换"
+                    title={t('subs.cancelReplace')}
+                    aria-label={t('subs.cancelReplace')}
                   >
                     <X size={13} />
                   </button>
@@ -205,7 +208,7 @@ export function SubsCard({
             disabled={busy}
             onClick={() => setAddModalOpen(true)}
           >
-            添加订阅
+            {t('subs.add')}
           </Button>
         </div>
       </div>

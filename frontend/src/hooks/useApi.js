@@ -61,7 +61,7 @@ export function useApi(loadingState) {
     try {
       const response = await fetch(`/api/${endpoint}`, { headers: API_HEADERS, ...options })
       const payload = await response.json()
-      if (!response.ok || !payload.success) throw new Error(payload.message || '请求失败')
+      if (!response.ok || !payload.success) throw new Error(payload.message || 'Request failed')
       return payload
     } finally {
       setLoadingAction('')
@@ -282,10 +282,10 @@ export function usePool(mode) {
       try {
         payload = await response.json()
       } catch {
-        throw new Error(`节点测试失败 (HTTP ${response.status})`)
+        throw new Error(`Node test failed (HTTP ${response.status})`)
       }
       if (!response.ok || !payload.success || !payload.data) {
-        throw new Error(payload.message || `节点测试失败 (HTTP ${response.status})`)
+        throw new Error(payload.message || `Node test failed (HTTP ${response.status})`)
       }
       if (requestId === poolTestRequestRef.current && modeRef.current === 'pool') {
         setPoolTestResult(payload.data)
@@ -398,7 +398,7 @@ export function useConnections(status, clashApiBase) {
       const response = await fetch(`${clashApiBase}/connections`)
       if (!response.ok) {
         const details = (await response.text()).trim()
-        throw new Error(details || `连接统计获取失败 (${response.status})`)
+        throw new Error(details || `Failed to load connections (${response.status})`)
       }
       const payload = await response.json()
       const connections = Array.isArray(payload.connections) ? payload.connections : []
@@ -427,7 +427,7 @@ export function useConnections(status, clashApiBase) {
       setConnectionsError('')
       return payload
     } catch (error) {
-      setConnectionsError(error.message || '连接统计获取失败')
+      setConnectionsError(error.message || 'Failed to load connections')
       return null
     } finally {
       setConnectionsLoading(false)
@@ -447,7 +447,7 @@ export function useConnections(status, clashApiBase) {
     const response = await fetch(`${clashApiBase}/connections/${encodeURIComponent(id)}`, { method: 'DELETE' })
     if (!response.ok) {
       const details = (await response.text()).trim()
-      throw new Error(details || `关闭连接失败 (${response.status})`)
+      throw new Error(details || `Failed to close connection (${response.status})`)
     }
     await fetchConnections()
   }, [clashApiBase, fetchConnections])
@@ -456,7 +456,7 @@ export function useConnections(status, clashApiBase) {
     const response = await fetch(`${clashApiBase}/connections`, { method: 'DELETE' })
     if (!response.ok) {
       const details = (await response.text()).trim()
-      throw new Error(details || `关闭全部连接失败 (${response.status})`)
+      throw new Error(details || `Failed to close all connections (${response.status})`)
     }
     await fetchConnections()
   }, [clashApiBase, fetchConnections])

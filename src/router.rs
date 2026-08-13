@@ -165,7 +165,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let json = response_json(response).await;
         assert_eq!(json["success"], true);
-        assert!(json["data"]["current"].as_str().unwrap().starts_with('v'));
+        assert!(!json["data"]["current"].as_str().unwrap().is_empty());
         assert!(json["data"].get("commit_short").is_some());
         assert!(json["data"].get("commit_full").is_some());
         assert!(json["data"].get("commit_url").is_some());

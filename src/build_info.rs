@@ -1,10 +1,11 @@
+#[allow(dead_code)]
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const GIT_COMMIT_FULL: &str = env!("MIAO_GIT_COMMIT_FULL");
 pub const GIT_COMMIT_SHORT: &str = env!("MIAO_GIT_COMMIT_SHORT");
 pub const GIT_COMMIT_URL: &str = env!("MIAO_GIT_COMMIT_URL");
 
 pub fn current_version() -> String {
-    format!("v{}", VERSION)
+    git_commit_short().unwrap_or_else(|| "unknown".to_string())
 }
 
 pub fn git_commit_full() -> Option<String> {

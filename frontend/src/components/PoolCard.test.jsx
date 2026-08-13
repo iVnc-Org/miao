@@ -29,6 +29,19 @@ function renderPoolCard(props = {}) {
 }
 
 describe('PoolCard', () => {
+  it('keeps listen and credential fields collapsed until configure is clicked', async () => {
+    const user = userEvent.setup()
+    renderPoolCard()
+
+    expect(screen.queryByPlaceholderText('0.0.0.0')).not.toBeInTheDocument()
+    expect(screen.getByText('0.0.0.0:50000 · 无认证')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '配置' }))
+
+    expect(screen.getByPlaceholderText('0.0.0.0')).toBeInTheDocument()
+    expect(screen.getByPlaceholderText('50000')).toBeInTheDocument()
+  })
+
   it('starts a test for the endpoint beside the copy button', async () => {
     const user = userEvent.setup()
     const onTestEndpoint = vi.fn().mockResolvedValue(undefined)

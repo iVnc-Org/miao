@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Activity, Copy, LoaderCircle, Save, Share2 } from 'lucide-react'
+import { Activity, Copy, LoaderCircle, Save, Settings2, Share2 } from 'lucide-react'
 import { Button, SectionCard } from './ui.jsx'
 import { normalizePoolConfig } from '../hooks/useApi.js'
+import { useI18n } from '../i18n.jsx'
 
 const PORT_PLACEHOLDER = '50000'
 const WILDCARD_HOSTS = new Set(['0.0.0.0', '::'])
@@ -66,11 +67,13 @@ export function PoolCard({
   onTestEndpoint,
   showToast,
 }) {
+  const { t } = useI18n()
   const normalizedConfig = useMemo(() => normalizePoolConfig(config), [config])
   const [listen, setListen] = useState(normalizedConfig.listen)
   const [basePort, setBasePort] = useState(String(normalizedConfig.base_port))
   const [username, setUsername] = useState(normalizedConfig.username)
   const [password, setPassword] = useState(normalizedConfig.password)
+  const [settingsOpen, setSettingsOpen] = useState(false)
 
   // 记录本地表单是基于哪份服务端配置填出来的。只有服务端的值真的和它不一样时才回填，
   // 否则保存后紧跟着的那次 GET /api/share 会把用户刚敲进去的字符冲掉
@@ -100,19 +103,19 @@ export function PoolCard({
 
   const handleSave = () => {
     if (payload === null) {
-      showToast('起始端口必须是 1-65535 的整数', 'error')
+      showToast(t('pool.portInvalid'), 'error')
       return
     }
     if (!payload.listen) {
-      showToast('监听地址不能为空', 'error')
+      showToast(t('pool.listenEmpty'), 'error')
       return
     }
     if (parseListen(payload.listen) === null) {
-      showToast('监听地址必须是合法 IP', 'error')
+      showToast(t('pool.listenInvalid'), 'error')
       return
     }
     if (Boolean(payload.username) !== Boolean(payload.password)) {
-      showToast('用户名和密码需同时填写或同时留空', 'error')
+      showToast(t('pool.authPair'), 'error')
       return
     }
 
@@ -139,9 +142,9 @@ export function PoolCard({
         document.body.removeChild(textarea)
         if (!ok) throw new Error('execCommand copy failed')
       }
-      showToast('已复制 SOCKS 地址', 'success')
+      showToast(t('pool.copySuccess'), 'success')
     } catch {
-      showToast('复制失败，请手动选中地址复制', 'error')
+      showToast(t('pool.copyFail'), 'error')
     }
   }
 
@@ -150,11 +153,20 @@ export function PoolCard({
     try {
       await onTestEndpoint(endpoint)
     } catch (error) {
-      showToast(error.message || '节点测试失败', 'error')
+      showToast(error.message || t('toast.poolTestFailed'), 'error')
     }
   }
 
   if (proxyMode !== 'pool') return null
+
+  const summaryListen = payload?.listen || listen || normalizedConfig.listen
+  const summaryPort = payload?.base_port ?? normalizedConfig.base_port
+  const hasAuth = Boolean((payload?.username ?? username).trim())
+  const summaryBits = [
+    `${summaryListen}:${summaryPort}`,
+    hasAuth ? t('pool.summaryAuth') : t('pool.summaryNoAuth'),
+    dirty ? t('pool.unsaved') : null,
+  ].filter(Boolean)
 
   return (
     <SectionCard
@@ -164,71 +176,93 @@ export function PoolCard({
         <div className="section-header">
           <div className="section-title-wrap">
             <Share2 size={14} className="section-icon" />
-            <span>代理池</span>
+            <span>{t('pool.title')}</span>
             {endpoints?.length > 0 && (
               <span className="counter-pill">{endpoints.length}</span>
             )}
           </div>
-          <Button
-            tone="secondary"
-            size="sm"
-            icon={<Save size={12} />}
-            loading={loading}
-            disabled={disabled || loading || !dirty}
-            onClick={handleSave}
-          >
-            保存
-          </Button>
+          <div className="section-header-actions">
+            <Button
+              tone="ghost"
+              size="sm"
+              icon={<Settings2 size={12} />}
+              disabled={disabled || loading}
+              aria-expanded={settingsOpen}
+              aria-controls="pool-settings"
+              onClick={() => setSettingsOpen((open) => !open)}
+            >
+              {settingsOpen ? t('pool.collapse') : t('pool.configure')}
+            </Button>
+            <Button
+              tone="secondary"
+              size="sm"
+              icon={<Save size={12} />}
+              loading={loading}
+              disabled={disabled || loading || !dirty}
+              onClick={handleSave}
+            >
+              {t('pool.save')}
+            </Button>
+          </div>
         </div>
       }
     >
       <div className="share-body">
-        <div className="share-grid">
-          <label className="field">
-            <span>监听地址</span>
-            <input
-              value={listen}
-              disabled={disabled || loading}
-              onChange={(event) => setListen(event.target.value)}
-              placeholder="0.0.0.0"
-            />
-          </label>
-          <label className="field">
-            <span>起始端口</span>
-            <input
-              value={basePort}
-              disabled={disabled || loading}
-              onChange={(event) => setBasePort(event.target.value)}
-              placeholder={PORT_PLACEHOLDER}
-            />
-          </label>
-          <label className="field">
-            <span>用户名</span>
-            <input
-              value={username}
-              disabled={disabled || loading}
-              onChange={(event) => setUsername(event.target.value)}
-              placeholder="可选"
-              autoComplete="off"
-            />
-          </label>
-          <label className="field">
-            <span>密码</span>
-            <input
-              type="password"
-              value={password}
-              disabled={disabled || loading}
-              onChange={(event) => setPassword(event.target.value)}
-              placeholder="可选"
-              autoComplete="new-password"
-            />
-          </label>
-        </div>
-
-        <div className="share-note">
-          手动节点使用起始端口段，每个订阅使用后续独立的 1000 端口段。
-          默认监听 0.0.0.0；用户名和密码可留空，填写时需同时填写。
-        </div>
+        {settingsOpen ? (
+          <div className="share-settings" id="pool-settings">
+            <div className="share-grid">
+              <label className="field">
+                <span>{t('pool.listen')}</span>
+                <input
+                  value={listen}
+                  disabled={disabled || loading}
+                  onChange={(event) => setListen(event.target.value)}
+                  placeholder="0.0.0.0"
+                />
+              </label>
+              <label className="field">
+                <span>{t('pool.basePort')}</span>
+                <input
+                  value={basePort}
+                  disabled={disabled || loading}
+                  onChange={(event) => setBasePort(event.target.value)}
+                  placeholder={PORT_PLACEHOLDER}
+                />
+              </label>
+              <label className="field">
+                <span>{t('pool.username')}</span>
+                <input
+                  value={username}
+                  disabled={disabled || loading}
+                  onChange={(event) => setUsername(event.target.value)}
+                  placeholder={t('pool.optional')}
+                  autoComplete="off"
+                />
+              </label>
+              <label className="field">
+                <span>{t('pool.password')}</span>
+                <input
+                  type="password"
+                  value={password}
+                  disabled={disabled || loading}
+                  onChange={(event) => setPassword(event.target.value)}
+                  placeholder={t('pool.optional')}
+                  autoComplete="new-password"
+                />
+              </label>
+            </div>
+            <div className="share-note">{t('pool.note')}</div>
+          </div>
+        ) : (
+          <button
+            type="button"
+            className="share-summary"
+            disabled={disabled || loading}
+            onClick={() => setSettingsOpen(true)}
+          >
+            <span className="share-summary-text">{summaryBits.join(' · ')}</span>
+          </button>
+        )}
 
         {endpoints?.length > 0 ? (
           <div className="share-endpoints">
@@ -246,8 +280,8 @@ export function PoolCard({
                       className="share-endpoint-action"
                       disabled={disabled || loading || testingPort !== null || !onTestEndpoint}
                       onClick={() => handleTest(item)}
-                      title={`测试 ${item.tag}`}
-                      aria-label={`测试 ${item.tag}`}
+                      title={t('pool.testNamed', { tag: item.tag })}
+                      aria-label={t('pool.testNamed', { tag: item.tag })}
                       aria-busy={testingPort === item.port ? true : undefined}
                     >
                       {testingPort === item.port
@@ -259,8 +293,8 @@ export function PoolCard({
                       className="share-endpoint-action"
                       disabled={disabled || loading}
                       onClick={() => handleCopy(displayUrl)}
-                      title={`复制 ${item.tag} 的 SOCKS 地址`}
-                      aria-label={`复制 ${item.tag} 的 SOCKS 地址`}
+                      title={t('pool.copyNamed', { tag: item.tag })}
+                      aria-label={t('pool.copyNamed', { tag: item.tag })}
                     >
                       <Copy size={12} />
                     </button>
@@ -271,7 +305,7 @@ export function PoolCard({
           </div>
         ) : null}
         {endpoints?.length === 0 && (
-          <div className="empty-block">保存并启动服务后显示节点端口</div>
+          <div className="empty-block">{t('pool.empty')}</div>
         )}
       </div>
     </SectionCard>

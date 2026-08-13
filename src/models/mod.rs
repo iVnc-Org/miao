@@ -17,4 +17,4 @@ pub use node::{
     NodeRequest, Tls, UpdateNodeRequest,
 };
 pub use proxy::LastProxy;
-pub use version::{GitHubAsset, GitHubRelease, VersionInfo};
+pub use version::{GitHubAsset, GitHubCommit, GitHubRelease, VersionInfo};

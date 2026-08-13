@@ -240,9 +240,9 @@ export function getDelayTone(delay) {
   return 'slow'
 }
 
-export function formatDelay(delay) {
+export function formatDelay(delay, timeoutLabel = '超时') {
   if (delay === undefined || delay === null) return '--'
-  if (delay < 0) return '超时'
+  if (delay < 0) return timeoutLabel
   return `${delay} ms`
 }
 
@@ -273,31 +273,45 @@ export function maskSubscription(url) {
 }
 
 // Validation functions
+export function translateError(t, error) {
+  if (!error) return null
+  if (typeof error === 'string') return t(error)
+  const vars = error.vars
+    ? Object.fromEntries(
+      Object.entries(error.vars).map(([name, value]) => [
+        name,
+        typeof value === 'string' && value.includes('.') ? t(value) : value,
+      ])
+    )
+    : undefined
+  return t(error.key, vars)
+}
+
 export function validateSubscriptionUrl(url) {
-  if (!url || !url.trim()) return '订阅链接不能为空'
-  if (url.length > 4096) return '订阅链接过长'
+  if (!url || !url.trim()) return 'validation.subEmpty'
+  if (url.length > 4096) return 'validation.subTooLong'
   try {
     const parsed = new URL(url)
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      return '订阅链接必须使用 HTTP 或 HTTPS 协议'
+      return 'validation.subProtocol'
     }
-    if (!parsed.hostname) return '订阅链接缺少有效的主机名'
+    if (!parsed.hostname) return 'validation.subHost'
   } catch {
-    return '无效的订阅链接格式'
+    return 'validation.subInvalid'
   }
   return null
 }
 
 export function validateNodeTag(tag) {
-  if (!tag || !tag.trim()) return '节点名称不能为空'
-  if (Array.from(tag).length > 64) return '节点名称不能超过 64 个字符'
-  if (!/^[\p{L}\p{N}\-_\s]+$/u.test(tag)) return '节点名称只能包含字母、数字、空格、下划线和连字符'
+  if (!tag || !tag.trim()) return 'validation.tagEmpty'
+  if (Array.from(tag).length > 64) return 'validation.tagTooLong'
+  if (!/^[\p{L}\p{N}\-_\s]+$/u.test(tag)) return 'validation.tagCharset'
   return null
 }
 
 export function validateServer(server) {
-  if (!server || !server.trim()) return '服务器地址不能为空'
-  if (server.length > 253) return '服务器地址过长'
+  if (!server || !server.trim()) return 'validation.serverEmpty'
+  if (server.length > 253) return 'validation.serverTooLong'
 
   // 检查是否为有效的 IP 地址
   const ipv4Regex = /^(\d{1,3}\.){3}\d{1,3}$/
@@ -311,15 +325,15 @@ export function validateServer(server) {
 
   // 域名验证
   if (!trimmed.includes('.')) {
-    return '域名必须包含点号'
+    return 'validation.domainDot'
   }
 
   const parts = trimmed.split('.')
   for (const part of parts) {
-    if (!part) return '域名部分不能为空'
-    if (part.length > 63) return '域名的每个部分不能超过 63 个字符'
-    if (part.startsWith('-') || part.endsWith('-')) return '域名部分不能以连字符开头或结尾'
-    if (!/^[a-zA-Z0-9-]+$/.test(part)) return '域名部分只能包含字母、数字和连字符'
+    if (!part) return 'validation.domainPartEmpty'
+    if (part.length > 63) return 'validation.domainPartTooLong'
+    if (part.startsWith('-') || part.endsWith('-')) return 'validation.domainHyphen'
+    if (!/^[a-zA-Z0-9-]+$/.test(part)) return 'validation.domainCharset'
   }
 
   return null
@@ -327,39 +341,39 @@ export function validateServer(server) {
 
 export function validatePort(port) {
   const num = Number(port)
-  if (!Number.isInteger(num) || num <= 0) return '端口号必须为正整数'
-  if (num > 65535) return '端口号超出范围'
+  if (!Number.isInteger(num) || num <= 0) return 'validation.portInteger'
+  if (num > 65535) return 'validation.portRange'
   return null
 }
 
 export function validatePassword(password) {
-  if (!password || !password.trim()) return '密码不能为空'
-  if (password.length < 8) return '密码太短（至少 8 个字符）'
-  if (password.length > 256) return '密码过长（最多 256 个字符）'
+  if (!password || !password.trim()) return 'validation.passwordEmpty'
+  if (password.length < 8) return 'validation.passwordShort'
+  if (password.length > 256) return 'validation.passwordLong'
   return null
 }
 
-export function validateOptionalCredential(value, label) {
+export function validateOptionalCredential(value, labelKey) {
   if (!value) return null
-  if (value.length > 256) return `${label}过长（最多 256 个字符）`
+  if (value.length > 256) return { key: 'validation.credentialLong', vars: { label: labelKey } }
   return null
 }
 
 export function validateUuid(uuid) {
-  if (!uuid || !uuid.trim()) return 'UUID 不能为空'
+  if (!uuid || !uuid.trim()) return 'validation.uuidEmpty'
   if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(uuid.trim())) {
-    return 'UUID 格式无效'
+    return 'validation.uuidInvalid'
   }
   return null
 }
 
 export function validateTransport(type, path, host, serviceName) {
-  if (!['tcp', 'ws', 'http', 'h2', 'grpc'].includes(type)) return '不支持的传输层类型'
+  if (!['tcp', 'ws', 'http', 'h2', 'grpc'].includes(type)) return 'validation.transportType'
   if (['ws', 'http', 'h2'].includes(type)) {
-    if (path?.trim() && !path.trim().startsWith('/')) return '传输层路径必须以 / 开头'
-    if (host?.trim() && /\s/.test(host.trim())) return 'Host 不能包含空白字符'
+    if (path?.trim() && !path.trim().startsWith('/')) return 'validation.transportPath'
+    if (host?.trim() && /\s/.test(host.trim())) return 'validation.transportHost'
   }
-  if (type === 'grpc' && serviceName?.length > 256) return 'gRPC service name 过长'
+  if (type === 'grpc' && serviceName?.length > 256) return 'validation.grpcNameLong'
   return null
 }
 
@@ -380,17 +394,17 @@ export function buildTransportPayload(form) {
 
 export function validateVlessFlow(flow) {
   if (!flow) return null
-  if (flow !== 'xtls-rprx-vision') return '不支持的 VLESS flow'
+  if (flow !== 'xtls-rprx-vision') return 'validation.vlessFlow'
   return null
 }
 
 export function validateHysteria2Obfs(type, password) {
   if (!type) {
-    if (password?.trim()) return '请先选择混淆类型'
+    if (password?.trim()) return 'validation.obfsNeedType'
     return null
   }
-  if (!['salamander', 'gecko'].includes(type)) return '不支持的 Hysteria2 混淆类型'
-  if (!password || !password.trim()) return '混淆密码不能为空'
-  if (password.length > 256) return '混淆密码过长（最多 256 个字符）'
+  if (!['salamander', 'gecko'].includes(type)) return 'validation.obfsType'
+  if (!password || !password.trim()) return 'validation.obfsPasswordEmpty'
+  if (password.length > 256) return 'validation.obfsPasswordLong'
   return null
 }

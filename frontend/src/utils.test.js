@@ -8,6 +8,7 @@ import {
   manualNodeToForm,
   nodeTypeDefaults,
   protocolLabel,
+  translateError,
   validateHysteria2Obfs,
   validateNodeTag,
   validatePassword,
@@ -19,6 +20,7 @@ import {
   validateVlessFlow,
   buildTransportPayload,
 } from './utils.js'
+import { translate } from './i18n.jsx'
 
 describe('formatters', () => {
   it('formats uptime and throughput values', () => {
@@ -54,17 +56,24 @@ describe('validation', () => {
   })
 
   it('rejects invalid subscription URLs and node fields', () => {
-    expect(validateSubscriptionUrl('ftp://example.com/sub')).toMatch(/HTTP/)
-    expect(validateNodeTag('bad/tag')).toMatch(/只能包含/)
-    expect(validateServer('localhost')).toMatch(/点号/)
-    expect(validatePort(70000)).toMatch(/范围/)
-    expect(validatePassword('short')).toMatch(/太短/)
-    expect(validateUuid('not-a-uuid')).toMatch(/UUID/)
-    expect(validateTransport('xhttp', '', '', '')).toMatch(/传输层/)
-    expect(validateTransport('ws', 'path', '', '')).toMatch(/\//)
+    expect(validateSubscriptionUrl('ftp://example.com/sub')).toBe('validation.subProtocol')
+    expect(validateNodeTag('bad/tag')).toBe('validation.tagCharset')
+    expect(validateServer('localhost')).toBe('validation.domainDot')
+    expect(validatePort(70000)).toBe('validation.portRange')
+    expect(validatePassword('short')).toBe('validation.passwordShort')
+    expect(validateUuid('not-a-uuid')).toBe('validation.uuidInvalid')
+    expect(validateTransport('xhttp', '', '', '')).toBe('validation.transportType')
+    expect(validateTransport('ws', 'path', '', '')).toBe('validation.transportPath')
     expect(validateTransport('grpc', 'path', 'bad host', 'service')).toBeNull()
-    expect(validateVlessFlow('bad-flow')).toMatch(/VLESS/)
-    expect(validateHysteria2Obfs('', 'secret')).toMatch(/请先选择/)
+    expect(validateVlessFlow('bad-flow')).toBe('validation.vlessFlow')
+    expect(validateHysteria2Obfs('', 'secret')).toBe('validation.obfsNeedType')
+  })
+
+  it('translates validation keys for the active locale', () => {
+    const t = (key, vars) => translate('en', key, vars)
+    expect(translateError(t, 'validation.subProtocol')).toBe('Subscription URL must use HTTP or HTTPS')
+    expect(translateError(t, { key: 'validation.credentialLong', vars: { label: 'fields.username' } }))
+      .toBe('Username is too long (256 characters max)')
   })
 })
 

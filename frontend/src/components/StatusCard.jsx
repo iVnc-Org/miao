@@ -1,6 +1,6 @@
-import { 
-  ArrowUp, 
-  ArrowDown, 
+import {
+  ArrowUp,
+  ArrowDown,
   Globe2,
   ListFilter,
   Power,
@@ -8,6 +8,7 @@ import {
 } from 'lucide-react'
 import { Button, SectionCard } from './ui.jsx'
 import { classNames, formatUptime, formatSpeed } from '../utils.js'
+import { useI18n } from '../i18n.jsx'
 
 export function StatusCard({
   status,
@@ -17,20 +18,35 @@ export function StatusCard({
   onSetMode,
   onOpenConnections
 }) {
+  const { t } = useI18n()
   const sourceText = status.config_source === 'cache'
-    ? '缓存配置'
+    ? t('status.cacheConfig')
     : status.config_source === 'generated'
-      ? '最新配置'
+      ? t('status.generatedConfig')
       : null
-  const runningText = `PID: ${status.pid ?? '--'} · 运行时长: ${formatUptime(status.uptime_secs)}${sourceText ? ` · ${sourceText}` : ''}`
+  const runningText = sourceText
+    ? t('status.pidUptimeSource', {
+      pid: status.pid ?? '--',
+      uptime: formatUptime(status.uptime_secs),
+      source: sourceText,
+    })
+    : t('status.pidUptime', {
+      pid: status.pid ?? '--',
+      uptime: formatUptime(status.uptime_secs),
+    })
   const currentMode = status.mode || 'global'
   const modeSwitching = loadingAction === 'mode'
   const modeControlDisabled = modeSwitching || status.initializing
   const modes = [
-    { value: 'global', label: '全局代理', icon: Globe2 },
-    { value: 'process', label: '进程代理', icon: ListFilter },
-    { value: 'pool', label: '代理池', icon: Share2 },
+    { value: 'global', label: t('mode.global'), icon: Globe2 },
+    { value: 'process', label: t('mode.process'), icon: ListFilter },
+    { value: 'pool', label: t('mode.pool'), icon: Share2 },
   ]
+  const stateLabel = status.initializing
+    ? t('status.initializing')
+    : status.running
+      ? t('status.running')
+      : t('status.stopped')
 
   return (
     <SectionCard className="status-card" bodyClassName="status-card-body" header={null}>
@@ -38,19 +54,19 @@ export function StatusCard({
         <div className="status-pill-icon"><span className="status-pill-dot" /></div>
         <div className="status-copy">
           <div className="status-title">
-            Sing-box {status.initializing ? '初始化中' : status.running ? '运行中' : '已停止'}
+            {t('status.singbox', { state: stateLabel })}
           </div>
           <div className="status-subtitle">
-            {status.running 
+            {status.running
               ? runningText
-              : status.initializing 
-                ? '正在准备配置并启动服务…'
-                : '等待启动服务'}
+              : status.initializing
+                ? t('status.preparing')
+                : t('status.waitStart')}
           </div>
         </div>
       </div>
 
-      <button type="button" className="traffic-chip" onClick={onOpenConnections} title="查看连接统计">
+      <button type="button" className="traffic-chip" onClick={onOpenConnections} title={t('status.viewConnections')}>
         <div className="traffic-item">
           <ArrowUp size={14} className="traffic-icon up" />
           <span>{formatSpeed(traffic.up)}</span>
@@ -62,7 +78,7 @@ export function StatusCard({
       </button>
 
       <div className="status-card-spacer" />
-      <div className="route-mode-segment" role="group" aria-label="代理模式">
+      <div className="route-mode-segment" role="group" aria-label={t('status.modeGroup')}>
         {modes.map(({ value, label, icon: ModeIcon }) => (
           <button
             key={value}
@@ -77,14 +93,14 @@ export function StatusCard({
           </button>
         ))}
       </div>
-      <Button 
-        tone={status.running ? 'danger' : 'success'} 
-        icon={<Power size={14} />} 
-        loading={loadingAction === 'start' || loadingAction === 'stop' || status.initializing} 
-        disabled={loadingAction === 'start' || loadingAction === 'stop' || status.initializing} 
+      <Button
+        tone={status.running ? 'danger' : 'success'}
+        icon={<Power size={14} />}
+        loading={loadingAction === 'start' || loadingAction === 'stop' || status.initializing}
+        disabled={loadingAction === 'start' || loadingAction === 'stop' || status.initializing}
         onClick={onToggleService}
       >
-        {status.running ? '停止服务' : '启动服务'}
+        {status.running ? t('status.stop') : t('status.start')}
       </Button>
     </SectionCard>
   )

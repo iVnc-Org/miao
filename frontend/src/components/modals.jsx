@@ -32,8 +32,10 @@ import {
   formatBytes,
   nodeTypeDefaults,
 } from '../utils.js'
+import { useI18n } from '../i18n.jsx'
 
 export function ConfirmModal({ open, title, message, onCancel, onConfirm }) {
+  const { t } = useI18n()
   if (!open) return null
   return (
     <div className="modal-overlay" onClick={onCancel}>
@@ -49,8 +51,8 @@ export function ConfirmModal({ open, title, message, onCancel, onConfirm }) {
         </div>
         <p className="modal-message">{message}</p>
         <div className="modal-actions">
-          <Button tone="ghost" size="sm" onClick={onCancel}>取消</Button>
-          <Button tone="danger" size="sm" onClick={onConfirm}>确认</Button>
+          <Button tone="ghost" size="sm" onClick={onCancel}>{t('modal.cancel')}</Button>
+          <Button tone="danger" size="sm" onClick={onConfirm}>{t('modal.confirm')}</Button>
         </div>
       </div>
     </div>
@@ -58,6 +60,7 @@ export function ConfirmModal({ open, title, message, onCancel, onConfirm }) {
 }
 
 export function SubscriptionModal({ open, loading, onClose, onSubmit }) {
+  const { t } = useI18n()
   const [mode, setMode] = useState('url')
   const [url, setUrl] = useState('')
   const [name, setName] = useState('')
@@ -91,21 +94,21 @@ export function SubscriptionModal({ open, loading, onClose, onSubmit }) {
         <div className="modal-title-row">
           <div className="modal-title-wrap">
             <Rss size={18} className="icon-accent" />
-            <h3 id="subscription-modal-title">添加订阅</h3>
+            <h3 id="subscription-modal-title">{t('subModal.title')}</h3>
           </div>
           <button
             type="button"
             className="icon-button"
             disabled={loading}
             onClick={close}
-            title="关闭"
-            aria-label="关闭添加订阅弹窗"
+            title={t('modal.close')}
+            aria-label={t('subModal.closeAria')}
           >
             <X size={16} />
           </button>
         </div>
 
-        <div className="subscription-source-switch" aria-label="订阅来源">
+        <div className="subscription-source-switch" aria-label={t('subModal.source')}>
           <button
             type="button"
             className={classNames(mode === 'url' && 'active')}
@@ -114,7 +117,7 @@ export function SubscriptionModal({ open, loading, onClose, onSubmit }) {
             onClick={() => setMode('url')}
           >
             <Link2 size={14} />
-            <span>订阅链接</span>
+            <span>{t('subModal.urlMode')}</span>
           </button>
           <button
             type="button"
@@ -124,14 +127,14 @@ export function SubscriptionModal({ open, loading, onClose, onSubmit }) {
             onClick={() => setMode('content')}
           >
             <FileText size={14} />
-            <span>粘贴内容</span>
+            <span>{t('subModal.contentMode')}</span>
           </button>
         </div>
 
         {mode === 'url' ? (
           <div className="form-grid single subscription-modal-fields">
             <label className="field">
-              <span>订阅链接</span>
+              <span>{t('subModal.url')}</span>
               <input
                 value={url}
                 disabled={loading}
@@ -145,24 +148,24 @@ export function SubscriptionModal({ open, loading, onClose, onSubmit }) {
         ) : (
           <div className="form-grid single subscription-modal-fields">
             <label className="field">
-              <span>显示名称（可选）</span>
+              <span>{t('subModal.displayName')}</span>
               <input
                 value={name}
                 maxLength={80}
                 disabled={loading}
                 onChange={(event) => setName(event.target.value)}
-                placeholder="例如：备用订阅"
+                placeholder={t('subModal.displayNamePh')}
                 autoFocus
               />
             </label>
             <label className="field">
-              <span>订阅内容</span>
+              <span>{t('subModal.content')}</span>
               <textarea
                 className="subscription-content-input"
                 value={content}
                 disabled={loading}
                 onChange={(event) => setContent(event.target.value)}
-                placeholder="Base64、URI 列表或 Clash YAML"
+                placeholder={t('subModal.contentPh')}
                 spellCheck={false}
               />
             </label>
@@ -170,7 +173,7 @@ export function SubscriptionModal({ open, loading, onClose, onSubmit }) {
         )}
 
         <div className="modal-actions">
-          <Button tone="ghost" size="sm" disabled={loading} onClick={close}>取消</Button>
+          <Button tone="ghost" size="sm" disabled={loading} onClick={close}>{t('modal.cancel')}</Button>
           <Button
             tone="primary"
             size="sm"
@@ -179,7 +182,7 @@ export function SubscriptionModal({ open, loading, onClose, onSubmit }) {
             disabled={!canSubmit}
             onClick={submit}
           >
-            添加
+            {t('modal.add')}
           </Button>
         </div>
       </div>
@@ -188,6 +191,7 @@ export function SubscriptionModal({ open, loading, onClose, onSubmit }) {
 }
 
 export function PoolTestResultModal({ result, onClose }) {
+  const { t } = useI18n()
   if (!result) return null
 
   const statusTone = result.status_code >= 200 && result.status_code < 300
@@ -204,14 +208,14 @@ export function PoolTestResultModal({ result, onClose }) {
         <div className="modal-title-row">
           <div className="modal-title-wrap">
             <Activity size={18} className="icon-accent" />
-            <h3>代理节点测试</h3>
+            <h3>{t('poolTest.title')}</h3>
           </div>
           <button
             type="button"
             className="icon-button"
             onClick={onClose}
-            title="关闭"
-            aria-label="关闭测试结果"
+            title={t('modal.close')}
+            aria-label={t('poolTest.closeAria')}
           >
             <X size={16} />
           </button>
@@ -221,10 +225,10 @@ export function PoolTestResultModal({ result, onClose }) {
           <span className={classNames('pool-test-status', statusTone)}>{statusLabel}</span>
           <code className="pool-test-tag" title={result.tag}>{result.tag}</code>
         </div>
-        <pre className="pool-test-json" aria-label="响应 JSON">{formattedBody}</pre>
+        <pre className="pool-test-json" aria-label={t('poolTest.jsonAria')}>{formattedBody}</pre>
 
         <div className="modal-actions">
-          <Button tone="secondary" size="sm" onClick={onClose}>关闭</Button>
+          <Button tone="secondary" size="sm" onClick={onClose}>{t('modal.close')}</Button>
         </div>
       </div>
     </div>
@@ -232,6 +236,7 @@ export function PoolTestResultModal({ result, onClose }) {
 }
 
 export function NodeModal({ open, editing, nodeType, setNodeType, form, setForm, loading, onClose, onSubmit }) {
+  const { t } = useI18n()
   if (!open) return null
 
   const activeLabel = NODE_TYPE_OPTIONS.find((option) => option.value === nodeType)?.label || nodeType
@@ -263,16 +268,16 @@ export function NodeModal({ open, editing, nodeType, setNodeType, form, setForm,
             {editing
               ? <Pencil size={18} className="icon-accent" />
               : <Plus size={18} className="icon-accent" />}
-            <h3>{editing ? '编辑节点' : '添加节点'}</h3>
+            <h3>{editing ? t('node.editTitle') : t('node.addTitle')}</h3>
           </div>
-          <button className="icon-button" onClick={onClose} title="关闭" aria-label="关闭节点弹窗">
+          <button className="icon-button" onClick={onClose} title={t('modal.close')} aria-label={t('node.closeAria')}>
             <X size={16} />
           </button>
         </div>
 
         <div className="form-grid single">
           <label className="field">
-            <span>协议</span>
+            <span>{t('node.protocol')}</span>
             <select value={nodeType} onChange={handleNodeTypeChange}>
               {NODE_TYPE_OPTIONS.map(({ value, label }) => (
                 <option key={value} value={value}>{label}</option>
@@ -283,18 +288,18 @@ export function NodeModal({ open, editing, nodeType, setNodeType, form, setForm,
 
         <div className="form-grid single">
           <label className="field">
-            <span>节点名称</span>
+            <span>{t('node.name')}</span>
             <input 
               value={form.tag} 
               onChange={(event) => setForm((prev) => ({ ...prev, tag: event.target.value }))} 
-              placeholder="例如：我的节点" 
+              placeholder={t('node.namePh')} 
             />
           </label>
         </div>
 
         <div className="form-grid two">
           <label className="field">
-            <span>服务器地址</span>
+            <span>{t('node.server')}</span>
             <input 
               value={form.server} 
               onChange={(event) => setForm((prev) => ({ ...prev, server: event.target.value }))} 
@@ -302,7 +307,7 @@ export function NodeModal({ open, editing, nodeType, setNodeType, form, setForm,
             />
           </label>
           <label className="field">
-            <span>端口</span>
+            <span>{t('node.port')}</span>
             <input
               type="number"
               value={form.server_port}
@@ -315,7 +320,7 @@ export function NodeModal({ open, editing, nodeType, setNodeType, form, setForm,
         {nodeType === 'ss' && (
           <div className="form-grid single">
             <label className="field">
-              <span>加密方式</span>
+              <span>{t('node.cipher')}</span>
               <select 
                 value={form.cipher} 
                 onChange={(event) => setForm((prev) => ({ ...prev, cipher: event.target.value }))}
@@ -374,7 +379,7 @@ export function NodeModal({ open, editing, nodeType, setNodeType, form, setForm,
                 checked={form.tls_enabled}
                 onChange={(event) => setForm((prev) => ({ ...prev, tls_enabled: event.target.checked }))}
               />
-              <span>启用 TLS</span>
+              <span>{t('node.enableTls')}</span>
             </label>
           </div>
         )}
@@ -382,19 +387,19 @@ export function NodeModal({ open, editing, nodeType, setNodeType, form, setForm,
         {isSimpleProxy && (
           <div className="form-grid two">
             <label className="field">
-              <span>用户名（可选）</span>
+              <span>{t('node.usernameOptional')}</span>
               <input
                 value={form.username}
                 onChange={(event) => setForm((prev) => ({ ...prev, username: event.target.value }))}
-                placeholder="留空表示无需认证"
+                placeholder={t('node.authOptionalPh')}
               />
             </label>
             <label className="field">
-              <span>密码（可选）</span>
+              <span>{t('node.passwordOptional')}</span>
               <input
                 value={form.password}
                 onChange={(event) => setForm((prev) => ({ ...prev, password: event.target.value }))}
-                placeholder="留空表示无需认证"
+                placeholder={t('node.authOptionalPh')}
               />
             </label>
           </div>
@@ -408,7 +413,7 @@ export function NodeModal({ open, editing, nodeType, setNodeType, form, setForm,
                 value={form.flow}
                 onChange={(event) => setForm((prev) => ({ ...prev, flow: event.target.value }))}
               >
-                <option value="">默认</option>
+                <option value="">{t('node.default')}</option>
                 <option value="xtls-rprx-vision">xtls-rprx-vision</option>
               </select>
             </label>
@@ -419,7 +424,7 @@ export function NodeModal({ open, editing, nodeType, setNodeType, form, setForm,
                 onChange={(event) => setForm((prev) => ({ ...prev, packet_encoding: event.target.value }))}
               >
                 {PACKET_ENCODING_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>{option.label}</option>
+                  <option key={option.value} value={option.value}>{option.value ? option.label : t('node.default')}</option>
                 ))}
               </select>
             </label>
@@ -435,7 +440,7 @@ export function NodeModal({ open, editing, nodeType, setNodeType, form, setForm,
                 onChange={(event) => setForm((prev) => ({ ...prev, packet_encoding: event.target.value }))}
               >
                 {PACKET_ENCODING_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>{option.label}</option>
+                  <option key={option.value} value={option.value}>{option.value ? option.label : t('node.default')}</option>
                 ))}
               </select>
             </label>
@@ -446,28 +451,28 @@ export function NodeModal({ open, editing, nodeType, setNodeType, form, setForm,
           <>
             <div className="form-grid two">
               <label className="field">
-                <span>SNI（可选）</span>
+                <span>{t('node.sniOptional')}</span>
                 <input
                   value={form.sni}
                   onChange={(event) => setForm((prev) => ({ ...prev, sni: event.target.value }))}
-                  placeholder="留空使用服务器地址"
+                  placeholder={t('node.sniPh')}
                 />
               </label>
               <label className="field">
-                <span>TLS 指纹</span>
+                <span>{t('node.fingerprint')}</span>
                 <select
                   value={form.client_fingerprint}
                   onChange={(event) => setForm((prev) => ({ ...prev, client_fingerprint: event.target.value }))}
                 >
                   {CLIENT_FINGERPRINT_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>{option.label}</option>
+                    <option key={option.value} value={option.value}>{option.value ? option.label : t('node.default')}</option>
                   ))}
                 </select>
               </label>
             </div>
             <div className="form-grid single">
               <label className="field">
-                <span>ALPN（可选）</span>
+                <span>{t('node.alpnOptional')}</span>
                 <input
                   value={form.alpn}
                   onChange={(event) => setForm((prev) => ({ ...prev, alpn: event.target.value }))}
@@ -482,7 +487,7 @@ export function NodeModal({ open, editing, nodeType, setNodeType, form, setForm,
                   checked={form.skip_cert_verify}
                   onChange={(event) => setForm((prev) => ({ ...prev, skip_cert_verify: event.target.checked }))}
                 />
-                <span>跳过证书验证（不推荐）</span>
+                <span>{t('node.skipCert')}</span>
               </label>
             </div>
           </>
@@ -504,7 +509,7 @@ export function NodeModal({ open, editing, nodeType, setNodeType, form, setForm,
                       : prev.client_fingerprint,
                   }))
                 }}
-                placeholder="可选"
+                placeholder={t('node.optional')}
               />
             </label>
             <label className="field">
@@ -512,7 +517,7 @@ export function NodeModal({ open, editing, nodeType, setNodeType, form, setForm,
               <input
                 value={form.reality_short_id}
                 onChange={(event) => setForm((prev) => ({ ...prev, reality_short_id: event.target.value }))}
-                placeholder="可选"
+                placeholder={t('node.optional')}
               />
             </label>
           </div>
@@ -522,7 +527,7 @@ export function NodeModal({ open, editing, nodeType, setNodeType, form, setForm,
           <>
             <div className="form-grid single">
               <label className="field">
-                <span>传输层</span>
+                <span>{t('node.transport')}</span>
                 <select
                   value={form.transport_type}
                   onChange={(event) => setForm((prev) => ({ ...prev, transport_type: event.target.value }))}
@@ -536,7 +541,7 @@ export function NodeModal({ open, editing, nodeType, setNodeType, form, setForm,
             {pathTransport && (
               <div className="form-grid two">
                 <label className="field">
-                  <span>路径</span>
+                  <span>{t('node.path')}</span>
                   <input
                     value={form.transport_path}
                     onChange={(event) => setForm((prev) => ({ ...prev, transport_path: event.target.value }))}
@@ -544,11 +549,11 @@ export function NodeModal({ open, editing, nodeType, setNodeType, form, setForm,
                   />
                 </label>
                 <label className="field">
-                  <span>Host</span>
+                  <span>{t('node.host')}</span>
                   <input
                     value={form.transport_host}
                     onChange={(event) => setForm((prev) => ({ ...prev, transport_host: event.target.value }))}
-                    placeholder="可选"
+                    placeholder={t('node.optional')}
                   />
                 </label>
               </div>
@@ -560,7 +565,7 @@ export function NodeModal({ open, editing, nodeType, setNodeType, form, setForm,
                   <input
                     value={form.grpc_service_name}
                     onChange={(event) => setForm((prev) => ({ ...prev, grpc_service_name: event.target.value }))}
-                    placeholder="可选"
+                    placeholder={t('node.optional')}
                   />
                 </label>
               </div>
@@ -572,7 +577,7 @@ export function NodeModal({ open, editing, nodeType, setNodeType, form, setForm,
           <>
             <div className="form-grid two">
               <label className="field">
-                <span>混淆类型</span>
+                <span>{t('node.obfsType')}</span>
                 <select
                   value={form.obfs_type}
                   onChange={(event) => {
@@ -585,17 +590,17 @@ export function NodeModal({ open, editing, nodeType, setNodeType, form, setForm,
                   }}
                 >
                   {HYSTERIA2_OBFS_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>{option.label}</option>
+                    <option key={option.value} value={option.value}>{option.value ? option.label : t('node.obfsDisabled')}</option>
                   ))}
                 </select>
               </label>
               <label className="field">
-                <span>混淆密码</span>
+                <span>{t('node.obfsPassword')}</span>
                 <input
                   value={form.obfs_password}
                   disabled={!form.obfs_type}
                   onChange={(event) => setForm((prev) => ({ ...prev, obfs_password: event.target.value }))}
-                  placeholder={form.obfs_type ? 'obfs password' : '未启用'}
+                  placeholder={form.obfs_type ? 'obfs password' : t('node.obfsOff')}
                 />
               </label>
             </div>
@@ -605,7 +610,7 @@ export function NodeModal({ open, editing, nodeType, setNodeType, form, setForm,
         {nodeType === 'tuic' && (
           <div className="form-grid two">
             <label className="field">
-              <span>拥塞控制</span>
+              <span>{t('node.congestion')}</span>
               <select
                 value={form.tuic_congestion_control}
                 onChange={(event) => setForm((prev) => ({ ...prev, tuic_congestion_control: event.target.value }))}
@@ -637,7 +642,7 @@ export function NodeModal({ open, editing, nodeType, setNodeType, form, setForm,
                 checked={form.tuic_zero_rtt}
                 onChange={(event) => setForm((prev) => ({ ...prev, tuic_zero_rtt: event.target.checked }))}
               />
-              <span>启用 0-RTT</span>
+              <span>{t('node.zeroRtt')}</span>
             </label>
           </div>
         )}
@@ -645,11 +650,11 @@ export function NodeModal({ open, editing, nodeType, setNodeType, form, setForm,
         {requiresPassword && (
           <div className="form-grid single">
             <label className="field">
-              <span>密码</span>
+              <span>{t('node.password')}</span>
               <input
                 value={form.password}
                 onChange={(event) => setForm((prev) => ({ ...prev, password: event.target.value }))}
-                placeholder="密码"
+                placeholder={t('node.password')}
               />
             </label>
           </div>
@@ -662,7 +667,7 @@ export function NodeModal({ open, editing, nodeType, setNodeType, form, setForm,
           disabled={!canSubmit || loading} 
           onClick={onSubmit}
         >
-          {editing ? `保存 ${activeLabel} 节点` : `添加 ${activeLabel} 节点`}
+          {editing ? t('node.saveNamed', { label: activeLabel }) : t('node.addNamed', { label: activeLabel })}
         </Button>
       </div>
     </div>
@@ -686,14 +691,14 @@ function topEntries(counts, limit = 5) {
 const CONNECTION_PAGE_SIZE = 20
 
 const SORT_OPTIONS = [
-  { value: 'downloadSpeed', label: '下载速度' },
-  { value: 'uploadSpeed', label: '上传速度' },
-  { value: 'download', label: '下载总量' },
-  { value: 'upload', label: '上传总量' },
-  { value: 'start', label: '连接时间' },
-  { value: 'host', label: '目标' },
-  { value: 'source', label: '来源' },
-  { value: 'outbound', label: '出口' },
+  { value: 'downloadSpeed', labelKey: 'connections.sortDownloadSpeed' },
+  { value: 'uploadSpeed', labelKey: 'connections.sortUploadSpeed' },
+  { value: 'download', labelKey: 'connections.sortDownload' },
+  { value: 'upload', labelKey: 'connections.sortUpload' },
+  { value: 'start', labelKey: 'connections.sortStart' },
+  { value: 'host', labelKey: 'connections.sortHost' },
+  { value: 'source', labelKey: 'connections.sortSource' },
+  { value: 'outbound', labelKey: 'connections.sortOutbound' },
 ]
 
 function processName(connection) {
@@ -801,6 +806,7 @@ export function ConnectionsModal({
   onCloseAllConnections,
   showToast,
 }) {
+  const { t } = useI18n()
   const [query, setQuery] = useState('')
   const [sourceFilter, setSourceFilter] = useState('')
   const [sortKey, setSortKey] = useState('downloadSpeed')
@@ -856,7 +862,7 @@ export function ConnectionsModal({
       await onCloseConnection(connectionId)
       if (selectedId === connectionId) setSelectedId('')
     } catch (closeError) {
-      showToast?.(closeError.message || '关闭连接失败', 'error')
+      showToast?.(closeError.message || t('connections.closeFailed'), 'error')
     } finally {
       setClosingId('')
     }
@@ -868,7 +874,7 @@ export function ConnectionsModal({
       await onCloseAllConnections()
       setSelectedId('')
     } catch (closeError) {
-      showToast?.(closeError.message || '关闭全部连接失败', 'error')
+      showToast?.(closeError.message || t('connections.closeAllFailed'), 'error')
     } finally {
       setClosingAll(false)
     }
@@ -882,42 +888,42 @@ export function ConnectionsModal({
         <div className="modal-title-row">
           <div className="modal-title-wrap">
             <Activity size={18} className="icon-accent" />
-            <h3>连接统计</h3>
+            <h3>{t('connections.title')}</h3>
           </div>
           <div className="modal-title-actions">
-            <button className="icon-button" onClick={onRefresh} disabled={loading || !status.running} title="刷新">
+            <button className="icon-button" onClick={onRefresh} disabled={loading || !status.running} title={t('connections.refresh')}>
               <RefreshCw size={16} className={loading ? 'spin' : undefined} />
             </button>
-            <button className="icon-button" onClick={onClose} title="关闭">
+            <button className="icon-button" onClick={onClose} title={t('modal.close')}>
               <X size={16} />
             </button>
           </div>
         </div>
 
         {!status.running ? (
-          <div className="connections-empty">服务未运行，暂无连接统计。</div>
+          <div className="connections-empty">{t('connections.emptyStopped')}</div>
         ) : (
           <>
             <div className="connection-stat-grid">
               <div className="connection-stat">
-                <span>活跃连接</span>
+                <span>{t('connections.active')}</span>
                 <strong>{connections.length}</strong>
               </div>
               <div className="connection-stat">
-                <span>当前速度</span>
+                <span>{t('connections.speed')}</span>
                 <strong>↓ {formatBytes(downloadSpeed)}/s</strong>
                 <small>↑ {formatBytes(uploadSpeed)}/s</small>
               </div>
               <div className="connection-stat">
-                <span>累计上传</span>
+                <span>{t('connections.uploadTotal')}</span>
                 <strong>{formatBytes(uploadTotal)}</strong>
               </div>
               <div className="connection-stat">
-                <span>累计下载</span>
+                <span>{t('connections.downloadTotal')}</span>
                 <strong>{formatBytes(downloadTotal)}</strong>
               </div>
               <div className="connection-stat">
-                <span>总流量</span>
+                <span>{t('connections.total')}</span>
                 <strong>{formatBytes(uploadTotal + downloadTotal)}</strong>
               </div>
             </div>
@@ -931,28 +937,28 @@ export function ConnectionsModal({
                   type="search"
                   value={query}
                   onChange={(event) => setQuery(event.target.value)}
-                  placeholder="搜索目标、来源、规则、出口、进程"
+                  placeholder={t('connections.searchPh')}
                 />
               </label>
               <select value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value)}>
-                <option value="">全部来源</option>
+                <option value="">{t('connections.allSources')}</option>
                 {sourceOptions.map((source) => (
                   <option key={source} value={source}>{source}</option>
                 ))}
               </select>
               <select value={sortKey} onChange={(event) => setSortKey(event.target.value)}>
                 {SORT_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>{option.label}</option>
+                  <option key={option.value} value={option.value}>{t(option.labelKey)}</option>
                 ))}
               </select>
               <button className="connections-tool-button" onClick={() => setSortDesc((value) => !value)}>
-                {sortDesc ? '降序' : '升序'}
+                {sortDesc ? t('connections.desc') : t('connections.asc')}
               </button>
               <button
                 className="connections-tool-button danger"
                 onClick={handleCloseAll}
                 disabled={closingAll || loading || connections.length === 0}
-                title="关闭全部连接"
+                title={t('connections.closeAll')}
               >
                 {closingAll ? <RefreshCw size={14} className="spin" /> : <Trash2 size={14} />}
               </button>
@@ -962,38 +968,38 @@ export function ConnectionsModal({
               <div className="connections-panel">
                 <div className="connections-panel-title">
                   <Network size={14} />
-                  <span>协议分布</span>
+                  <span>{t('connections.networkDist')}</span>
                 </div>
                 {networkCounts.length > 0 ? networkCounts.map(([name, count]) => (
                   <div className="connection-count-row" key={name}>
                     <span>{name}</span>
                     <strong>{count}</strong>
                   </div>
-                )) : <div className="connections-muted">暂无数据</div>}
+                )) : <div className="connections-muted">{t('connections.noData')}</div>}
               </div>
 
               <div className="connections-panel">
                 <div className="connections-panel-title">
                   <Route size={14} />
-                  <span>出口分布</span>
+                  <span>{t('connections.outboundDist')}</span>
                 </div>
                 {outboundCounts.length > 0 ? outboundCounts.map(([name, count]) => (
                   <div className="connection-count-row" key={name}>
                     <span title={name}>{name}</span>
                     <strong>{count}</strong>
                   </div>
-                )) : <div className="connections-muted">暂无数据</div>}
+                )) : <div className="connections-muted">{t('connections.noData')}</div>}
               </div>
             </div>
 
             <div className="connections-table">
               <div className="connections-table-header">
                 <span />
-                <span>目标</span>
-                <span>规则 / 出口</span>
-                <span>来源</span>
-                <span>速度</span>
-                <span>总量</span>
+                <span>{t('connections.target')}</span>
+                <span>{t('connections.ruleOutbound')}</span>
+                <span>{t('connections.source')}</span>
+                <span>{t('connections.speedCol')}</span>
+                <span>{t('connections.totalCol')}</span>
               </div>
               {visibleConnections.length > 0 ? visibleConnections.map((connection, index) => (
                 <div
@@ -1008,7 +1014,7 @@ export function ConnectionsModal({
                       handleCloseSingle(connection.id)
                     }}
                     disabled={closingId === connection.id}
-                    title="关闭连接"
+                    title={t('connections.closeOne')}
                   >
                     {closingId === connection.id ? <RefreshCw size={13} className="spin" /> : <X size={13} />}
                   </button>
@@ -1030,7 +1036,7 @@ export function ConnectionsModal({
                     <small><ArrowUp size={12} />{formatBytes(Number(connection.upload || 0))}</small>
                   </span>
                 </div>
-              )) : <div className="connections-empty inline">暂无匹配连接</div>}
+              )) : <div className="connections-empty inline">{t('connections.noMatch')}</div>}
             </div>
 
             <div className="connections-pagination">
@@ -1040,31 +1046,31 @@ export function ConnectionsModal({
                   : `${pageStart + 1}-${Math.min(pageStart + visibleConnections.length, filteredConnections.length)} / ${filteredConnections.length}`}
               </span>
               <div>
-                <button className="connections-tool-button" disabled={safePage === 0} onClick={() => setPage((value) => Math.max(0, value - 1))}>上一页</button>
-                <button className="connections-tool-button" disabled={safePage >= pageCount - 1} onClick={() => setPage((value) => Math.min(pageCount - 1, value + 1))}>下一页</button>
+                <button className="connections-tool-button" disabled={safePage === 0} onClick={() => setPage((value) => Math.max(0, value - 1))}>{t('connections.prev')}</button>
+                <button className="connections-tool-button" disabled={safePage >= pageCount - 1} onClick={() => setPage((value) => Math.min(pageCount - 1, value + 1))}>{t('connections.next')}</button>
               </div>
             </div>
 
             {selectedConnection && (
               <div className="connection-detail-panel">
                 <div className="connection-detail-title">
-                  <strong>连接详情</strong>
-                  <button className="icon-button subtle" onClick={() => setSelectedId('')} title="关闭详情">
+                  <strong>{t('connections.detail')}</strong>
+                  <button className="icon-button subtle" onClick={() => setSelectedId('')} title={t('connections.closeDetail')}>
                     <X size={14} />
                   </button>
                 </div>
                 <dl>
-                  <DetailRow label="ID" value={selectedConnection.id} />
-                  <DetailRow label="开始时间" value={formatStartTime(selectedConnection.start)} />
-                  <DetailRow label="网络" value={`${selectedConnection.metadata?.type || '-'} / ${selectedConnection.metadata?.network || '-'}`} />
-                  <DetailRow label="目标" value={connectionTarget(selectedConnection)} />
-                  <DetailRow label="远端目标" value={connectionDestination(selectedConnection)} />
-                  <DetailRow label="来源" value={connectionSource(selectedConnection)} />
-                  <DetailRow label="规则" value={connectionRule(selectedConnection)} />
-                  <DetailRow label="链路" value={(selectedConnection.chains || []).join(' → ')} />
-                  <DetailRow label="进程" value={processName(selectedConnection)} />
-                  <DetailRow label="进程路径" value={selectedConnection.metadata?.processPath} />
-                  <DetailRow label="入站" value={selectedConnection.metadata?.inboundName || selectedConnection.metadata?.inboundUser || selectedConnection.metadata?.inboundIP} />
+                  <DetailRow label={t('connections.id')} value={selectedConnection.id} />
+                  <DetailRow label={t('connections.startTime')} value={formatStartTime(selectedConnection.start)} />
+                  <DetailRow label={t('connections.network')} value={`${selectedConnection.metadata?.type || '-'} / ${selectedConnection.metadata?.network || '-'}`} />
+                  <DetailRow label={t('connections.target')} value={connectionTarget(selectedConnection)} />
+                  <DetailRow label={t('connections.remote')} value={connectionDestination(selectedConnection)} />
+                  <DetailRow label={t('connections.source')} value={connectionSource(selectedConnection)} />
+                  <DetailRow label={t('connections.rule')} value={connectionRule(selectedConnection)} />
+                  <DetailRow label={t('connections.chain')} value={(selectedConnection.chains || []).join(' → ')} />
+                  <DetailRow label={t('connections.process')} value={processName(selectedConnection)} />
+                  <DetailRow label={t('connections.processPath')} value={selectedConnection.metadata?.processPath} />
+                  <DetailRow label={t('connections.inbound')} value={selectedConnection.metadata?.inboundName || selectedConnection.metadata?.inboundUser || selectedConnection.metadata?.inboundIP} />
                 </dl>
               </div>
             )}

@@ -11,7 +11,7 @@ mod state;
 mod test_support;
 mod validation;
 
-use crate::build_info::{git_commit_short, VERSION};
+use crate::build_info::current_version;
 use crate::error::{AppError, AppResult};
 use nix::unistd::Uid;
 use std::{fs, net::IpAddr, sync::Arc};
@@ -41,8 +41,9 @@ struct CliOptions {
 }
 
 fn print_help() {
+    let version = current_version();
     println!(
-        r#"miao v{VERSION}
+        r#"miao {version}
 
 Usage:
   miao [OPTIONS]
@@ -285,10 +286,7 @@ async fn main() -> AppResult<()> {
     }
 
     if cli_options.show_version {
-        match git_commit_short() {
-            Some(commit) => println!("miao v{} ({})", VERSION, commit),
-            None => println!("miao v{}", VERSION),
-        }
+        println!("miao {}", current_version());
         return Ok(());
     }
 
