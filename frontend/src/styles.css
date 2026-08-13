@@ -1701,35 +1701,33 @@ a.commit-badge:hover {
     }
 }
 
-html.theme-revealing {
-    view-transition-name: theme-root;
+.theme-reveal-veil {
+    position: fixed;
+    inset: 0;
+    z-index: 80;
+    pointer-events: none;
+    background: var(--bg);
+    clip-path: circle(var(--theme-reveal-radius) at var(--theme-reveal-x) var(--theme-reveal-y));
 }
 
-html.theme-revealing::view-transition-old(theme-root),
-html.theme-revealing::view-transition-new(theme-root) {
-    animation: none;
-    mix-blend-mode: normal;
+.theme-reveal-veil.is-revealing {
+    animation: theme-reveal-out 560ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
 }
 
-html.theme-revealing::view-transition-old(theme-root) {
-    z-index: 1;
-}
-
-html.theme-revealing::view-transition-new(theme-root) {
-    z-index: 2;
-    clip-path: circle(0 at var(--theme-reveal-x) var(--theme-reveal-y));
-    animation: theme-reveal-in 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
-@keyframes theme-reveal-in {
-    to {
+@keyframes theme-reveal-out {
+    from {
         clip-path: circle(var(--theme-reveal-radius) at var(--theme-reveal-x) var(--theme-reveal-y));
+    }
+    to {
+        clip-path: circle(0 at var(--theme-reveal-x) var(--theme-reveal-y));
     }
 }
 
 @media (prefers-reduced-motion: reduce) {
-    html.theme-revealing::view-transition-new(theme-root) {
+    .theme-reveal-veil,
+    .theme-reveal-veil.is-revealing {
         animation: none;
+        display: none;
     }
 }
 @media (max-width: 1180px) {

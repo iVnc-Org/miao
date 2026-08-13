@@ -622,6 +622,9 @@ export function translate(locale, key, vars) {
   return interpolate(template, vars)
 }
 
+const THEME_REVEAL_MS = 560
+const THEME_REVEAL_SELECTOR = '.theme-reveal-veil'
+
 export function applyDocumentPrefs(theme, locale) {
   const root = document.documentElement
   root.setAttribute('data-theme', theme)
@@ -649,37 +652,54 @@ function themeRevealRadius(x, y) {
   return Math.hypot(Math.max(x, width - x), Math.max(y, height - y))
 }
 
-export function revealThemeChange(nextTheme, event) {
-  const root = document.documentElement
-  const apply = () => {
-    root.setAttribute('data-theme', nextTheme)
-  }
+function clearThemeReveal() {
+  document.querySelectorAll(THEME_REVEAL_SELECTOR).forEach((node) => node.remove())
+}
 
-  if (prefersReducedMotion() || typeof document.startViewTransition !== 'function') {
-    apply()
-    return
-  }
-
+function revealOrigin(event) {
   const origin = event?.currentTarget
   const rect = origin && typeof origin.getBoundingClientRect === 'function'
     ? origin.getBoundingClientRect()
     : null
-  const x = rect ? rect.left + rect.width / 2 : window.innerWidth / 2
+  const x = rect ? rect.left + rect.width / 2 : (window.innerWidth || 0) / 2
   const y = rect ? rect.top + rect.height / 2 : 0
-  const radius = themeRevealRadius(x, y)
+  return { x, y, radius: Math.max(themeRevealRadius(x, y), 1) }
+}
 
-  root.classList.add('theme-revealing')
-  root.style.setProperty('--theme-reveal-x', `${x}px`)
-  root.style.setProperty('--theme-reveal-y', `${y}px`)
-  root.style.setProperty('--theme-reveal-radius', `${Math.max(radius, 1)}px`)
+export function revealThemeChange(nextTheme, event, previousTheme) {
+  const root = document.documentElement
+  const fromTheme = previousTheme || root.getAttribute('data-theme') || 'dark'
+  clearThemeReveal()
 
-  const transition = document.startViewTransition(apply)
-  transition.finished.finally(() => {
-    root.classList.remove('theme-revealing')
-    root.style.removeProperty('--theme-reveal-x')
-    root.style.removeProperty('--theme-reveal-y')
-    root.style.removeProperty('--theme-reveal-radius')
+  if (prefersReducedMotion() || fromTheme === nextTheme) {
+    root.setAttribute('data-theme', nextTheme)
+    return null
+  }
+
+  const { x, y, radius } = revealOrigin(event)
+  const veil = document.createElement('div')
+  veil.className = 'theme-reveal-veil'
+  veil.setAttribute('data-theme', fromTheme)
+  veil.style.setProperty('--theme-reveal-x', `${x}px`)
+  veil.style.setProperty('--theme-reveal-y', `${y}px`)
+  veil.style.setProperty('--theme-reveal-radius', `${radius}px`)
+  document.body.appendChild(veil)
+
+  root.setAttribute('data-theme', nextTheme)
+
+  const cleanup = () => {
+    veil.removeEventListener('animationend', cleanup)
+    veil.remove()
+  }
+
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      veil.classList.add('is-revealing')
+    })
   })
+  veil.addEventListener('animationend', cleanup)
+  window.setTimeout(cleanup, THEME_REVEAL_MS + 80)
+  return veil
 }
 
 const PrefsContext = createContext(null)
@@ -694,9 +714,11 @@ export function PrefsProvider({ children }) {
 
   const setTheme = useCallback((next, event) => {
     const value = next === 'light' ? 'light' : 'dark'
-    setThemeState(value)
+    setThemeState((current) => {
+      if (current !== value) revealThemeChange(value, event, current)
+      return value
+    })
     persistPreference(THEME_STORAGE_KEY, value)
-    revealThemeChange(value, event)
   }, [])
 
   const setLocale = useCallback((next) => {

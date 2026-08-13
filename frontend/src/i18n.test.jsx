@@ -1,6 +1,6 @@
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { LOCALE_STORAGE_KEY, PrefsProvider, THEME_STORAGE_KEY, revealThemeChange, translate } from './i18n.jsx'
 import { TopBar } from './components/TopBar.jsx'
 
@@ -44,27 +44,22 @@ describe('i18n and theme prefs', () => {
     expect(screen.getByText('Stopped')).toBeInTheDocument()
   })
 
-  it('reveals the next theme through a view transition when available', async () => {
-    const apply = vi.fn()
-    const finished = Promise.resolve()
-    document.startViewTransition = vi.fn((callback) => {
-      callback()
-      apply()
-      return { finished }
-    })
+  it('covers the old theme and then reveals the new one from the toggle', () => {
+    document.documentElement.setAttribute('data-theme', 'dark')
+    document.body.innerHTML = ''
 
-    revealThemeChange('light', {
+    const veil = revealThemeChange('light', {
       currentTarget: {
         getBoundingClientRect: () => ({ left: 10, top: 8, width: 20, height: 16 }),
       },
-    })
+    }, 'dark')
 
-    expect(document.startViewTransition).toHaveBeenCalledTimes(1)
     expect(document.documentElement.getAttribute('data-theme')).toBe('light')
-    expect(document.documentElement.classList.contains('theme-revealing')).toBe(true)
-    await finished
-    await Promise.resolve()
-    expect(document.documentElement.classList.contains('theme-revealing')).toBe(false)
-    delete document.startViewTransition
+    expect(veil).toBeTruthy()
+    expect(veil.className).toContain('theme-reveal-veil')
+    expect(veil.getAttribute('data-theme')).toBe('dark')
+    expect(veil.style.getPropertyValue('--theme-reveal-x')).toBe('20px')
+    expect(veil.style.getPropertyValue('--theme-reveal-y')).toBe('16px')
+    veil.remove()
   })
 })
