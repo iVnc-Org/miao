@@ -18,7 +18,7 @@ export function OnboardingScreen({ onAddSub, loadingAction, onOpenAddNode }) {
           <button
             type="button"
             className="pref-chip"
-            onClick={() => setTheme(nextTheme)}
+            onClick={(event) => setTheme(nextTheme, event)}
             title={theme === 'dark' ? t('prefs.themeToLight') : t('prefs.themeToDark')}
             aria-label={theme === 'dark' ? t('prefs.themeToLight') : t('prefs.themeToDark')}
           >

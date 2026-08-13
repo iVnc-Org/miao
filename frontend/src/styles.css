@@ -1,6 +1,5 @@
 :root,
 html[data-theme='dark'] {
-    color-scheme: dark;
     --bg: #1a1d22;
     --surface: #22262d;
     --surface-soft: #1e2229;
@@ -44,7 +43,6 @@ html[data-theme='dark'] {
 }
 
 html[data-theme='light'] {
-    color-scheme: light;
     --bg: #f3f5f7;
     --surface: #ffffff;
     --surface-soft: #f6f7f9;
@@ -137,11 +135,20 @@ html[data-embed-mode='true'] .shell {
 .topbar {
     display: flex;
     align-items: center;
-    gap: 16px;
+    flex-shrink: 0;
     height: 56px;
-    padding: 0 24px;
+    padding: 0;
     background: var(--surface);
     border-bottom: 1px solid var(--border);
+}
+.topbar-inner {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    width: min(100%, 1400px);
+    height: 100%;
+    margin: 0 auto;
+    padding: 0 24px;
 }
 .brand {
     display: flex;
@@ -1667,10 +1674,10 @@ html[data-embed-mode='true'] .right-column {
 }
 .commit-badge {
     position: fixed;
-    right: 14px;
+    right: max(24px, calc((100vw - 1400px) / 2 + 24px));
     bottom: 10px;
     z-index: 40;
-    max-width: calc(100vw - 28px);
+    max-width: calc(100vw - 48px);
     padding: 4px 8px;
     border-radius: 4px;
     color: var(--text-subtle);
@@ -1693,6 +1700,38 @@ a.commit-badge:hover {
         transform: rotate(360deg);
     }
 }
+
+html.theme-revealing {
+    view-transition-name: theme-root;
+}
+
+html.theme-revealing::view-transition-old(theme-root),
+html.theme-revealing::view-transition-new(theme-root) {
+    animation: none;
+    mix-blend-mode: normal;
+}
+
+html.theme-revealing::view-transition-old(theme-root) {
+    z-index: 1;
+}
+
+html.theme-revealing::view-transition-new(theme-root) {
+    z-index: 2;
+    clip-path: circle(0 at var(--theme-reveal-x) var(--theme-reveal-y));
+    animation: theme-reveal-in 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes theme-reveal-in {
+    to {
+        clip-path: circle(var(--theme-reveal-radius) at var(--theme-reveal-x) var(--theme-reveal-y));
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    html.theme-revealing::view-transition-new(theme-root) {
+        animation: none;
+    }
+}
 @media (max-width: 1180px) {
     .content-grid {
         grid-template-columns: 1fr;
@@ -1705,8 +1744,14 @@ a.commit-badge:hover {
     }
 }
 @media (max-width: 840px) {
+    .topbar-inner,
     .workspace {
-        padding: 16px;
+        padding-left: 16px;
+        padding-right: 16px;
+    }
+    .workspace {
+        padding-top: 16px;
+        padding-bottom: 16px;
     }
     .status-card-body {
         flex-wrap: wrap;
@@ -1753,11 +1798,14 @@ html[data-embed-mode='true'] .modal-card {
     max-height: none;
 }
 @media (max-width: 560px) {
-    .topbar {
-        padding: 0 14px;
+    .topbar-inner,
+    .workspace {
+        padding-left: 12px;
+        padding-right: 12px;
     }
     .workspace {
-        padding: 12px;
+        padding-top: 12px;
+        padding-bottom: 12px;
     }
     .proxy-grid,
     .connectivity-grid,
@@ -1801,9 +1849,9 @@ html[data-embed-mode='true'] .modal-card {
         min-width: 0;
     }
     .commit-badge {
-        right: 10px;
+        right: 12px;
         bottom: 8px;
-        max-width: calc(100vw - 20px);
+        max-width: calc(100vw - 24px);
     }
     .connection-stat-grid,
     .connections-split,

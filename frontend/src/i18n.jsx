@@ -622,11 +622,64 @@ export function translate(locale, key, vars) {
   return interpolate(template, vars)
 }
 
-function applyDocumentPrefs(theme, locale) {
+export function applyDocumentPrefs(theme, locale) {
   const root = document.documentElement
   root.setAttribute('data-theme', theme)
   root.lang = locale === 'zh' ? 'zh-CN' : 'en'
   document.title = translate(locale, 'app.title')
+}
+
+function persistPreference(key, value) {
+  try {
+    window.localStorage.setItem(key, value)
+  } catch {
+    // ignore
+  }
+}
+
+function prefersReducedMotion() {
+  return typeof window !== 'undefined'
+    && typeof window.matchMedia === 'function'
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+}
+
+function themeRevealRadius(x, y) {
+  const width = window.innerWidth || 0
+  const height = window.innerHeight || 0
+  return Math.hypot(Math.max(x, width - x), Math.max(y, height - y))
+}
+
+export function revealThemeChange(nextTheme, event) {
+  const root = document.documentElement
+  const apply = () => {
+    root.setAttribute('data-theme', nextTheme)
+  }
+
+  if (prefersReducedMotion() || typeof document.startViewTransition !== 'function') {
+    apply()
+    return
+  }
+
+  const origin = event?.currentTarget
+  const rect = origin && typeof origin.getBoundingClientRect === 'function'
+    ? origin.getBoundingClientRect()
+    : null
+  const x = rect ? rect.left + rect.width / 2 : window.innerWidth / 2
+  const y = rect ? rect.top + rect.height / 2 : 0
+  const radius = themeRevealRadius(x, y)
+
+  root.classList.add('theme-revealing')
+  root.style.setProperty('--theme-reveal-x', `${x}px`)
+  root.style.setProperty('--theme-reveal-y', `${y}px`)
+  root.style.setProperty('--theme-reveal-radius', `${Math.max(radius, 1)}px`)
+
+  const transition = document.startViewTransition(apply)
+  transition.finished.finally(() => {
+    root.classList.remove('theme-revealing')
+    root.style.removeProperty('--theme-reveal-x')
+    root.style.removeProperty('--theme-reveal-y')
+    root.style.removeProperty('--theme-reveal-radius')
+  })
 }
 
 const PrefsContext = createContext(null)
@@ -639,24 +692,17 @@ export function PrefsProvider({ children }) {
     applyDocumentPrefs(theme, locale)
   }, [theme, locale])
 
-  const setTheme = useCallback((next) => {
+  const setTheme = useCallback((next, event) => {
     const value = next === 'light' ? 'light' : 'dark'
     setThemeState(value)
-    try {
-      window.localStorage.setItem(THEME_STORAGE_KEY, value)
-    } catch {
-      // ignore
-    }
+    persistPreference(THEME_STORAGE_KEY, value)
+    revealThemeChange(value, event)
   }, [])
 
   const setLocale = useCallback((next) => {
     const value = next === 'en' ? 'en' : 'zh'
     setLocaleState(value)
-    try {
-      window.localStorage.setItem(LOCALE_STORAGE_KEY, value)
-    } catch {
-      // ignore
-    }
+    persistPreference(LOCALE_STORAGE_KEY, value)
   }, [])
 
   const t = useCallback((key, vars) => translate(locale, key, vars), [locale])

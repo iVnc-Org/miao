@@ -1,7 +1,7 @@
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { LOCALE_STORAGE_KEY, PrefsProvider, THEME_STORAGE_KEY, translate } from './i18n.jsx'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { LOCALE_STORAGE_KEY, PrefsProvider, THEME_STORAGE_KEY, revealThemeChange, translate } from './i18n.jsx'
 import { TopBar } from './components/TopBar.jsx'
 
 beforeEach(() => {
@@ -42,5 +42,29 @@ describe('i18n and theme prefs', () => {
     expect(document.documentElement.lang).toBe('en')
     expect(window.localStorage.getItem(LOCALE_STORAGE_KEY)).toBe('en')
     expect(screen.getByText('Stopped')).toBeInTheDocument()
+  })
+
+  it('reveals the next theme through a view transition when available', async () => {
+    const apply = vi.fn()
+    const finished = Promise.resolve()
+    document.startViewTransition = vi.fn((callback) => {
+      callback()
+      apply()
+      return { finished }
+    })
+
+    revealThemeChange('light', {
+      currentTarget: {
+        getBoundingClientRect: () => ({ left: 10, top: 8, width: 20, height: 16 }),
+      },
+    })
+
+    expect(document.startViewTransition).toHaveBeenCalledTimes(1)
+    expect(document.documentElement.getAttribute('data-theme')).toBe('light')
+    expect(document.documentElement.classList.contains('theme-revealing')).toBe(true)
+    await finished
+    await Promise.resolve()
+    expect(document.documentElement.classList.contains('theme-revealing')).toBe(false)
+    delete document.startViewTransition
   })
 })
