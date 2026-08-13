@@ -272,6 +272,9 @@ html[data-embed-mode='true'] .workspace {
     margin-bottom: 20px;
 }
 .panel-card {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius);
@@ -279,6 +282,7 @@ html[data-embed-mode='true'] .workspace {
     overflow: hidden;
 }
 .panel-card-body {
+    min-height: 0;
     padding: 16px;
 }
 .panel-body-tight {
@@ -421,24 +425,40 @@ html[data-embed-mode='true'] .content-grid {
     display: flex;
     flex-direction: column;
     gap: 16px;
-    overflow-y: auto;
+    overflow: hidden;
     min-height: 0;
     min-width: 0;
 }
 .left-column > .panel-card,
 .right-column > .panel-card {
-    flex: 0 0 auto;
+    flex: 0 1 auto;
     min-width: 0;
+    min-height: 0;
+}
+.left-column > .proxy-card,
+.right-column > .share-card {
+    flex: 1 1 40%;
+    min-height: 180px;
+}
+.proxy-card .panel-card-body,
+.share-card .panel-card-body,
+.right-column > .panel-card .panel-card-body.panel-body-tight {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
 }
 html[data-embed-mode='true'] .left-column,
 html[data-embed-mode='true'] .right-column {
-    overflow: visible;
-    min-height: auto;
+    overflow: hidden;
+    min-height: min(70vh, 720px);
 }
 .section-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
+    flex-shrink: 0;
     gap: 8px;
     padding: 12px 16px;
     border-bottom: 1px solid var(--border);
@@ -532,6 +552,7 @@ html[data-embed-mode='true'] .right-column {
 .current-node-banner {
     display: flex;
     align-items: center;
+    flex-shrink: 0;
     gap: 14px;
     padding: 12px 16px;
     width: 100%;
@@ -620,8 +641,9 @@ html[data-embed-mode='true'] .right-column {
     color: var(--danger);
 }
 .proxy-grid-wrap {
+    flex: 1;
+    min-height: 0;
     padding: 12px;
-    max-height: 600px;
     overflow-y: auto;
 }
 .proxy-grid {
@@ -710,6 +732,10 @@ html[data-embed-mode='true'] .right-column {
 .list-stack {
     display: flex;
     flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 56px;
+    max-height: min(140px, 16vh);
+    overflow-y: auto;
 }
 .list-row {
     display: flex;
@@ -787,11 +813,7 @@ html[data-embed-mode='true'] .right-column {
 .subscription-replace-row input:focus {
     border-color: var(--accent);
 }
-.subscription-add-action {
-    display: flex;
-    justify-content: flex-end;
-    padding: 10px 16px;
-}
+
 .field input,
 .field select {
     width: 100%;
@@ -823,6 +845,8 @@ html[data-embed-mode='true'] .right-column {
     display: flex;
     flex-direction: column;
     gap: 12px;
+    min-height: 0;
+    overflow: auto;
     padding: 12px 16px;
 }
 .tun-process-segment {
@@ -876,8 +900,11 @@ html[data-embed-mode='true'] .right-column {
     display: flex;
     flex-direction: column;
     gap: 12px;
+    flex: 1;
     min-width: 0;
+    min-height: 0;
     padding: 12px 16px;
+    overflow: hidden;
 }
 .share-grid {
     display: grid;
@@ -893,11 +920,13 @@ html[data-embed-mode='true'] .right-column {
     display: flex;
     flex-direction: column;
     gap: 10px;
+    flex-shrink: 0;
 }
 .share-summary {
     width: 100%;
     display: flex;
     align-items: center;
+    flex-shrink: 0;
     min-height: 34px;
     padding: 0;
     border: none;
@@ -923,7 +952,8 @@ html[data-embed-mode='true'] .right-column {
     display: flex;
     flex-direction: column;
     gap: 8px;
-    max-height: min(360px, 42svh);
+    flex: 1;
+    min-height: 0;
     overflow-x: hidden;
     overflow-y: auto;
     scrollbar-gutter: stable;
@@ -1663,35 +1693,15 @@ a.commit-badge:hover {
         transform: rotate(360deg);
     }
 }
-@media (max-width: 1180px), (max-height: 900px) {
-    html,
-    body,
-    #root {
-        height: auto;
-        overflow-x: hidden;
-        overflow-y: auto;
-    }
-    .shell {
-        height: auto;
-        min-height: 100svh;
-        overflow: visible;
-    }
-    .workspace {
-        flex: none;
-        overflow: visible;
-    }
-    .content-grid {
-        flex: none;
-        overflow: visible;
-    }
-    .left-column,
-    .right-column {
-        overflow: visible;
-    }
-}
 @media (max-width: 1180px) {
     .content-grid {
         grid-template-columns: 1fr;
+        overflow-y: auto;
+    }
+    .left-column,
+    .right-column {
+        overflow: hidden;
+        min-height: min(52vh, 520px);
     }
 }
 @media (max-width: 840px) {
@@ -1726,15 +1736,14 @@ html[data-embed-mode='true'] .content-grid {
 html[data-embed-mode='true'] .proxy-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
 }
-html[data-embed-mode='true'] .proxy-grid-wrap {
-    max-height: none;
-    overflow: visible;
+html[data-embed-mode='true'] .left-column,
+html[data-embed-mode='true'] .right-column {
+    overflow: hidden;
+    min-height: min(70vh, 720px);
 }
+html[data-embed-mode='true'] .proxy-grid-wrap,
 html[data-embed-mode='true'] .share-endpoints {
-    max-height: none;
-    overflow: visible;
-    scrollbar-gutter: auto;
-    padding-right: 0;
+    overflow-y: auto;
 }
 html[data-embed-mode='true'] .modal-overlay {
     align-items: flex-start;
@@ -1759,9 +1768,12 @@ html[data-embed-mode='true'] .modal-card {
     .connectivity-item {
         border-right: none;
     }
-    .subscription-add-action .btn {
+    .section-header {
+        flex-wrap: wrap;
+    }
+    .section-header-actions {
         width: 100%;
-        justify-content: center;
+        justify-content: flex-end;
     }
     .subscription-replace-row {
         grid-template-columns: minmax(0, 1fr) auto;

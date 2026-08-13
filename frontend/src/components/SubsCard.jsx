@@ -137,16 +137,27 @@ export function SubsCard({
             <Rss size={14} className="section-icon" />
             <span>{t('subs.title')}</span>
           </div>
-          <Button
-            tone="secondary"
-            size="sm"
-            icon={<RefreshCw size={12} />}
-            loading={loadingAction === 'refreshSubs'}
-            disabled={subs.length === 0 || busy}
-            onClick={onRefreshSubs}
-          >
-            {t('subs.refresh')}
-          </Button>
+          <div className="section-header-actions">
+            <Button
+              tone="secondary"
+              size="sm"
+              icon={<RefreshCw size={12} />}
+              loading={loadingAction === 'refreshSubs'}
+              disabled={subs.length === 0 || busy}
+              onClick={onRefreshSubs}
+            >
+              {t('subs.refresh')}
+            </Button>
+            <Button
+              tone="secondary"
+              size="sm"
+              icon={<Plus size={12} />}
+              disabled={busy}
+              onClick={() => setAddModalOpen(true)}
+            >
+              {t('subs.add')}
+            </Button>
+          </div>
         </div>
       }
     >
@@ -200,17 +211,6 @@ export function SubsCard({
               )}
             </div>
           ))}
-        <div className="subscription-add-action">
-          <Button
-            tone="secondary"
-            size="sm"
-            icon={<Plus size={12} />}
-            disabled={busy}
-            onClick={() => setAddModalOpen(true)}
-          >
-            {t('subs.add')}
-          </Button>
-        </div>
       </div>
       {addModalOpen && (
         <SubscriptionModal
