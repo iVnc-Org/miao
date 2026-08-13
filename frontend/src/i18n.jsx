@@ -15,6 +15,10 @@ const ZH = {
   'prefs.langToZh': '切换到中文',
   'prefs.zh': '中',
   'prefs.en': 'EN',
+  'prefs.upgrade': '升级',
+  'prefs.upgradePending': '待升级',
+  'prefs.openCommit': '查看当前版本提交',
+  'prefs.openLatestCommit': '查看待升级版本提交',
 
   'mode.global': '全局代理',
   'mode.process': '进程代理',
@@ -309,6 +313,10 @@ const EN = {
   'prefs.langToZh': '切换到中文',
   'prefs.zh': '中',
   'prefs.en': 'EN',
+  'prefs.upgrade': 'Upgrade',
+  'prefs.upgradePending': 'Update ready',
+  'prefs.openCommit': 'Open the current commit',
+  'prefs.openLatestCommit': 'Open the pending commit',
 
   'mode.global': 'Global',
   'mode.process': 'Process',

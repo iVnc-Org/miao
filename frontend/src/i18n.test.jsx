@@ -34,6 +34,9 @@ describe('i18n and theme prefs', () => {
       </PrefsProvider>
     )
 
+    expect(screen.getByRole('button', { name: '升级' })).toBeInTheDocument()
+    expect(screen.getByText('abc1234')).toBeInTheDocument()
+
     await user.click(screen.getByRole('button', { name: '切换到浅色' }))
     expect(document.documentElement.getAttribute('data-theme')).toBe('light')
     expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe('light')
@@ -42,6 +45,33 @@ describe('i18n and theme prefs', () => {
     expect(document.documentElement.lang).toBe('en')
     expect(window.localStorage.getItem(LOCALE_STORAGE_KEY)).toBe('en')
     expect(screen.getByText('Stopped')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Upgrade' })).toBeInTheDocument()
+  })
+
+  it('shows a pending upgrade label and the latest commit after an update is found', () => {
+    render(
+      <PrefsProvider>
+        <TopBar
+          status={{ running: true, initializing: false }}
+          versionInfo={{
+            current: 'abc1234',
+            commit_short: 'abc1234',
+            latest: 'def5678',
+            has_update: true,
+            commit_url: 'https://github.com/iVnc-Org/miao/commit/abc1234',
+          }}
+          upgrading={false}
+          onUpgradeClick={() => {}}
+        />
+      </PrefsProvider>
+    )
+
+    expect(screen.getByRole('button', { name: '待升级' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '查看待升级版本提交' })).toHaveAttribute(
+      'href',
+      'https://github.com/iVnc-Org/miao/commit/def5678'
+    )
+    expect(screen.getByText('def5678')).toBeInTheDocument()
   })
 
   it('covers the old theme and then reveals the new one from the toggle', () => {

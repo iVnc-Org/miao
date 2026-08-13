@@ -228,6 +228,11 @@ html[data-embed-mode='true'] .shell {
     border-radius: 999px;
     background: currentColor;
 }
+.topbar-version {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
 .version-chip {
     display: inline-flex;
     align-items: center;
@@ -1673,20 +1678,18 @@ html[data-embed-mode='true'] .right-column {
     border-left: 3px solid var(--accent);
 }
 .commit-badge {
-    position: fixed;
-    right: max(24px, calc((100vw - 1400px) / 2 + 24px));
-    bottom: 10px;
-    z-index: 40;
-    max-width: calc(100vw - 48px);
+    max-width: 9em;
     padding: 4px 8px;
     border-radius: 4px;
     color: var(--text-subtle);
-    background: var(--badge-bg);
+    background: transparent;
     border: 1px solid transparent;
     font-size: 11px;
     line-height: 1.2;
     text-decoration: none;
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 a.commit-badge:hover {
     color: var(--text-muted);
@@ -1846,11 +1849,7 @@ html[data-embed-mode='true'] .modal-card {
     .toast {
         min-width: 0;
     }
-    .commit-badge {
-        right: 12px;
-        bottom: 8px;
-        max-width: calc(100vw - 24px);
-    }
+
     .connection-stat-grid,
     .connections-split,
     .connections-toolbar {

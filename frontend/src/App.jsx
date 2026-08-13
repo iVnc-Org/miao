@@ -64,6 +64,7 @@ export default function App() {
   const [firstLoadDone, setFirstLoadDone] = useState(false)
   const [loadingAction, setLoadingAction] = useState('')
   const [upgrading, setUpgrading] = useState(false)
+  const [checkingVersion, setCheckingVersion] = useState(false)
   const [nodeForm, setNodeForm] = useState(EMPTY_NODE_FORM)
   const [nodeType, setNodeType] = useState('hysteria2')
   const [showNodeModal, setShowNodeModal] = useState(false)
@@ -679,11 +680,16 @@ export default function App() {
     }
 
     if (!versionInfo.has_update) {
-      const fresh = await fetchVersion()
-      if (fresh?.has_update) {
-        showToast(t('toast.updateFound', { version: fresh.latest }), 'success')
-      } else {
-        showToast(t('toast.upToDate'), 'info')
+      setCheckingVersion(true)
+      try {
+        const fresh = await fetchVersion()
+        if (fresh?.has_update) {
+          showToast(t('toast.updateFound', { version: fresh.latest }), 'success')
+        } else {
+          showToast(t('toast.upToDate'), 'info')
+        }
+      } finally {
+        setCheckingVersion(false)
       }
       return
     }
@@ -744,7 +750,6 @@ export default function App() {
           loadingAction={loadingAction}
           onOpenAddNode={handleOpenAddNode}
         />
-        <CommitBadge versionInfo={versionInfo} />
         <ToastStack toasts={toasts} />
         <NodeModal
           open={showNodeModal}
@@ -769,6 +774,7 @@ export default function App() {
         status={status}
         versionInfo={versionInfo}
         upgrading={upgrading}
+        checkingVersion={checkingVersion}
         onUpgradeClick={handleUpgradeClick}
       />
 
@@ -854,7 +860,6 @@ export default function App() {
         </div>
       </main>
 
-      <CommitBadge versionInfo={versionInfo} />
       <ToastStack toasts={toasts} />
 
       <NodeModal 
@@ -898,31 +903,6 @@ export default function App() {
           action?.()
         }}
       />
-    </div>
-  )
-}
-
-function CommitBadge({ versionInfo }) {
-  const commit = versionInfo.commit_short || versionInfo.current || 'unknown'
-  const label = versionInfo.current || commit
-
-  if (versionInfo.commit_url) {
-    return (
-      <a
-        className="commit-badge"
-        href={versionInfo.commit_url}
-        target="_blank"
-        rel="noreferrer"
-        title={versionInfo.commit_full || commit}
-      >
-        {label}
-      </a>
-    )
-  }
-
-  return (
-    <div className="commit-badge" title={versionInfo.commit_full || commit}>
-      {label}
     </div>
   )
 }
