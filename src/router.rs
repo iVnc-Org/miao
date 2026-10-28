@@ -34,7 +34,10 @@ pub fn build_router(app_state: Arc<AppState>) -> Router {
         .route("/api/share/test", post(test_share_endpoint))
         .route("/api/connectivity", post(test_connectivity))
         .route("/api/version", get(get_version))
-        .route("/api/upgrade", post(upgrade))
+        .route(
+            "/api/upgrade",
+            get(crate::handlers::version::get_upgrade).post(upgrade),
+        )
         .route("/api/subs", get(get_subs))
         .route("/api/subs", post(add_sub))
         .route("/api/subs/content", post(add_sub_content))

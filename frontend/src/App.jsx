@@ -1,3 +1,5 @@
+import { useUpgrade } from './hooks/useUpgrade.js'
+import { UpgradeModal } from './components/UpgradeModal.jsx'
 import { useEffect, useMemo, useState, useCallback } from 'react'
 import {
   TopBar,
@@ -63,7 +65,8 @@ export default function App() {
   const { t } = useI18n()
   const [firstLoadDone, setFirstLoadDone] = useState(false)
   const [loadingAction, setLoadingAction] = useState('')
-  const [upgrading, setUpgrading] = useState(false)
+  const upgrade = useUpgrade()
+  const upgrading = Boolean(upgrade.status?.active)
   const [checkingVersion, setCheckingVersion] = useState(false)
   const [nodeForm, setNodeForm] = useState(EMPTY_NODE_FORM)
   const [nodeType, setNodeType] = useState('hysteria2')
@@ -674,6 +677,7 @@ export default function App() {
   }, [fetchConnections, showToast, t])
 
   const handleUpgradeClick = useCallback(async () => {
+    if (upgrading) { upgrade.show(); return }
     if (!status.running) {
       showToast(t('toast.upgradeNeedRunning'), 'info')
       return
@@ -700,35 +704,13 @@ export default function App() {
       t('confirm.upgradeTitle'),
       t('confirm.upgradeMessage', { current: currentVersion, target: targetVersion }),
       async () => {
-      setUpgrading(true)
-      try {
-        const response = await fetch('/api/upgrade', { method: 'POST' })
-        const payload = await response.json()
-        if (!payload.success) throw new Error(payload.message || t('toast.upgradeFailed'))
-        showToast(t('toast.upgradeSuccess'), 'success')
-        for (let index = 0; index < 30; index += 1) {
-          await new Promise((resolve) => window.setTimeout(resolve, 500))
-          try {
-            const ping = await fetch('/api/version')
-            if (ping.ok) {
-              const versionPayload = await ping.json()
-              if (versionPayload.success && versionPayload.data?.current !== currentVersion) {
-                window.location.reload()
-                return
-              }
-            }
-          } catch {
-            // ignore
-          }
+        try {
+          await upgrade.start()
+        } catch (error) {
+          showToast(error.message, 'error')
         }
-        showToast(t('toast.upgradeTimeout'), 'error')
-      } catch (error) {
-        showToast(error.message, 'error')
-      } finally {
-        setUpgrading(false)
-      }
-    })
-  }, [status.running, versionInfo, fetchVersion, showToast, openConfirm, t])
+      })
+  }, [status.running, versionInfo, fetchVersion, showToast, openConfirm, t, upgrade, upgrading])
 
   const handleOpenDeleteNodeConfirm = useCallback((tag) => {
     openConfirm(t('confirm.deleteNodeTitle'), t('confirm.deleteNodeMessage', { tag }), () => handleDeleteNode(tag))
@@ -739,12 +721,12 @@ export default function App() {
   }, [openConfirm, handleDeleteSubscription, t])
 
   if (!firstLoadDone) {
-    return <div className="shell"><div className="onboarding-loading">{t('app.loading')}</div></div>
+    return <div className="shell"><UpgradeModal upgrade={upgrade} /><div className="onboarding-loading">{t('app.loading')}</div></div>
   }
 
   if (needsOnboarding) {
     return (
-      <div className="shell">
+      <div className="shell"><UpgradeModal upgrade={upgrade} />
         <OnboardingScreen
           onAddSub={handleAddSubscription}
           loadingAction={loadingAction}
@@ -769,7 +751,7 @@ export default function App() {
   const displayedProxyMode = modeSetup || status.mode
 
   return (
-    <div className="shell">
+    <div className="shell"><UpgradeModal upgrade={upgrade} />
       <TopBar
         status={status}
         versionInfo={versionInfo}

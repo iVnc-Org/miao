@@ -373,6 +373,7 @@ async fn main() -> AppResult<()> {
     );
     *app_state.config_warning.lock().await = migration_warning.clone();
     let state_for_init = app_state.clone();
+    services::version::watch_upgrade_recovery(app_state.clone());
 
     // Start web server immediately so the panel is accessible during initialization
     let app = router::build_router(app_state.clone());

@@ -15,7 +15,9 @@ use tracing::{error, info, warn};
 use crate::build_info::{current_version, git_commit_full, git_commit_short, git_commit_url};
 use crate::error::{AppError, AppResult};
 use crate::models::{GitHubAsset, GitHubCommit, GitHubRelease, VersionInfo};
-use crate::services::singbox::{get_sing_box_home, sing_box_is_running, stop_sing_internal};
+use crate::services::singbox::{
+    get_sing_box_home, sing_box_is_running, start_sing_internal, stop_sing_internal,
+};
 use crate::state::{AppState, VersionCache};
 
 const RELEASE_REPO: &str = "iVnc-Org/miao";
@@ -26,6 +28,188 @@ const RELEASE_DOWNLOAD_BASE: &str = "https://github.com/iVnc-Org/miao/releases/d
 const CACHE_TTL: Duration = Duration::from_secs(300);
 const DOWNLOAD_MAX_ATTEMPTS: u32 = 3;
 const DOWNLOAD_RETRY_BASE_MS: u64 = 500;
+
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct UpgradeStatus {
+    pub id: String,
+    pub active: bool,
+    pub stage: String,
+    pub target: String,
+    pub downloaded: u64,
+    pub total: u64,
+    pub events: Vec<String>,
+}
+
+static STATUS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn status_path(state: &AppState) -> std::path::PathBuf {
+    state.config_path.with_extension("upgrade.json")
+}
+
+fn update_status(
+    state: &AppState,
+    change: impl FnOnce(&mut UpgradeStatus),
+) -> AppResult<UpgradeStatus> {
+    let _lock = STATUS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let path = status_path(state);
+    let mut status: UpgradeStatus = fs::read(&path)
+        .ok()
+        .and_then(|v| serde_json::from_slice(&v).ok())
+        .unwrap_or_default();
+    change(&mut status);
+    let temp = path.with_extension("upgrade.json.tmp");
+    fs::write(&temp, serde_json::to_vec(&status)?)?;
+    fs::rename(temp, path)?;
+    Ok(status)
+}
+
+fn stage(state: &AppState, message: &str) -> AppResult<()> {
+    update_status(state, |s| {
+        s.stage = message.into();
+        s.events.push(message.into());
+        if s.events.len() > 80 {
+            s.events.remove(0);
+        }
+    })?;
+    Ok(())
+}
+
+pub async fn upgrade_status(state: &Arc<AppState>) -> AppResult<UpgradeStatus> {
+    let status: UpgradeStatus = match fs::read(status_path(state)) {
+        Ok(bytes) => serde_json::from_slice(&bytes)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => UpgradeStatus::default(),
+        Err(e) => return Err(e.into()),
+    };
+    if !status.active
+        || state.upgrading.load(Ordering::SeqCst)
+        || state.initializing.load(Ordering::SeqCst)
+    {
+        return Ok(status);
+    }
+    let restored = sing_box_is_running(state).await;
+    update_status(state, |s| {
+        if state.upgrading.load(Ordering::SeqCst) || !s.active {
+            return;
+        }
+        s.active = false;
+        s.stage = if s.stage == "Restarting" && s.target == current_version() && restored {
+            "Upgrade complete".into()
+        } else {
+            "Upgrade interrupted, rolled back, or core recovery failed".into()
+        };
+        s.events.push(s.stage.clone());
+    })
+}
+
+/// Finalize recovery even when no browser is connected.
+pub fn watch_upgrade_recovery(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        for _ in 0..600 {
+            if !state.initializing.load(Ordering::SeqCst) {
+                if let Err(e) = upgrade_status(&state).await {
+                    warn!(error = %e, "Failed to reconcile upgrade status");
+                }
+                return;
+            }
+            sleep(Duration::from_secs(1)).await;
+        }
+        let _ = update_status(&state, |s| {
+            if s.active && !state.upgrading.load(Ordering::SeqCst) {
+                s.active = false;
+                s.stage = "Upgrade failed: core recovery timed out".into();
+                s.events.push(s.stage.clone());
+            }
+        });
+    });
+}
+
+pub fn start_upgrade(state: Arc<AppState>) -> AppResult<UpgradeStatus> {
+    if state.initializing.load(Ordering::SeqCst) {
+        return Err(AppError::message("Service is still initializing"));
+    }
+    if state
+        .upgrading
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err(AppError::message("Upgrade already in progress"));
+    }
+    let initial = update_status(&state, |s| {
+        *s = UpgradeStatus {
+            id: format!(
+                "{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+            ),
+            active: true,
+            stage: "Checking release".into(),
+            events: vec!["Checking release".into()],
+            ..Default::default()
+        }
+    });
+    if initial.is_err() {
+        state.upgrading.store(false, Ordering::SeqCst);
+        return initial;
+    }
+    tokio::spawn(async move {
+        match upgrade_binary(&state).await {
+            Ok(message) if message == "Already up to date" => {
+                let _ = stage(&state, &message);
+                let _ = update_status(&state, |s| s.active = false);
+                state.upgrading.store(false, Ordering::SeqCst);
+            }
+            Ok(_) => {} // Keep the guard until exec; the new process reconciles persisted state.
+            Err(e) => {
+                let _ = stage(&state, &format!("Upgrade failed: {e}"));
+                let _ = update_status(&state, |s| s.active = false);
+                state.upgrading.store(false, Ordering::SeqCst);
+            }
+        }
+    });
+    initial
+}
+
+async fn accessible_get(client: &reqwest::Client, url: &str) -> AppResult<reqwest::Response> {
+    accessible_get_with_proxy(client, url, "https://sina.dev/").await
+}
+
+async fn accessible_get_with_proxy(
+    client: &reqwest::Client,
+    url: &str,
+    proxy: &str,
+) -> AppResult<reqwest::Response> {
+    // GET validates the actual resource; many release servers do not implement HEAD reliably.
+    if url.starts_with("https://sina.dev/") {
+        return Ok(client
+            .get(url)
+            .header("User-Agent", "miao")
+            .timeout(Duration::from_secs(120))
+            .send()
+            .await?
+            .error_for_status()?);
+    }
+    match tokio::time::timeout(
+        Duration::from_secs(8),
+        client
+            .get(url)
+            .header("User-Agent", "miao")
+            .timeout(Duration::from_secs(120))
+            .send(),
+    )
+    .await
+    {
+        Ok(Ok(response)) if response.status().is_success() => Ok(response),
+        _ => Ok(client
+            .get(format!("{proxy}{url}"))
+            .header("User-Agent", "miao")
+            .timeout(Duration::from_secs(120))
+            .send()
+            .await?
+            .error_for_status()?),
+    }
+}
 
 /// 解析 `sha256sum` 输出首行：`<64 hex>[  *]<filename>`
 fn parse_sha256sum_line(line: &str) -> AppResult<String> {
@@ -43,17 +227,7 @@ fn parse_sha256sum_line(line: &str) -> AppResult<String> {
 }
 
 async fn fetch_checksum_hex(client: &reqwest::Client, url: &str) -> AppResult<String> {
-    let text = client
-        .get(url)
-        .timeout(Duration::from_secs(30))
-        .header("User-Agent", "miao")
-        .send()
-        .await?
-        .error_for_status()
-        .map_err(|e| AppError::context("Failed to download checksum file", e))?
-        .text()
-        .await
-        .map_err(|e| AppError::context("Failed to read checksum body", e))?;
+    let text = accessible_get(client, url).await?.text().await?;
 
     let first = text.lines().next().unwrap_or("").trim();
     parse_sha256sum_line(first)
@@ -73,7 +247,12 @@ async fn fetch_checksum_hex_retried(client: &reqwest::Client, url: &str) -> AppR
                 "retrying checksum download"
             );
         }
-        match fetch_checksum_hex(client, url).await {
+        let attempt_url = if attempt > 0 {
+            format!("https://sina.dev/{url}")
+        } else {
+            url.into()
+        };
+        match fetch_checksum_hex(client, &attempt_url).await {
             Ok(v) => return Ok(v),
             Err(e) => last_err = Some(e),
         }
@@ -88,15 +267,16 @@ async fn download_binary_streaming_once(
     expected_size: u64,
     expected_hex: &str,
     temp_path: &Path,
+    state: &Arc<AppState>,
 ) -> AppResult<()> {
-    let response = client
-        .get(url)
-        .timeout(Duration::from_secs(120))
-        .send()
-        .await
-        .map_err(|e| AppError::context("Download request failed", e))?
-        .error_for_status()
-        .map_err(|e| AppError::context("Download HTTP error", e))?;
+    let response = accessible_get(client, url).await?;
+    let source =
+        if response.url().host_str() == Some("sina.dev") || url.starts_with("https://sina.dev/") {
+            "sina.dev"
+        } else {
+            "GitHub"
+        };
+    stage(state, &format!("Downloading binary via {source}"))?;
 
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
@@ -141,10 +321,18 @@ async fn download_binary_streaming_once(
                     "Download progress"
                 );
                 last_logged_percent = percent;
+                update_status(state, |s| {
+                    s.downloaded = downloaded;
+                    s.total = expected_size;
+                })?;
             }
         }
     }
 
+    update_status(state, |s| {
+        s.downloaded = downloaded;
+        s.total = expected_size;
+    })?;
     file.shutdown()
         .await
         .map_err(|e| AppError::context("Failed to finalize temp file", e))?;
@@ -180,6 +368,7 @@ async fn download_binary_streaming_retried(
     expected_size: u64,
     expected_hex: &str,
     temp_path: &Path,
+    state: &Arc<AppState>,
 ) -> AppResult<()> {
     let mut last_err: Option<AppError> = None;
     for attempt in 0..DOWNLOAD_MAX_ATTEMPTS {
@@ -195,43 +384,53 @@ async fn download_binary_streaming_retried(
                 "retrying binary download"
             );
         }
-        match download_binary_streaming_once(client, url, expected_size, expected_hex, temp_path)
-            .await
+        let attempt_url = if attempt > 0 {
+            format!("https://sina.dev/{url}")
+        } else {
+            url.into()
+        };
+        if attempt > 0 {
+            stage(state, "Retrying binary download via sina.dev")?;
+        }
+        match download_binary_streaming_once(
+            client,
+            &attempt_url,
+            expected_size,
+            expected_hex,
+            temp_path,
+            state,
+        )
+        .await
         {
             Ok(()) => return Ok(()),
             Err(e) => last_err = Some(e),
         }
     }
+    let _ = tokio::fs::remove_file(temp_path).await;
     Err(last_err.expect("binary download retry loop"))
 }
 
-async fn fetch_latest_release_uncached(client: &reqwest::Client) -> AppResult<GitHubRelease> {
-    let release = client
-        .get(RELEASE_API_URL)
-        .timeout(Duration::from_secs(60))
-        .header("User-Agent", "miao")
-        .send()
-        .await?
-        .error_for_status()
-        .map_err(|e| AppError::context("GitHub API returned error", e))?
-        .json::<GitHubRelease>()
-        .await?;
+async fn fetch_release_json<T: serde::de::DeserializeOwned>(
+    client: &reqwest::Client,
+    url: &str,
+) -> AppResult<T> {
+    let first =
+        async { Ok::<T, AppError>(accessible_get(client, url).await?.json::<T>().await?) }.await;
+    match first {
+        Ok(value) => Ok(value),
+        Err(_) => Ok(accessible_get(client, &format!("https://sina.dev/{url}"))
+            .await?
+            .json::<T>()
+            .await?),
+    }
+}
 
-    Ok(release)
+async fn fetch_latest_release_uncached(client: &reqwest::Client) -> AppResult<GitHubRelease> {
+    fetch_release_json(client, RELEASE_API_URL).await
 }
 
 async fn fetch_latest_commit_short(client: &reqwest::Client) -> AppResult<String> {
-    let commit = client
-        .get(RELEASE_COMMIT_API_URL)
-        .timeout(Duration::from_secs(30))
-        .header("User-Agent", "miao")
-        .send()
-        .await?
-        .error_for_status()
-        .map_err(|e| AppError::context("GitHub commit API returned error", e))?
-        .json::<GitHubCommit>()
-        .await?;
-
+    let commit: GitHubCommit = fetch_release_json(client, RELEASE_COMMIT_API_URL).await?;
     Ok(normalize_commit_id(&commit.sha))
 }
 
@@ -399,11 +598,16 @@ async fn verify_temp_binary_executable(temp_path: &Path, tag_name: &str) -> AppR
     std::fs::set_permissions(temp_path, std::fs::Permissions::from_mode(0o755))
         .map_err(|e| AppError::context("Failed to chmod temp binary", e))?;
 
-    let output = tokio::process::Command::new(temp_path)
-        .arg("--version")
-        .output()
-        .await
-        .map_err(|e| AppError::context("Failed to run new binary --version", e))?;
+    let output = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::process::Command::new(temp_path)
+            .arg("--version")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| AppError::message("New binary --version timed out"))?
+    .map_err(|e| AppError::context("Failed to run new binary --version", e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -436,22 +640,6 @@ fn stdout_version_matches_release(stdout: &str, tag_name: &str) -> bool {
 }
 
 pub async fn upgrade_binary(state: &Arc<AppState>) -> AppResult<String> {
-    if state
-        .upgrading
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return Err(AppError::message("Upgrade already in progress"));
-    }
-
-    struct UpgradeGuard(Arc<AppState>);
-    impl Drop for UpgradeGuard {
-        fn drop(&mut self) {
-            self.0.upgrading.store(false, Ordering::SeqCst);
-        }
-    }
-    let _guard = UpgradeGuard(state.clone());
-
     invalidate_release_cache(state).await;
     let release = fetch_latest_release(&state.http_client, state).await?;
     let current = current_version();
@@ -467,6 +655,14 @@ pub async fn upgrade_binary(state: &Arc<AppState>) -> AppResult<String> {
     let binary_url = fixed_download_url(asset_name);
     let checksum_url = format!("{}.sha256", binary_url);
 
+    update_status(state, |s| {
+        s.target = latest.clone();
+        s.total = binary_asset.size;
+    })?;
+    stage(
+        state,
+        "Checking download access and checksum (GitHub, fallback sina.dev)",
+    )?;
     let expected_hex = fetch_checksum_hex_retried(&state.http_client, &checksum_url).await?;
 
     let temp_path = get_temp_binary_path();
@@ -481,15 +677,18 @@ pub async fn upgrade_binary(state: &Arc<AppState>) -> AppResult<String> {
         "starting upgrade download"
     );
 
+    stage(state, "Downloading binary (GitHub, fallback sina.dev)")?;
     download_binary_streaming_retried(
         &state.http_client,
         &binary_url,
         binary_asset.size,
         &expected_hex,
         temp_path,
+        state,
     )
     .await?;
 
+    stage(state, "Verifying SHA256 and executable version")?;
     if let Err(e) = verify_temp_binary_executable(temp_path, &latest).await {
         let _ = tokio::fs::remove_file(temp_path).await;
         return Err(e);
@@ -497,9 +696,7 @@ pub async fn upgrade_binary(state: &Arc<AppState>) -> AppResult<String> {
 
     let current_exe = std::env::current_exe()?;
 
-    info!("Stopping sing-box before upgrade...");
-    stop_sing_internal(state).await;
-
+    stage(state, "Backing up and installing binary")?;
     let backup_path = format!("{}.bak", current_exe.display());
     fs::rename(&current_exe, &backup_path)
         .map_err(|e| AppError::context("Failed to backup current binary", e))?;
@@ -526,6 +723,13 @@ pub async fn upgrade_binary(state: &Arc<AppState>) -> AppResult<String> {
         "upgrade binary installed; restarting process"
     );
 
+    stage(state, "Stopping sing-box")?;
+    stop_sing_internal(state).await;
+    if let Err(e) = stage(state, "Restarting") {
+        let _ = fs::rename(&backup_path, &current_exe);
+        let _ = start_sing_internal(state).await;
+        return Err(e);
+    }
     let new_version = latest;
     let sing_box_home = get_sing_box_home();
     tokio::spawn(async move {
@@ -588,10 +792,7 @@ mod tests {
 
     #[test]
     fn normalize_commit_id_uses_short_prefix() {
-        assert_eq!(
-            normalize_commit_id("ABCDEF1234567890"),
-            "abcdef1"
-        );
+        assert_eq!(normalize_commit_id("ABCDEF1234567890"), "abcdef1");
         assert_eq!(normalize_commit_id("commit:abc1234"), "abc1234");
     }
 
@@ -633,7 +834,10 @@ mod tests {
             "miao-rust abc1234\n",
             "abc1234"
         ));
-        assert!(!stdout_version_matches_release("other abc1234\n", "abc1234"));
+        assert!(!stdout_version_matches_release(
+            "other abc1234\n",
+            "abc1234"
+        ));
     }
 
     #[test]
@@ -657,5 +861,119 @@ mod tests {
         } else {
             assert_eq!(current_arch_asset_name(), None);
         }
+    }
+    #[tokio::test]
+    async fn inaccessible_resource_uses_proxy_and_preserves_full_url() {
+        use axum::{http::StatusCode, response::IntoResponse, routing::get, Router};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new()
+            .route("/binary", get(|| async { StatusCode::FORBIDDEN }))
+            .fallback(|uri: axum::http::Uri| async move {
+                if uri.path().starts_with("/proxy/http://127.0.0.1:") {
+                    (StatusCode::OK, "proxied binary").into_response()
+                } else {
+                    StatusCode::NOT_FOUND.into_response()
+                }
+            });
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let response = super::accessible_get_with_proxy(
+            &reqwest::Client::new(),
+            &format!("{base}/binary"),
+            &format!("{base}/proxy/"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.text().await.unwrap(), "proxied binary");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn refresh_recovers_persisted_progress_and_detects_interruption() {
+        use std::sync::atomic::Ordering;
+        let state = crate::test_support::app_state(crate::models::Config::default());
+        state.initializing.store(false, Ordering::SeqCst);
+        state.upgrading.store(true, Ordering::SeqCst);
+        super::update_status(&state, |s| {
+            s.id = "job-1".into();
+            s.active = true;
+            s.stage = "Downloading".into();
+            s.downloaded = 1024;
+            s.total = 2048;
+        })
+        .unwrap();
+        let status = super::upgrade_status(&state).await.unwrap();
+        assert!(status.active);
+        assert_eq!(status.downloaded, 1024);
+        assert!(super::start_upgrade(state.clone()).is_err());
+        // A fresh process loads the same file, but has no live download task.
+        let restarted = std::sync::Arc::new(
+            crate::state::AppState::with_config_path(
+                crate::models::Config::default(),
+                state.config_path.clone(),
+            )
+            .unwrap(),
+        );
+        restarted.initializing.store(false, Ordering::SeqCst);
+        let status = super::upgrade_status(&restarted).await.unwrap();
+        assert!(!status.active);
+        assert!(status.stage.contains("interrupted"));
+        std::fs::remove_file(super::status_path(&state)).unwrap();
+    }
+
+    #[tokio::test]
+    async fn download_validates_bytes_and_rejects_corruption() {
+        use axum::{routing::get, Router};
+        use sha2::{Digest, Sha256};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/binary", listener.local_addr().unwrap());
+        let app = Router::new().route("/binary", get(|| async { "binary data" }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let state = crate::test_support::app_state(crate::models::Config::default());
+        let path = state.config_path.with_extension("binary");
+        let checksum = hex::encode(Sha256::digest(b"binary data"));
+        super::download_binary_streaming_once(
+            &reqwest::Client::new(),
+            &url,
+            11,
+            &checksum,
+            &path,
+            &state,
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"binary data");
+        let status: super::UpgradeStatus =
+            serde_json::from_slice(&std::fs::read(super::status_path(&state)).unwrap()).unwrap();
+        assert_eq!(status.downloaded, 11);
+        let result = super::download_binary_streaming_once(
+            &reqwest::Client::new(),
+            &url,
+            11,
+            &"0".repeat(64),
+            &path,
+            &state,
+        )
+        .await;
+        assert!(result.unwrap_err().to_string().contains("SHA256 mismatch"));
+        assert!(!path.exists());
+        std::fs::remove_file(super::status_path(&state)).unwrap();
+        server.abort();
+    }
+    #[tokio::test]
+    async fn matching_version_without_healthy_core_is_not_success() {
+        use std::sync::atomic::Ordering;
+        let state = crate::test_support::app_state(crate::models::Config::default());
+        state.initializing.store(false, Ordering::SeqCst);
+        super::update_status(&state, |s| {
+            s.active = true;
+            s.stage = "Restarting".into();
+            s.target = crate::build_info::current_version();
+        })
+        .unwrap();
+        let status = super::upgrade_status(&state).await.unwrap();
+        assert!(!status.active);
+        assert!(status.stage.contains("recovery failed"));
+        std::fs::remove_file(super::status_path(&state)).unwrap();
     }
 }
