@@ -411,6 +411,9 @@ async fn main() -> AppResult<()> {
 
         // 用本地缓存回填订阅状态。必须在下面两个提前返回之前做——服务处于停止
         // 状态时恰恰最需要它，否则面板上订阅节点数会是 0。
+        if let Err(e) = services::sub_nodes::migrate_local_subscriptions().await {
+            error!(error = %e, "Failed to migrate local subscription parsing, keeping cache");
+        }
         hydrate_sub_status(&state_for_init, &config.subs).await;
 
         if config.subs.is_empty() && config.nodes.is_empty() {

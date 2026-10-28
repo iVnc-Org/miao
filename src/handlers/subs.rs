@@ -14,7 +14,7 @@ use crate::services::{
         hydrate_sub_status, is_local_subscription, load_sub_nodes, save_sub_nodes, StoredNode,
         LOCAL_SUBSCRIPTION_PREFIX,
     },
-    subscription::parse_subscription_text_with_options,
+    subscription::parse_subscription_text,
 };
 use crate::state::AppState;
 use crate::validation::Validator;
@@ -36,6 +36,7 @@ pub async fn get_subs(State(state): State<Arc<AppState>>) -> Json<ApiResponse<Ve
                 local: is_local_subscription(url),
                 state: SubState::Pending,
                 node_count: 0,
+                details: vec![],
                 error: None,
             })
         })
@@ -115,13 +116,9 @@ pub async fn add_sub_content(
     let source = format!(
         "{}{}",
         LOCAL_SUBSCRIPTION_PREFIX,
-        hex::encode(Sha256::digest(if req.import_http_proxies {
-            format!("http-proxies\0{content}").into_bytes()
-        } else {
-            content.as_bytes().to_vec()
-        }))
+        hex::encode(Sha256::digest(content.as_bytes()))
     );
-    let parsed = parse_subscription_text_with_options(&source, &content, req.import_http_proxies)
+    let parsed = parse_subscription_text(&source, &content)
         .map_err(|error| status_error(StatusCode::BAD_REQUEST, error))?;
     if parsed.node_names.is_empty() {
         return Err(status_error(
@@ -131,6 +128,7 @@ pub async fn add_sub_content(
     }
 
     let parse_warning = parsed.diagnostic_summary();
+    let details = parsed.details();
     let nodes: Vec<StoredNode> = parsed
         .node_names
         .into_iter()
@@ -149,13 +147,22 @@ pub async fn add_sub_content(
     }
 
     let previous_store = load_sub_nodes().await;
+    if old_config.subs.iter().any(|url| {
+        previous_store.subs.get(url)
+            .is_some_and(|entry| entry.content.as_deref() == Some(content.as_str()))
+    }) {
+        return Err(status_error(
+            StatusCode::BAD_REQUEST,
+            "Subscription content already exists",
+        ));
+    }
     let mut staged_store = previous_store.clone();
     staged_store.record_local_success(&source, name.clone(), content, nodes, None);
     let staged_entry = staged_store
         .subs
         .get_mut(&source)
         .expect("staged local subscription");
-    staged_entry.import_http_proxies = req.import_http_proxies;
+    staged_entry.parse_details = details.clone();
     staged_entry.parse_warning = parse_warning.clone();
     save_sub_nodes(&staged_store)
         .await
@@ -188,6 +195,7 @@ pub async fn add_sub_content(
             state: SubState::Ok,
             node_count,
             error: parse_warning,
+            details,
         },
     );
     Ok(success_no_data("Local subscription added"))
@@ -263,6 +271,11 @@ pub async fn replace_sub(
         .get_mut(&req.new_url)
         .expect("staged replacement")
         .parse_warning = fetched.parse_warning.clone();
+    staged_store
+        .subs
+        .get_mut(&req.new_url)
+        .expect("staged replacement")
+        .parse_details = fetched.details.clone();
     save_sub_nodes(&staged_store)
         .await
         .map_err(|error| status_error(StatusCode::INTERNAL_SERVER_ERROR, error))?;
@@ -297,6 +310,7 @@ pub async fn replace_sub(
                 .get(&new_config.subs[index])
                 .map_or(0, |entry| entry.nodes.len()),
             error: fetched.parse_warning,
+            details: fetched.details,
         },
     );
     Ok(success_no_data("Subscription replaced"))

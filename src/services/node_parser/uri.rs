@@ -55,6 +55,78 @@ fn uri_tls(url: &Url) -> AppResult<JsonValue> {
     Ok(tls)
 }
 
+fn has_proxy_authority(payload: &str) -> bool {
+    let authority = payload.split(['/', '?', '#']).next().unwrap_or_default();
+    let endpoint = authority.rsplit('@').next().unwrap_or_default();
+    let explicit_port = if endpoint.starts_with('[') {
+        endpoint
+            .split_once(']')
+            .is_some_and(|(_, tail)| tail.starts_with(':'))
+    } else {
+        endpoint.contains(':')
+    };
+    authority.contains('@') || explicit_port
+}
+
+/// Decode before URL parsing: URL hosts are case-insensitive, Base64 is not.
+pub(super) fn normalize_http_uri(uri: &str) -> AppResult<Option<String>> {
+    let Some((scheme, payload)) = uri.split_once("://") else {
+        return Ok(None);
+    };
+    if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
+        return Ok(None);
+    }
+    let scheme = scheme.to_ascii_lowercase();
+    let (encoded, outer_name) = payload
+        .split_once('#')
+        .map_or((payload, None), |(body, name)| (body, Some(name)));
+    // Decode only structurally recognizable proxy authorities; never recursively fetch links.
+    for engine in [
+        &general_purpose::STANDARD,
+        &general_purpose::STANDARD_NO_PAD,
+        &general_purpose::URL_SAFE,
+        &general_purpose::URL_SAFE_NO_PAD,
+    ] {
+        if let Ok(bytes) = engine.decode(encoded) {
+            if let Ok(decoded) = String::from_utf8(bytes) {
+                if !has_proxy_authority(&decoded) {
+                    continue;
+                }
+                if decoded.chars().any(char::is_control) {
+                    return Err(AppError::message("Invalid encoded HTTP proxy text"));
+                }
+                let mut normalized = format!("{scheme}://{decoded}");
+                if let Some(name) = outer_name {
+                    if decoded.contains('#') {
+                        return Err(AppError::message("Conflicting encoded HTTP proxy names"));
+                    }
+                    normalized.push('#');
+                    normalized.push_str(name);
+                }
+                let url = Url::parse(&normalized)
+                    .map_err(|_| AppError::message("Invalid encoded HTTP proxy URI"))?;
+                if url.host_str().is_none() {
+                    return Err(AppError::message("Invalid encoded HTTP proxy authority"));
+                }
+                return Ok(Some(normalized));
+            }
+        }
+    }
+    // Read the raw authority: Url normalizes explicit :443/:80 away.
+    if has_proxy_authority(payload) {
+        return Ok(Some(uri.to_string()));
+    }
+    // Long Base64-looking payloads are malformed encoded proxy candidates, not hostnames.
+    if encoded.len() >= 64
+        && encoded
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"+/=_-".contains(&b))
+    {
+        return Err(AppError::message("Invalid encoded HTTP proxy URI"));
+    }
+    Ok(None) // Ordinary or ambiguous web links are not proxy nodes.
+}
+
 pub(super) fn parse_extended_uri(uri: &str) -> AppResult<(String, JsonValue)> {
     let raw = uri.as_bytes();
     for (index, byte) in raw.iter().enumerate() {

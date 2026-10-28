@@ -1,8 +1,6 @@
 use crate::error::{AppError, AppResult};
-#[cfg(test)]
-use crate::services::node_parser::parse_uri_subscription;
 use crate::services::node_parser::{
-    is_uri_subscription, parse_clash_proxies, parse_uri_subscription_with_options,
+    is_uri_subscription, parse_clash_proxies, parse_uri_subscription,
 };
 use std::path::Path;
 
@@ -18,27 +16,21 @@ pub struct FetchResult {
     pub unsupported_count: usize,
     pub ignored_count: usize,
     pub warnings: Vec<String>,
+    pub notes: Vec<String>,
 }
 
 impl FetchResult {
     pub fn diagnostic_summary(&self) -> Option<String> {
-        if self.parse_errors.is_empty()
-            && self.unsupported_count == 0
-            && self.ignored_count == 0
-            && self.warnings.is_empty()
-        {
+        if self.parse_errors.is_empty() && self.unsupported_count == 0 && self.warnings.is_empty() {
             return None;
         }
         let mut message = format!(
-            "{} valid nodes; {} invalid entries; {} unsupported entries; {} HTTP(S) links skipped",
+            "{} nodes parsed; {} invalid entries; {} unsupported entries; {} HTTP(S) links skipped",
             self.node_names.len(),
             self.parse_errors.len(),
             self.unsupported_count,
             self.ignored_count
         );
-        if self.ignored_count > 0 {
-            message.push_str(" (HTTP proxy import requires explicit opt-in)");
-        }
         for detail in self.parse_errors.iter().chain(self.warnings.iter()).take(4) {
             message.push_str("; ");
             message.push_str(detail);
@@ -46,10 +38,23 @@ impl FetchResult {
         Some(message)
     }
 
+    pub fn details(&self) -> Vec<String> {
+        let mut details = self.notes.clone();
+        if self.ignored_count > 0 {
+            details.push(format!(
+                "{} ordinary or ambiguous HTTP(S) web links skipped",
+                self.ignored_count
+            ));
+        }
+        details
+    }
+
     pub fn no_nodes_message(&self) -> String {
         self.diagnostic_summary()
             .map(|s| format!("Subscription contains no valid nodes: {s}"))
-            .unwrap_or_else(|| "Subscription content contains no supported nodes".into())
+            .unwrap_or_else(|| if self.ignored_count > 0 {
+                format!("No proxy nodes recognized; {} ordinary or ambiguous HTTP(S) web links skipped", self.ignored_count)
+            } else { "Subscription content contains no supported nodes".into() })
     }
 
     pub fn has_skipped_nodes(&self) -> bool {
@@ -122,14 +127,6 @@ async fn read_subscription_text(link: &str, client: &reqwest::Client) -> AppResu
 }
 
 pub(crate) fn parse_subscription_text(link: &str, text: &str) -> AppResult<FetchResult> {
-    parse_subscription_text_with_options(link, text, false)
-}
-
-pub(crate) fn parse_subscription_text_with_options(
-    link: &str,
-    text: &str,
-    import_http_proxies: bool,
-) -> AppResult<FetchResult> {
     if text.trim().is_empty() {
         return Err(AppError::message(format!(
             "Subscription response is empty from {}",
@@ -138,7 +135,7 @@ pub(crate) fn parse_subscription_text_with_options(
     }
 
     let parse_result = if is_uri_subscription(text) {
-        parse_uri_subscription_with_options(text, import_http_proxies)?
+        parse_uri_subscription(text)?
     } else {
         parse_clash_proxies(text).map_err(|_| {
             AppError::message(format!(
@@ -163,6 +160,7 @@ pub(crate) fn parse_subscription_text_with_options(
         unsupported_count: parse_result.unsupported_count,
         ignored_count: parse_result.ignored_count,
         warnings: parse_result.warnings,
+        notes: parse_result.notes,
     })
 }
 
@@ -210,6 +208,23 @@ mod tests {
     }
 
     #[test]
+    fn compatibility_notes_do_not_turn_success_into_warning() {
+        let parsed = parse_subscription_text(
+            "content://test",
+            "hy2://secret@example.com?fastopen=1#HY\nhttps://example.com/news",
+        )
+        .unwrap();
+        assert!(parsed.diagnostic_summary().is_none());
+        assert_eq!(parsed.details().len(), 2);
+        assert!(parsed.details().iter().any(|s| s.contains("fastopen")));
+        let invalid =
+            parse_subscription_text("content://test", "hy2://secret@example.com?fastopen=maybe")
+                .unwrap();
+        assert!(invalid.diagnostic_summary().is_some());
+        assert_eq!(invalid.parse_errors.len(), 1);
+    }
+
+    #[test]
     fn clash_yaml_with_uri_values_is_not_treated_as_uri_list() {
         let yaml = "proxies:\n  - name: proxy\n    type: ss\n    server: example.com\n    port: 8388\n    cipher: aes-128-gcm\n    password: 'https://password'\n";
         let parsed = parse_subscription_text("content://test", yaml).unwrap();
@@ -223,10 +238,26 @@ mod tests {
             std::fs::read_to_string(std::env::var("MIAO_TEST_SUBSCRIPTION").unwrap()).unwrap();
         let parsed = parse_subscription_text("content://acceptance", &input).unwrap();
         assert_eq!(parsed.total_count, 37);
-        assert_eq!(parsed.node_names.len(), 13);
-        assert_eq!(parsed.ignored_count, 24);
+        assert_eq!(parsed.node_names.len(), 37);
+        assert_eq!(parsed.ignored_count, 0);
         assert_eq!(parsed.unsupported_count, 0);
         assert!(parsed.parse_errors.is_empty(), "{:?}", parsed.parse_errors);
+        assert!(parsed.diagnostic_summary().is_none());
+        assert_eq!(parsed.notes.len(), 4);
+        assert_eq!(
+            parsed
+                .outbounds
+                .iter()
+                .filter(|n| n["type"] == "http")
+                .count(),
+            24
+        );
+        assert!(parsed.node_names.iter().any(|n| n == "美国西雅图"));
+        for outbound in parsed.outbounds.iter().filter(|n| n["type"] == "http") {
+            assert!(outbound["username"].as_str().is_some_and(|s| !s.is_empty()));
+            assert!(outbound["password"].as_str().is_some_and(|s| !s.is_empty()));
+            assert!(outbound["server"].as_str().is_some_and(|s| s.contains('.')));
+        }
         let config = serde_json::json!({"outbounds":parsed.outbounds});
         let mut child = std::process::Command::new(std::env::var("MIAO_TEST_SING_BOX").unwrap())
             .args(["check", "-c", "/dev/stdin"])
@@ -283,7 +314,9 @@ mod tests {
         let app = Router::new().route(
             "/sub",
             get(|headers: HeaderMap| async move {
-                if headers.get(header::USER_AGENT).and_then(|value| value.to_str().ok())
+                if headers
+                    .get(header::USER_AGENT)
+                    .and_then(|value| value.to_str().ok())
                     != Some(SUBSCRIPTION_USER_AGENT)
                 {
                     return (StatusCode::FORBIDDEN, "missing user agent");

@@ -29,7 +29,7 @@ use crate::services::{
         hydrate_sub_status, is_local_subscription, load_sub_nodes, save_sub_nodes, StoredNode,
         SubNodeStore,
     },
-    subscription::{fetch_sub, parse_subscription_text_with_options},
+    subscription::{fetch_sub, parse_subscription_text},
     write_file_atomic,
 };
 use crate::state::AppState;
@@ -55,6 +55,7 @@ fn get_config_cache_meta_path() -> PathBuf {
 fn config_cache_fingerprint(config: &Config) -> AppResult<String> {
     let value = serde_json::json!({
         "schema_version": CONFIG_CACHE_SCHEMA_VERSION,
+        "subscription_parser_version": crate::services::sub_nodes::SUBSCRIPTION_PARSER_VERSION,
         "socks_listen": &config.socks_listen,
         "socks_port": config.socks_port,
         "mode": &config.mode,
@@ -675,7 +676,6 @@ async fn fetch_subscriptions(
             let sub = sub.clone();
             let client = state.http_client.clone();
             let local = is_local_subscription(&sub);
-            let import_http_proxies = store.subs.get(&sub).is_some_and(|entry| entry.import_http_proxies);
             let local_content = store
                 .subs
                 .get(&sub)
@@ -686,7 +686,7 @@ async fn fetch_subscriptions(
                     local_content
                         .as_deref()
                         .ok_or_else(|| AppError::message("Local subscription content is missing"))
-                        .and_then(|content| parse_subscription_text_with_options(&sub, content, import_http_proxies))
+                        .and_then(|content| parse_subscription_text(&sub, content))
                 } else {
                     info!(url = %sub, "Fetching subscription");
                     match tokio::time::timeout(
@@ -747,6 +747,7 @@ pub(crate) struct FetchedSubscriptionNodes {
     pub nodes: Vec<StoredNode>,
     pub fetched_at: String,
     pub parse_warning: Option<String>,
+    pub details: Vec<String>,
 }
 
 pub(crate) async fn fetch_subscription_nodes(
@@ -764,6 +765,7 @@ pub(crate) async fn fetch_subscription_nodes(
     }
 
     let parse_warning = fetch_result.diagnostic_summary();
+    let details = fetch_result.details();
     let nodes = fetch_result
         .node_names
         .into_iter()
@@ -775,6 +777,7 @@ pub(crate) async fn fetch_subscription_nodes(
         nodes,
         fetched_at: now_rfc3339(),
         parse_warning,
+        details,
     })
 }
 
@@ -912,6 +915,7 @@ pub async fn gen_config(
                 }
                 fetch_errors.insert(url.clone(), fetch_result.diagnostic_summary());
 
+                let details = fetch_result.details();
                 let nodes = fetch_result
                     .node_names
                     .into_iter()
@@ -919,6 +923,11 @@ pub async fn gen_config(
                     .map(|(name, outbound)| StoredNode { name, outbound })
                     .collect();
                 store.record_success(&url, nodes, Some(now_rfc3339()));
+                store
+                    .subs
+                    .get_mut(&url)
+                    .expect("successful subscription")
+                    .parse_details = details;
                 store
                     .subs
                     .get_mut(&url)
@@ -1689,7 +1698,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_http_import_option_is_used_on_refresh() {
+    async fn local_http_is_auto_detected_on_refresh() {
         let source = format!("{}http-proxy", LOCAL_SUBSCRIPTION_PREFIX);
         let mut store = SubNodeStore::default();
         store.record_local_success(
@@ -1699,7 +1708,6 @@ mod tests {
             vec![],
             None,
         );
-        store.subs.get_mut(&source).unwrap().import_http_proxies = true;
         let state = app_state(Config::default());
         let mut results = fetch_subscriptions(&[source], &store, &state).await;
         let parsed = results.pop().unwrap().1.unwrap();

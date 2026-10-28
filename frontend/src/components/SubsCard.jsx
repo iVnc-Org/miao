@@ -55,6 +55,14 @@ function subscriptionStatus(sub, t) {
   }
 }
 
+function formatDetail(detail, t) {
+  const fastopen = detail.match(/^URI line #(\d+): fastopen is not applicable to QUIC and was ignored$/)
+  if (fastopen) return t('subs.detailFastopen', { line: fastopen[1] })
+  const skipped = detail.match(/^(\d+) ordinary or ambiguous HTTP\(S\) web links skipped$/)
+  if (skipped) return t('subs.detailWebLinks', { count: skipped[1] })
+  return detail
+}
+
 const SubRow = memo(function SubRow({ sub, disabled, onDelete, onStartReplace, t }) {
   const status = subscriptionStatus(sub, t)
   const StatusIcon = status.icon
@@ -68,6 +76,10 @@ const SubRow = memo(function SubRow({ sub, disabled, onDelete, onStartReplace, t
       <div className="list-row-content">
         <div className="list-row-title">{title}</div>
         <div className={classNames('list-row-meta', status.tone)} title={status.text}>{status.text}</div>
+        {sub.details?.length > 0 && <details className="subscription-details">
+          <summary>{t('subs.details')}</summary>
+          <ul>{sub.details.map((detail, index) => <li key={index}>{formatDetail(detail, t)}</li>)}</ul>
+        </details>}
       </div>
       <div className="list-row-actions">
         {sub.state === 'expired' && !sub.local && (

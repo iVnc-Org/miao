@@ -140,12 +140,13 @@ async fn local_proxy_round_trips() {
     let uris = [
         format!("socks5://user:p%40ss@127.0.0.1:{socks}#socks"),
         format!("https://user:p%40ss@127.0.0.1:{https}?sni=localhost&insecure=1#https"),
+        format!("https://{}", general_purpose::STANDARD.encode(format!("user:p%40ss@127.0.0.1:{https}/?sni=localhost&insecure=1#编码代理"))),
         format!("hy2://p%40ss@127.0.0.1:{hy2}?sni=localhost&insecure=1#hy2"),
         format!("tuic://{uuid}:p%40ss@127.0.0.1:{tuic}?sni=localhost&allow_insecure=1&congestion_control=bbr#tuic"),
         format!("vless://{uuid}@127.0.0.1:{vless}?type=tcp&security=reality&pbk={public_key}&sni=localhost&fp=chrome#vless"),
     ];
     for uri in uris {
-        let parsed = parse_uri_subscription_with_options(&uri, true).unwrap();
+        let parsed = parse_uri_subscription(&uri).unwrap();
         assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
         let (name, outbound) = parsed.nodes.into_iter().next().unwrap();
         let port = free_port();

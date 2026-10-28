@@ -1944,3 +1944,7 @@ html[data-embed-mode='true'] .modal-card {
     color: var(--text-muted);
     font-size: 14px;
 }
+
+.subscription-details { margin-top: 6px; font-size: 12px; overflow-wrap: anywhere; }
+.subscription-details summary { cursor: pointer; }
+.subscription-details ul { padding-left: 20px; margin: 6px 0; }

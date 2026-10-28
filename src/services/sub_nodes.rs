@@ -12,6 +12,7 @@ use crate::state::AppState;
 
 const SUB_NODES_FILE: &str = "sub_nodes.json";
 const SUB_NODES_SCHEMA_VERSION: u32 = 1;
+pub const SUBSCRIPTION_PARSER_VERSION: u32 = 2;
 pub const LOCAL_SUBSCRIPTION_PREFIX: &str = "content://";
 
 pub fn is_local_subscription(url: &str) -> bool {
@@ -26,8 +27,8 @@ pub fn is_local_subscription(url: &str) -> bool {
 /// 在本地重新解析，不需要访问远端链接。`build_sing_box_config` 正好消费
 /// `(Vec<String>, Vec<Value>)`，重新加载时零转换。
 ///
-/// URL 订阅的已存节点仍要等下次成功抓取才会应用解析器改进；本地内容订阅可由
-/// 用户点击刷新直接重新解析。
+/// URL 订阅的已存节点等下次成功抓取才应用解析器改进；本地内容订阅在
+/// 解析器升级后的启动阶段自动重新解析，也可由用户点击刷新重新解析。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SubNodeStore {
     #[serde(default)]
@@ -54,7 +55,9 @@ pub struct StoredSub {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
     #[serde(default)]
-    pub import_http_proxies: bool,
+    pub parser_version: u32,
+    #[serde(default)]
+    pub parse_details: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parse_warning: Option<String>,
     /// 上次成功抓取的时间，仅用于展示。
@@ -115,23 +118,18 @@ impl SubNodeStore {
         nodes: Vec<StoredNode>,
         fetched_at: Option<String>,
     ) {
-        let (name, content, import_http_proxies) = self
+        let (name, content) = self
             .subs
             .get(url)
-            .map(|entry| {
-                (
-                    entry.name.clone(),
-                    entry.content.clone(),
-                    entry.import_http_proxies,
-                )
-            })
+            .map(|entry| (entry.name.clone(), entry.content.clone()))
             .unwrap_or_default();
         self.subs.insert(
             url.to_string(),
             StoredSub {
                 name,
                 content,
-                import_http_proxies,
+                parser_version: SUBSCRIPTION_PARSER_VERSION,
+                parse_details: vec![],
                 parse_warning: None,
                 fetched_at,
                 stale: false,
@@ -154,7 +152,8 @@ impl SubNodeStore {
             StoredSub {
                 name,
                 content: Some(content),
-                import_http_proxies: false,
+                parser_version: SUBSCRIPTION_PARSER_VERSION,
+                parse_details: vec![],
                 parse_warning: None,
                 fetched_at,
                 stale: false,
@@ -179,6 +178,7 @@ impl SubNodeStore {
                 local: entry.content.is_some() || is_local_subscription(url),
                 state: SubState::Expired,
                 node_count: entry.nodes.len(),
+                details: entry.parse_details.clone(),
                 error: None,
             },
             Some(entry) => SubStatus {
@@ -187,6 +187,7 @@ impl SubNodeStore {
                 local: entry.content.is_some() || is_local_subscription(url),
                 state: SubState::Cached,
                 node_count: entry.nodes.len(),
+                details: entry.parse_details.clone(),
                 error: entry.parse_warning.clone(),
             },
             None => SubStatus {
@@ -195,6 +196,7 @@ impl SubNodeStore {
                 local: is_local_subscription(url),
                 state: SubState::Pending,
                 node_count: 0,
+                details: vec![],
                 error: None,
             },
         }
@@ -203,6 +205,67 @@ impl SubNodeStore {
 
 pub fn sub_nodes_path() -> PathBuf {
     data_file(SUB_NODES_FILE)
+}
+
+/// Reparse local originals once after a parser upgrade. Never discard a working cache on failure.
+fn migrate_local_store(store: &mut SubNodeStore) -> bool {
+    let mut changed = false;
+    for (source, entry) in &mut store.subs {
+        if !is_local_subscription(source) || entry.parser_version >= SUBSCRIPTION_PARSER_VERSION {
+            continue;
+        }
+        let Some(content) = &entry.content else {
+            continue;
+        };
+        let Ok(parsed) = crate::services::subscription::parse_subscription_text(source, content)
+        else {
+            continue;
+        };
+        if parsed.node_names.is_empty() || parsed.has_skipped_nodes() {
+            continue;
+        }
+        entry.parse_warning = parsed.diagnostic_summary();
+        entry.parse_details = parsed.details();
+        entry.nodes = parsed
+            .node_names
+            .into_iter()
+            .zip(parsed.outbounds)
+            .map(|(name, outbound)| StoredNode { name, outbound })
+            .collect();
+        entry.parser_version = SUBSCRIPTION_PARSER_VERSION;
+        entry.stale = false;
+        entry.last_error = None;
+        changed = true;
+    }
+    changed
+}
+
+pub async fn migrate_local_subscriptions() -> AppResult<()> {
+    migrate_local_subscriptions_from(
+        &sub_nodes_path(),
+        &crate::services::singbox::get_sing_box_home().join("config.json"),
+    )
+    .await
+}
+
+async fn migrate_local_subscriptions_from(cache: &Path, runtime_config: &Path) -> AppResult<()> {
+    let mut store = load_sub_nodes_from(cache).await;
+    if migrate_local_store(&mut store) {
+        // Invalidate before saving the migration marker: a crash must not leave migrated
+        // nodes paired with an old runtime config, including when the service was stopped.
+        match tokio::fs::remove_file(runtime_config).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(AppError::context(
+                    "Failed to invalidate migrated runtime config",
+                    e,
+                ))
+            }
+        }
+        save_sub_nodes_to(cache, &store).await?;
+    }
+    Ok(())
 }
 
 pub async fn load_sub_nodes() -> SubNodeStore {
@@ -344,6 +407,109 @@ mod tests {
     }
 
     #[test]
+    fn parser_migration_repairs_local_nodes_and_preserves_failed_or_remote_entries() {
+        use base64::Engine as _;
+        let source = "content://old-http";
+        let mut store = SubNodeStore::default();
+        let encoded = base64::engine::general_purpose::STANDARD
+            .encode("User:pass@proxy.example.com:443/#香港");
+        store.record_local_success(
+            source,
+            Some("Ghelper".into()),
+            format!("https://{encoded}\nhy2://secret@example.com?fastopen=1#HY"),
+            vec![node("garbled")],
+            None,
+        );
+        let entry = store.subs.get_mut(source).unwrap();
+        entry.parser_version = 0;
+        entry.parse_warning = Some("old warning".into());
+        store.record_local_success(
+            "content://invalid",
+            None,
+            "https://user:secret@host:0".into(),
+            vec![node("working")],
+            None,
+        );
+        store
+            .subs
+            .get_mut("content://invalid")
+            .unwrap()
+            .parser_version = 0;
+        store.record_success("https://remote.example.com", vec![node("remote")], None);
+        store
+            .subs
+            .get_mut("https://remote.example.com")
+            .unwrap()
+            .parser_version = 0;
+        let invalid = store.subs["content://invalid"].clone();
+        let remote = store.subs["https://remote.example.com"].clone();
+        // Legacy import_http_proxies values deserialize harmlessly; the parser no longer consults them.
+        let mut json = serde_json::to_value(&store).unwrap();
+        json["subs"][source]["import_http_proxies"] = serde_json::json!(false);
+        store = serde_json::from_value(json).unwrap();
+        assert!(migrate_local_store(&mut store));
+        let migrated = &store.subs[source];
+        assert_eq!(migrated.name.as_deref(), Some("Ghelper"));
+        assert_eq!(migrated.nodes.len(), 2);
+        assert_eq!(migrated.nodes[0].name, "香港");
+        assert_eq!(migrated.nodes[0].outbound["username"], "User");
+        assert!(migrated.parse_warning.is_none());
+        assert_eq!(migrated.parse_details.len(), 1);
+        assert_eq!(migrated.parser_version, SUBSCRIPTION_PARSER_VERSION);
+        assert_eq!(store.subs["content://invalid"], invalid);
+        assert_eq!(store.subs["https://remote.example.com"], remote);
+        assert!(!migrate_local_store(&mut store));
+        let reloaded: SubNodeStore =
+            serde_json::from_slice(&serde_json::to_vec(&store).unwrap()).unwrap();
+        assert_eq!(reloaded, store);
+        assert!(reloaded.status_for(source).error.is_none());
+        assert_eq!(reloaded.status_for(source).details.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn migration_persists_repaired_nodes_and_invalidates_stopped_runtime_config() {
+        let state = crate::test_support::app_state(crate::models::Config::default());
+        let cache = state.config_path.with_extension("sub_nodes.json");
+        let runtime = state.config_path.with_extension("runtime-config.json");
+        let mut store = SubNodeStore::default();
+        store.record_local_success(
+            "content://legacy",
+            None,
+            "https://user:pass@proxy.example.com:8443#HTTPS".into(),
+            vec![node("wrong")],
+            None,
+        );
+        store
+            .subs
+            .get_mut("content://legacy")
+            .unwrap()
+            .parser_version = 0;
+        save_sub_nodes_to(&cache, &store).await.unwrap();
+        tokio::fs::write(&runtime, "old config").await.unwrap();
+        migrate_local_subscriptions_from(&cache, &runtime)
+            .await
+            .unwrap();
+        assert!(!runtime.exists());
+        let store = load_sub_nodes_from(&cache).await;
+        assert_eq!(store.subs["content://legacy"].nodes[0].name, "HTTPS");
+        assert_eq!(
+            store.subs["content://legacy"].parser_version,
+            SUBSCRIPTION_PARSER_VERSION
+        );
+        // Once migration has completed it must not delete a freshly generated config.
+        tokio::fs::write(&runtime, "new config").await.unwrap();
+        migrate_local_subscriptions_from(&cache, &runtime)
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::fs::read_to_string(&runtime).await.unwrap(),
+            "new config"
+        );
+        tokio::fs::remove_file(cache).await.unwrap();
+        tokio::fs::remove_file(runtime).await.unwrap();
+    }
+
+    #[test]
     fn local_subscription_metadata_survives_node_refresh() {
         let source = format!("{}digest", LOCAL_SUBSCRIPTION_PREFIX);
         let mut store = SubNodeStore::default();
@@ -355,14 +521,12 @@ mod tests {
             None,
         );
 
-        store.subs.get_mut(&source).unwrap().import_http_proxies = true;
-        store.subs.get_mut(&source).unwrap().parse_warning =
-            Some("24 HTTP(S) links skipped".into());
+        store.subs.get_mut(&source).unwrap().parse_warning = Some("1 invalid entry".into());
         let encoded = serde_json::to_string(&store).unwrap();
         store = serde_json::from_str(&encoded).unwrap();
         assert_eq!(
             store.status_for(&source).error.as_deref(),
-            Some("24 HTTP(S) links skipped")
+            Some("1 invalid entry")
         );
         store.record_success(&source, vec![node("n2")], None);
 
@@ -370,7 +534,7 @@ mod tests {
         assert_eq!(entry.name.as_deref(), Some("Local backup"));
         assert_eq!(entry.content.as_deref(), Some("cHJveGllczogW10="));
         assert_eq!(entry.nodes[0].name, "n2");
-        assert!(entry.import_http_proxies);
+        assert_eq!(entry.parser_version, SUBSCRIPTION_PARSER_VERSION);
         let status = store.status_for(&source);
         assert!(status.local);
         assert_eq!(status.name.as_deref(), Some("Local backup"));

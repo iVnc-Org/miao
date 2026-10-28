@@ -68,8 +68,6 @@ pub struct SubRequest {
 pub struct ContentSubRequest {
     pub content: String,
     #[serde(default)]
-    pub import_http_proxies: bool,
-    #[serde(default)]
     pub name: Option<String>,
 }
 
@@ -110,6 +108,7 @@ pub struct SubStatus {
     pub local: bool,
     pub state: SubState,
     pub node_count: usize,
+    pub details: Vec<String>,
     /// 只用于真正需要用户处理的问题（例如部分节点解析失败）。
     /// 链接失效不填这里，否则前端会渲染成红色异常。
     #[serde(skip_serializing_if = "Option::is_none")]

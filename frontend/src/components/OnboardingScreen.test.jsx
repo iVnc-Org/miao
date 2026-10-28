@@ -47,23 +47,20 @@ describe('OnboardingScreen', () => {
       mode: 'content',
       name: '本地备用',
       content: 'c3M6Ly9leGFtcGxl',
-      importHttpProxies: false,
     })
   })
 
-  it('requires explicit opt-in to import web links as proxies', async () => {
+  it('imports proxy content without asking users to choose a parser', async () => {
     const user = userEvent.setup()
     const onAddSub = vi.fn().mockResolvedValue(true)
     renderOnboarding({ onAddSub })
     await user.click(screen.getByRole('button', { name: /添加订阅/ }))
     await user.click(screen.getByRole('button', { name: /粘贴内容/ }))
-    const checkbox = screen.getByRole('checkbox', { name: '将 HTTP/HTTPS 链接作为代理导入' })
-    expect(checkbox).not.toBeChecked()
-    await user.click(checkbox)
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
     await user.type(screen.getByLabelText('订阅内容'), 'https://proxy.example.com:8443')
     await user.click(screen.getByRole('button', { name: '添加' }))
     expect(onAddSub).toHaveBeenCalledWith({
-      mode: 'content', name: '', content: 'https://proxy.example.com:8443', importHttpProxies: true,
+      mode: 'content', name: '', content: 'https://proxy.example.com:8443',
     })
   })
 

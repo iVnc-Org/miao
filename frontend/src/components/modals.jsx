@@ -65,7 +65,6 @@ export function SubscriptionModal({ open, loading, onClose, onSubmit }) {
   const [url, setUrl] = useState('')
   const [name, setName] = useState('')
   const [content, setContent] = useState('')
-  const [importHttpProxies, setImportHttpProxies] = useState(false)
 
   if (!open) return null
 
@@ -78,7 +77,7 @@ export function SubscriptionModal({ open, loading, onClose, onSubmit }) {
     const added = await onSubmit(
       mode === 'url'
         ? { mode, url: url.trim() }
-        : { mode, name: name.trim(), content: content.trim(), importHttpProxies }
+        : { mode, name: name.trim(), content: content.trim() }
     )
     if (added) onClose()
   }
@@ -169,11 +168,6 @@ export function SubscriptionModal({ open, loading, onClose, onSubmit }) {
                 placeholder={t('subModal.contentPh')}
                 spellCheck={false}
               />
-            </label>
-            <label className="field checkbox-field">
-              <input type="checkbox" checked={importHttpProxies} disabled={loading}
-                onChange={(event) => setImportHttpProxies(event.target.checked)} />
-              <span>{t('subModal.importHttpProxies')}</span>
             </label>
             <p className="modal-message">{t('subModal.protocolHint')}</p>
           </div>

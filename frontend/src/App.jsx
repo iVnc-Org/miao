@@ -429,7 +429,7 @@ export default function App() {
           method: 'POST',
           body: JSON.stringify(
             isContent
-              ? { content: input.content, name: input.name || null, import_http_proxies: Boolean(input.importHttpProxies) }
+              ? { content: input.content, name: input.name || null }
               : { url: input.url }
           ),
         },
