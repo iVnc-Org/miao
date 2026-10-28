@@ -61,6 +61,29 @@ Miao 会按以下顺序选择配置文件：
 
 sing-box 二进制和本次运行生成的 `config.json` 仍放在 `/tmp/miao-sing-box`，它们是可重建的运行产物，不属于持久化数据。Miao 重启后会从 `$HOME/.miao` 恢复上次的启动/停止状态、代理模式和节点选择；旧版 `runtime.json` 中的 `route_mode` 会被忽略。
 
+### 订阅格式与内核
+
+面板的“粘贴内容”支持 Clash.Meta YAML、明文 URI 列表及 Base64 编码的 URI 列表。URI 支持 `ss://`、`anytls://`、`socks5://`（或 `socks://`）、`hysteria2://`（或 `hy2://`）、TUIC v5 的 `tuic://` 和 `vless://`。VLESS 支持 TCP、WS、gRPC、HTTP/H2，以及 TLS/Reality；不支持的加密、传输或 URI 参数会明确报错，不会静默丢弃。
+
+混合订阅中的 `http://`、`https://` 链接默认跳过，避免把网页当作代理。确实需要导入 HTTP CONNECT 或 HTTPS CONNECT 代理时，在粘贴导入中勾选“将 HTTP/HTTPS 链接作为代理导入”；该选项会持久保存，后续刷新保持一致。不会递归访问内容中的网页或订阅链接。导入结果分别统计有效节点、无效条目、不支持的协议和跳过的网页链接，部分成功时显示警告并保留有效节点。
+
+Hysteria2 的 `fastopen` 对 QUIC 不适用，会提示忽略；不填写带宽时沿用内核默认拥塞控制。TLS 默认验证证书，只有链接明确设置 `insecure=1` / `allow_insecure=1` 等参数才会关闭校验。
+
+内核固定为 sing-box **1.14.4**，版本、提交和构建标签统一维护在 `scripts/sing-box.env`。本地与 CI 均校验提交，启用 QUIC、Clash API 和 uTLS，并注入版本号。版本 API 返回内核构建信息，顶部提交标记的悬浮提示也可查看。释放内核和规则文件时会比对 SHA256，以原子替换方式更新旧文件。
+
+可在准备好前端和 `embedded/` 资源后运行 `cargo test`。额外的本地连接测试需要 `openssl`，仅启动回环地址上的临时服务，覆盖 SOCKS5、HTTPS CONNECT、Hysteria2、TUIC 和 VLESS Reality：
+
+```bash
+MIAO_TEST_SING_BOX="$PWD/embedded/sing-box-amd64" cargo test -- --include-ignored --skip private_subscription_acceptance
+```
+
+这也会验证全局、进程黑/白名单及代理池配置能被目标内核接受。私有样本验收单独运行，样本不进入仓库、不输出节点凭据：
+
+```bash
+MIAO_TEST_SUBSCRIPTION=/tmp/sub.txt MIAO_TEST_SING_BOX="$PWD/embedded/sing-box-amd64" \
+  cargo test private_subscription_acceptance -- --ignored
+```
+
 ### 进阶：手动编写配置文件
 
 你也可以在 `$HOME/.miao/config.yaml`、可执行文件同目录，或兼容路径 `/etc/miao/config.yaml` 预先创建配置文件跳过引导：
@@ -71,7 +94,7 @@ socks_listen: 127.0.0.1  # 可选：覆盖本机 SOCKS5 监听地址，默认 12
 socks_port: 2080  # 可选：覆盖本机 SOCKS5 端口，默认监听 127.0.0.1:1080
 mode: global  # global | process | pool，三种模式互斥
 
-# 订阅链接（支持 Clash.Meta 格式，以及 ss:// / anytls:// URI 订阅）
+# 订阅链接（支持 Clash.Meta YAML，以及 SS、AnyTLS、SOCKS5、Hysteria2、TUIC、VLESS URI 列表）
 subs:
   - "https://your-subscription-url"
 

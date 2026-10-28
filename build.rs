@@ -1,6 +1,16 @@
 use std::process::Command;
 
 fn main() {
+    println!("cargo:rerun-if-changed=scripts/sing-box.env");
+    let core_manifest =
+        std::fs::read_to_string("scripts/sing-box.env").expect("sing-box build manifest");
+    for line in core_manifest
+        .lines()
+        .filter(|line| line.starts_with("SING_BOX_"))
+    {
+        let (key, value) = line.split_once('=').expect("sing-box manifest key=value");
+        println!("cargo:rustc-env={key}={value}");
+    }
     println!("cargo:rerun-if-env-changed=GITHUB_SHA");
     println!("cargo:rerun-if-env-changed=GITHUB_REPOSITORY");
     println!("cargo:rerun-if-env-changed=GITHUB_SERVER_URL");

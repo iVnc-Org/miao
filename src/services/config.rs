@@ -29,7 +29,7 @@ use crate::services::{
         hydrate_sub_status, is_local_subscription, load_sub_nodes, save_sub_nodes, StoredNode,
         SubNodeStore,
     },
-    subscription::{fetch_sub, parse_subscription_text},
+    subscription::{fetch_sub, parse_subscription_text_with_options},
     write_file_atomic,
 };
 use crate::state::AppState;
@@ -675,6 +675,7 @@ async fn fetch_subscriptions(
             let sub = sub.clone();
             let client = state.http_client.clone();
             let local = is_local_subscription(&sub);
+            let import_http_proxies = store.subs.get(&sub).is_some_and(|entry| entry.import_http_proxies);
             let local_content = store
                 .subs
                 .get(&sub)
@@ -685,7 +686,7 @@ async fn fetch_subscriptions(
                     local_content
                         .as_deref()
                         .ok_or_else(|| AppError::message("Local subscription content is missing"))
-                        .and_then(|content| parse_subscription_text(&sub, content))
+                        .and_then(|content| parse_subscription_text_with_options(&sub, content, import_http_proxies))
                 } else {
                     info!(url = %sub, "Fetching subscription");
                     match tokio::time::timeout(
@@ -759,17 +760,10 @@ pub(crate) async fn fetch_subscription_nodes(
         .ok_or_else(|| AppError::message("Subscription fetch returned no result"))?;
     let fetch_result = result.map_err(AppError::message)?;
     if fetch_result.node_names.is_empty() {
-        return Err(AppError::message("Subscription returned no nodes"));
+        return Err(AppError::message(fetch_result.no_nodes_message()));
     }
 
-    let parse_warning = if fetch_result.parse_errors.is_empty() {
-        None
-    } else {
-        Some(format!(
-            "{} nodes skipped due to parse errors",
-            fetch_result.parse_errors.len()
-        ))
-    };
+    let parse_warning = fetch_result.diagnostic_summary();
     let nodes = fetch_result
         .node_names
         .into_iter()
@@ -908,23 +902,15 @@ pub async fn gen_config(
                     // 抓到了但一个节点都没有：多半是限额/过期返回的错误页。
                     // 当成失败处理，保留缓存里的节点。
                     node_list_is_complete = false;
-                    store.record_failure(&url, "Subscription returned no nodes".to_string());
+                    store.record_failure(&url, fetch_result.no_nodes_message());
                     fetch_errors.insert(url, None);
                     continue;
                 }
 
-                if !fetch_result.parse_errors.is_empty() {
+                if fetch_result.has_skipped_nodes() {
                     node_list_is_complete = false;
-                    fetch_errors.insert(
-                        url.clone(),
-                        Some(format!(
-                            "{} nodes skipped due to parse errors",
-                            fetch_result.parse_errors.len()
-                        )),
-                    );
-                } else {
-                    fetch_errors.insert(url.clone(), None);
                 }
+                fetch_errors.insert(url.clone(), fetch_result.diagnostic_summary());
 
                 let nodes = fetch_result
                     .node_names
@@ -933,6 +919,11 @@ pub async fn gen_config(
                     .map(|(name, outbound)| StoredNode { name, outbound })
                     .collect();
                 store.record_success(&url, nodes, Some(now_rfc3339()));
+                store
+                    .subs
+                    .get_mut(&url)
+                    .expect("successful subscription")
+                    .parse_warning = fetch_errors.get(&url).cloned().flatten();
             }
             Err(e) => {
                 // 关键：不动已有节点。链接失效不该让用户失去已经拿到的节点。
@@ -1219,9 +1210,9 @@ fn build_sing_box_config(
         let mut group_start = manual_node_count;
         let mut share_groups = Vec::with_capacity(subscription_group_sizes.len());
         for (source, node_count) in subscription_group_sizes {
-            let group_end = group_start.checked_add(node_count).ok_or_else(|| {
-                AppError::message("Share mode: subscription node count overflow")
-            })?;
+            let group_end = group_start
+                .checked_add(node_count)
+                .ok_or_else(|| AppError::message("Share mode: subscription node count overflow"))?;
             let tags = node_names.get(group_start..group_end).ok_or_else(|| {
                 AppError::message(format!(
                     "Share mode: node grouping is inconsistent for subscription {source}"
@@ -1415,10 +1406,7 @@ fn build_dns_rules() -> Vec<serde_json::Value> {
     })]
 }
 
-fn append_global_route_tail(
-    route_rules: &mut Vec<serde_json::Value>,
-    custom_rules: &[String],
-) {
+fn append_global_route_tail(route_rules: &mut Vec<serde_json::Value>, custom_rules: &[String]) {
     route_rules.push(serde_json::json!({"protocol": "dns", "action": "hijack-dns"}));
     route_rules.extend(parse_custom_rules(custom_rules));
     route_rules
@@ -1506,9 +1494,7 @@ fn build_route_rules(
             ProcessListMode::Blacklist => {
                 Ok(build_blacklist_route_rules(process_proxy, custom_rules))
             }
-            ProcessListMode::Whitelist => {
-                build_whitelist_route_rules(process_proxy, custom_rules)
-            }
+            ProcessListMode::Whitelist => build_whitelist_route_rules(process_proxy, custom_rules),
         },
         ProxyMode::Pool => Ok(route_prelude_rules(share_bindings)),
     }
@@ -1700,6 +1686,76 @@ mod tests {
         let store = SubNodeStore::default();
         let subs = vec!["a".to_string(), "b".to_string()];
         assert_eq!(SubFetchPolicy::FetchAll.urls_to_fetch(&store, &subs), subs);
+    }
+
+    #[tokio::test]
+    async fn local_http_import_option_is_used_on_refresh() {
+        let source = format!("{}http-proxy", LOCAL_SUBSCRIPTION_PREFIX);
+        let mut store = SubNodeStore::default();
+        store.record_local_success(
+            &source,
+            None,
+            "https://proxy.example.com:8443#proxy".into(),
+            vec![],
+            None,
+        );
+        store.subs.get_mut(&source).unwrap().import_http_proxies = true;
+        let state = app_state(Config::default());
+        let mut results = fetch_subscriptions(&[source], &store, &state).await;
+        let parsed = results.pop().unwrap().1.unwrap();
+        assert_eq!(parsed.node_names, vec!["proxy"]);
+        assert_eq!(parsed.outbounds[0]["type"], "http");
+        assert_eq!(parsed.outbounds[0]["tls"]["enabled"], true);
+    }
+
+    #[test]
+    #[ignore = "requires MIAO_TEST_SING_BOX and embedded geo rule files"]
+    fn target_core_accepts_all_modes() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        for (mode, process_mode) in [
+            (ProxyMode::Global, ProcessListMode::Blacklist),
+            (ProxyMode::Process, ProcessListMode::Blacklist),
+            (ProxyMode::Process, ProcessListMode::Whitelist),
+            (ProxyMode::Pool, ProcessListMode::Blacklist),
+        ] {
+            let config = Config {
+                mode,
+                tun_process: process_proxy(process_mode),
+                ..Default::default()
+            };
+            let mut built = build_sing_box_config(&config, vec!["test-node".into()],
+                vec![json!({"type":"socks","tag":"test-node","server":"127.0.0.1","server_port":1080})], vec![], vec![]).unwrap();
+            for rule in built["route"]["rule_set"].as_array_mut().unwrap() {
+                let filename = if rule["tag"] == "chinaip" {
+                    "geoip-cn.srs"
+                } else {
+                    "geosite-geolocation-cn.srs"
+                };
+                rule["path"] = json!(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("embedded")
+                    .join(filename));
+            }
+            let mut child = Command::new(std::env::var("MIAO_TEST_SING_BOX").unwrap())
+                .args(["check", "-c", "/dev/stdin"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(built.to_string().as_bytes())
+                .unwrap();
+            let result = child.wait_with_output().unwrap();
+            assert!(
+                result.status.success(),
+                "Target core rejected mode {mode:?}: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
     }
 
     #[test]
@@ -1913,7 +1969,7 @@ mod tests {
         assert_eq!(all_outbounds[3]["tag"], "sub-a");
 
         let rules = built["route"]["rules"].as_array().unwrap();
-        assert_eq!(rules.len(), 6);
+        assert_eq!(rules.len(), 5);
         assert_eq!(rules[0]["action"], "sniff");
         assert_eq!(rules[1]["inbound"], json!(["socks-in"]));
         assert_eq!(rules[1]["outbound"], "proxy");
@@ -2858,13 +2914,16 @@ mod tests {
         };
         let mut share_map = SharePortMap::default();
         let names = vec!["node-a".to_string(), "node-b".to_string()];
-        let outbounds = vec![manual_outbound(), json!({
-            "type": "hysteria2",
-            "tag": "node-b",
-            "server": "b.example.com",
-            "server_port": 443,
-            "password": "secret"
-        })];
+        let outbounds = vec![
+            manual_outbound(),
+            json!({
+                "type": "hysteria2",
+                "tag": "node-b",
+                "server": "b.example.com",
+                "server_port": 443,
+                "password": "secret"
+            }),
+        ];
 
         super::build_sing_box_config(
             &config,

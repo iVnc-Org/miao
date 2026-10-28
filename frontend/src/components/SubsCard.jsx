@@ -18,7 +18,7 @@ import { useI18n } from '../i18n.jsx'
 
 function subscriptionStatus(sub, t) {
   if (sub.error) {
-    return { tone: 'error', icon: CircleX, text: sub.error }
+    return { tone: sub.node_count > 0 ? 'warning' : 'error', icon: sub.node_count > 0 ? CircleAlert : CircleX, text: sub.error }
   }
 
   switch (sub.state) {
@@ -67,7 +67,7 @@ const SubRow = memo(function SubRow({ sub, disabled, onDelete, onStartReplace, t
       </div>
       <div className="list-row-content">
         <div className="list-row-title">{title}</div>
-        <div className={classNames('list-row-meta', status.tone)}>{status.text}</div>
+        <div className={classNames('list-row-meta', status.tone)} title={status.text}>{status.text}</div>
       </div>
       <div className="list-row-actions">
         {sub.state === 'expired' && !sub.local && (

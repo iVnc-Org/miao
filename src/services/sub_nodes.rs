@@ -53,6 +53,10 @@ pub struct StoredSub {
     /// 粘贴的订阅原文。URL 订阅不保存该字段。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    #[serde(default)]
+    pub import_http_proxies: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parse_warning: Option<String>,
     /// 上次成功抓取的时间，仅用于展示。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fetched_at: Option<String>,
@@ -111,16 +115,24 @@ impl SubNodeStore {
         nodes: Vec<StoredNode>,
         fetched_at: Option<String>,
     ) {
-        let (name, content) = self
+        let (name, content, import_http_proxies) = self
             .subs
             .get(url)
-            .map(|entry| (entry.name.clone(), entry.content.clone()))
+            .map(|entry| {
+                (
+                    entry.name.clone(),
+                    entry.content.clone(),
+                    entry.import_http_proxies,
+                )
+            })
             .unwrap_or_default();
         self.subs.insert(
             url.to_string(),
             StoredSub {
                 name,
                 content,
+                import_http_proxies,
+                parse_warning: None,
                 fetched_at,
                 stale: false,
                 last_error: None,
@@ -142,6 +154,8 @@ impl SubNodeStore {
             StoredSub {
                 name,
                 content: Some(content),
+                import_http_proxies: false,
+                parse_warning: None,
                 fetched_at,
                 stale: false,
                 last_error: None,
@@ -173,7 +187,7 @@ impl SubNodeStore {
                 local: entry.content.is_some() || is_local_subscription(url),
                 state: SubState::Cached,
                 node_count: entry.nodes.len(),
-                error: None,
+                error: entry.parse_warning.clone(),
             },
             None => SubStatus {
                 url: url.to_string(),
@@ -341,12 +355,22 @@ mod tests {
             None,
         );
 
+        store.subs.get_mut(&source).unwrap().import_http_proxies = true;
+        store.subs.get_mut(&source).unwrap().parse_warning =
+            Some("24 HTTP(S) links skipped".into());
+        let encoded = serde_json::to_string(&store).unwrap();
+        store = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            store.status_for(&source).error.as_deref(),
+            Some("24 HTTP(S) links skipped")
+        );
         store.record_success(&source, vec![node("n2")], None);
 
         let entry = &store.subs[&source];
         assert_eq!(entry.name.as_deref(), Some("Local backup"));
         assert_eq!(entry.content.as_deref(), Some("cHJveGllczogW10="));
         assert_eq!(entry.nodes[0].name, "n2");
+        assert!(entry.import_http_proxies);
         let status = store.status_for(&source);
         assert!(status.local);
         assert_eq!(status.name.as_deref(), Some("Local backup"));

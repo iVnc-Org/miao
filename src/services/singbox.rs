@@ -1,10 +1,12 @@
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
+use sha2::{Digest, Sha256};
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::io;
 use tokio::time::{sleep, Duration};
@@ -40,25 +42,15 @@ pub fn extract_sing_box() -> AppResult<PathBuf> {
     let ip_rule_path = sing_box_home.join("chinaip.srs");
     let site_rule_path = sing_box_home.join("chinasite.srs");
 
-    if !sing_box_path.exists() {
-        info!("Extracting embedded sing-box binary to {:?}", sing_box_path);
-        fs::write(&sing_box_path, SING_BOX_BINARY)
-            .map_err(|e| AppError::context("Failed to write embedded sing-box binary", e))?;
-        fs::set_permissions(&sing_box_path, fs::Permissions::from_mode(0o755))
-            .map_err(|e| AppError::context("Failed to set permissions on sing-box binary", e))?;
-        info!("sing-box binary extracted successfully");
-    }
-
-    if !ip_rule_path.exists() {
-        info!("Extracting geoip rule file to {:?}", ip_rule_path);
-        fs::write(&ip_rule_path, IP_RULE_BINARY)
-            .map_err(|e| AppError::context("Failed to write geoip rule file", e))?;
-    }
-    if !site_rule_path.exists() {
-        info!("Extracting geosite rule file to {:?}", site_rule_path);
-        fs::write(&site_rule_path, SITE_RULE_BINARY)
-            .map_err(|e| AppError::context("Failed to write geosite rule file", e))?;
-    }
+    // Serialise extraction; rename replaces an old executable without truncating
+    // an inode that a running sing-box process may still be using.
+    static EXTRACTION_LOCK: Mutex<()> = Mutex::new(());
+    let _guard = EXTRACTION_LOCK
+        .lock()
+        .map_err(|_| AppError::message("Core extraction lock poisoned"))?;
+    sync_embedded_file(&sing_box_path, SING_BOX_BINARY, 0o755)?;
+    sync_embedded_file(&ip_rule_path, IP_RULE_BINARY, 0o644)?;
+    sync_embedded_file(&site_rule_path, SITE_RULE_BINARY, 0o644)?;
     let dashboard_dir = sing_box_home.join("dashboard");
     if !dashboard_dir.exists() {
         fs::create_dir_all(&dashboard_dir)
@@ -66,6 +58,42 @@ pub fn extract_sing_box() -> AppResult<PathBuf> {
     }
 
     Ok(sing_box_home)
+}
+
+fn sync_embedded_file(path: &std::path::Path, bytes: &[u8], mode: u32) -> AppResult<()> {
+    let matches = match fs::read(path) {
+        Ok(existing) => Sha256::digest(&existing) == Sha256::digest(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => return Err(AppError::context("Failed to read embedded runtime file", e)),
+    };
+    if matches {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+        return Ok(());
+    }
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| AppError::message("System clock precedes Unix epoch"))?
+        .as_nanos();
+    let temporary = path.with_extension(format!("{}.{nonce}.new", std::process::id()));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)
+        .map_err(|e| AppError::context("Failed to create embedded runtime file", e))?;
+    let result = (|| -> AppResult<()> {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(mode))?;
+        fs::rename(&temporary, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result.map_err(|e| AppError::context("Failed to replace embedded runtime file", e))?;
+    info!(file = ?path, "Updated embedded runtime file");
+    Ok(())
 }
 
 /// 在停止运行中的实例前验证 sing-box 配置，避免不必要的服务中断
@@ -246,7 +274,28 @@ pub async fn stop_sing_internal(state: &Arc<AppState>) {
 
 #[cfg(test)]
 mod tests {
-    use super::startup_output_details;
+    use super::{startup_output_details, sync_embedded_file};
+
+    #[test]
+    fn core_replacement_preserves_old_inode_and_updates_contents() {
+        let dir = std::env::temp_dir().join(format!("miao-extraction-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("core");
+        let old_link = dir.join("old-core");
+        std::fs::write(&path, b"old").unwrap();
+        let _ = std::fs::remove_file(&old_link);
+        std::fs::hard_link(&path, &old_link).unwrap();
+        sync_embedded_file(&path, b"new", 0o755).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert_eq!(std::fs::read(&old_link).unwrap(), b"old");
+        sync_embedded_file(&path, b"new", 0o755).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn startup_output_details_prefers_stderr() {

@@ -312,6 +312,9 @@ pub async fn get_version_info(state: &Arc<AppState>) -> VersionInfo {
 fn current_version_info() -> VersionInfo {
     VersionInfo {
         current: current_version(),
+        sing_box_version: env!("SING_BOX_VERSION").into(),
+        sing_box_revision: env!("SING_BOX_REVISION").into(),
+        sing_box_tags: env!("SING_BOX_TAGS").into(),
         commit_short: git_commit_short(),
         commit_full: git_commit_full(),
         commit_url: git_commit_url(),

@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize)]
 pub struct VersionInfo {
     pub current: String,
+    pub sing_box_version: String,
+    pub sing_box_revision: String,
+    pub sing_box_tags: String,
     pub commit_short: Option<String>,
     pub commit_full: Option<String>,
     pub commit_url: Option<String>,

@@ -7,6 +7,8 @@ use url::Url;
 
 use crate::error::{AppError, AppResult};
 
+mod uri;
+
 static UUID_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
         .unwrap()
@@ -35,7 +37,10 @@ static VALID_TUIC_UDP_RELAY_MODES: &[&str] = &["native", "quic"];
 pub struct ParseResult {
     pub nodes: Vec<(String, JsonValue)>, // (name, outbound_json)
     pub errors: Vec<String>,             // 记录解析失败的节点及原因
-    pub total_count: usize,              // YAML 中 proxies 列表的原始总数
+    pub total_count: usize,
+    pub unsupported_count: usize,
+    pub ignored_count: usize,
+    pub warnings: Vec<String>,
 }
 
 /// 从 Clash 配置中解析节点，跳过无效节点并记录错误
@@ -53,6 +58,9 @@ pub fn parse_clash_proxies(clash_yaml: &str) -> AppResult<ParseResult> {
         nodes: vec![],
         errors: vec![],
         total_count: proxies.len(),
+        unsupported_count: 0,
+        ignored_count: 0,
+        warnings: vec![],
     };
 
     for (idx, node) in proxies.iter().enumerate() {
@@ -62,8 +70,11 @@ pub fn parse_clash_proxies(clash_yaml: &str) -> AppResult<ParseResult> {
             .unwrap_or("unknown");
         let normalized_type = node_type.to_ascii_lowercase();
 
-        // Skip unsupported node types silently
         if !is_supported_node_type(&normalized_type) {
+            result.unsupported_count += 1;
+            result
+                .warnings
+                .push(format!("YAML node #{}: unsupported protocol", idx + 1));
             continue;
         }
 
@@ -85,35 +96,99 @@ pub fn parse_clash_proxies(clash_yaml: &str) -> AppResult<ParseResult> {
     Ok(result)
 }
 
+/// URI lists may be plain text or Base64. HTTP(S) links require explicit opt-in.
+#[cfg(test)]
 pub fn parse_uri_subscription(content: &str) -> AppResult<ParseResult> {
-    let decoded = decode_subscription_body(content);
-    let lines: Vec<&str> = decoded
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect();
+    parse_uri_subscription_with_options(content, false)
+}
 
+pub(crate) fn parse_uri_subscription_with_options(
+    content: &str,
+    import_http_proxies: bool,
+) -> AppResult<ParseResult> {
+    let decoded = decode_subscription_body(content);
     let mut result = ParseResult {
         nodes: vec![],
         errors: vec![],
-        total_count: lines.len(),
+        total_count: 0,
+        unsupported_count: 0,
+        ignored_count: 0,
+        warnings: vec![],
     };
-
-    for (idx, line) in lines.iter().enumerate() {
+    for (idx, line) in decoded.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        result.total_count += 1;
+        let is_http = has_uri_scheme(line, "http://") || has_uri_scheme(line, "https://");
+        if is_http && !import_http_proxies {
+            result.ignored_count += 1;
+            continue;
+        }
         match parse_uri_node(line) {
-            Ok(Some(node)) => result.nodes.push(node),
-            Ok(None) => {}
+            Ok(Some(node)) => {
+                if (has_uri_scheme(line, "hy2://") || has_uri_scheme(line, "hysteria2://"))
+                    && Url::parse(line)
+                        .ok()
+                        .is_some_and(|u| query_value(&u, "fastopen").is_some())
+                {
+                    result.warnings.push(format!(
+                        "URI line #{}: fastopen is not applicable to QUIC and was ignored",
+                        idx + 1
+                    ));
+                }
+                result.nodes.push(node);
+            }
+            Ok(None) => {
+                result.unsupported_count += 1;
+                // Never echo untrusted URI text, credentials, or query values.
+                let scheme = line
+                    .split_once("://")
+                    .map(|(s, _)| s)
+                    .filter(|s| {
+                        s.len() <= 24
+                            && s.chars()
+                                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+                    })
+                    .unwrap_or("unknown");
+                result.warnings.push(format!(
+                    "URI line #{}: unsupported protocol {}",
+                    idx + 1,
+                    scheme
+                ));
+            }
             Err(err) => result
                 .errors
-                .push(format!("URI node #{}: {}", idx + 1, err)),
+                .push(format!("URI line #{}: {}", idx + 1, err)),
         }
     }
-
     if result.total_count == 0 {
         return Err(AppError::message("No URI nodes found"));
     }
-
     Ok(result)
+}
+
+pub(crate) fn is_uri_subscription(content: &str) -> bool {
+    let decoded = decode_subscription_body(content);
+    if serde_yaml::from_str::<Value>(&decoded)
+        .ok()
+        .is_some_and(|v| v.is_mapping())
+    {
+        return false;
+    }
+    decoded
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .any(|line| {
+            line.split_once("://").is_some_and(|(scheme, _)| {
+                !scheme.is_empty()
+                    && scheme
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+            })
+        })
 }
 
 fn decode_subscription_body(content: &str) -> String {
@@ -148,6 +223,20 @@ fn parse_uri_node(uri: &str) -> AppResult<Option<(String, serde_json::Value)>> {
     }
     if has_uri_scheme(uri, "anytls://") {
         return parse_anytls_uri(uri).map(Some);
+    }
+    for scheme in [
+        "socks5://",
+        "socks://",
+        "hysteria2://",
+        "hy2://",
+        "tuic://",
+        "vless://",
+        "http://",
+        "https://",
+    ] {
+        if has_uri_scheme(uri, scheme) {
+            return uri::parse_extended_uri(uri).map(Some);
+        }
     }
     Ok(None)
 }
@@ -867,7 +956,6 @@ pub fn parse_node_json(node_str: &str) -> Result<(NodeDisplayInfo, serde_json::V
 }
 
 pub fn node_display_info(v: &serde_json::Value) -> Result<NodeDisplayInfo, String> {
-
     let tag = v
         .get("tag")
         .and_then(|t| t.as_str())
@@ -1058,12 +1146,130 @@ proxies:
     }
 
     #[test]
+    fn extended_uri_maps_protocol_fields_and_encoding() {
+        let input = concat!(
+            "socks5://user:p%40ss@[::1]:1080#SOCKS\n",
+            "hy2://user:p%3Aass@example.com:443?sni=hy.example.com&insecure=1&fastopen=1#HY\n",
+            "tuic://123e4567-e89b-12d3-a456-426614174000:p%40ss@example.com:443?congestion_control=bbr&alpn=h3&allow_insecure=1#TUIC\n",
+            "vless://123e4567-e89b-12d3-a456-426614174000@example.com:443?encryption=none&type=tcp&security=reality&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&sni=example.com&fp=chrome#Reality\n",
+            "https://example.com/info\n",
+            "vmess://unsupported\n",
+        );
+        let parsed = parse_uri_subscription(&general_purpose::STANDARD.encode(input)).unwrap();
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        assert_eq!(parsed.total_count, 6);
+        assert_eq!(parsed.nodes.len(), 4);
+        assert_eq!(parsed.unsupported_count, 1);
+        assert_eq!(parsed.ignored_count, 1);
+        assert!(parsed.warnings.iter().any(|w| w.contains("fastopen")));
+        let nodes: Vec<_> = parsed.nodes.iter().map(|(_, n)| n).collect();
+        assert_eq!(nodes[0]["server"], "::1");
+        assert_eq!(nodes[0]["password"], "p@ss");
+        assert_eq!(nodes[1]["password"], "user:p:ass");
+        assert_eq!(nodes[1]["tls"]["insecure"], true);
+        assert!(nodes[1].get("tcp_fast_open").is_none());
+        assert_eq!(nodes[2]["congestion_control"], "bbr");
+        assert_eq!(nodes[2]["tls"]["alpn"], json!(["h3"]));
+        assert_eq!(nodes[3]["tls"]["reality"]["short_id"], "");
+        assert_eq!(nodes[3]["tls"]["utls"]["fingerprint"], "chrome");
+        assert!(nodes[3].get("transport").is_none());
+    }
+
+    #[test]
+    fn http_proxy_requires_explicit_import_and_maps_tls() {
+        let uri = "https://user:p%40ss@example.com/custom#proxy";
+        assert!(parse_uri_subscription(uri).unwrap().nodes.is_empty());
+        let result = parse_uri_subscription_with_options(uri, true).unwrap();
+        let outbound = &result.nodes[0].1;
+        assert_eq!(outbound["type"], "http");
+        assert_eq!(outbound["server_port"], 443);
+        assert_eq!(outbound["password"], "p@ss");
+        assert_eq!(outbound["path"], "/custom");
+        assert_eq!(outbound["tls"]["insecure"], false);
+    }
+
+    #[test]
+    fn vless_uri_transports_reuse_yaml_mapping() {
+        for (query, expected) in [
+            (
+                "type=ws&path=%2Fproxy&host=cdn.example.com",
+                json!({"type":"ws","path":"/proxy","headers":{"Host":"cdn.example.com"}}),
+            ),
+            (
+                "type=grpc&serviceName=test&mode=gun",
+                json!({"type":"grpc","service_name":"test"}),
+            ),
+            (
+                "type=h2&path=%2Fproxy&host=cdn.example.com",
+                json!({"type":"http","path":"/proxy","host":["cdn.example.com"]}),
+            ),
+        ] {
+            let uri =
+                format!("vless://123e4567-e89b-12d3-a456-426614174000@example.com:443?{query}");
+            let parsed = parse_uri_subscription(&uri).unwrap();
+            assert!(parsed.errors.is_empty());
+            assert_eq!(parsed.nodes[0].1["transport"], expected);
+        }
+    }
+
+    #[test]
+    fn invalid_extended_uris_report_line_numbers_without_secrets() {
+        let invalid = [
+            "socks5://user:private-secret@example.com:0",
+            "tuic://private-secret@example.com:443",
+            "tuic://123e4567-e89b-12d3-a456-426614174000:private-secret@example.com:443?allow_insecure=perhaps",
+            "hy2://private-secret@example.com:443?obfs=unknown",
+            "vless://123e4567-e89b-12d3-a456-426614174000@example.com:443?type=xhttp&token=private-secret",
+            "vless://123e4567-e89b-12d3-a456-426614174000@example.com:443?encryption=private-secret",
+            "vless://123e4567-e89b-12d3-a456-426614174000@example.com:443?security=reality&pbk=private-secret&fp=chrome",
+            "hy2://private-secret@example.com:443?insecure=1&allow_insecure=0",
+            "hy2://private-secret@example.com:443?insecure=1&insecure=0",
+        ];
+        for uri in invalid {
+            let parsed = parse_uri_subscription(&format!("# comment\n\n{uri}")).unwrap();
+            assert!(parsed.nodes.is_empty());
+            assert_eq!(parsed.errors.len(), 1);
+            assert!(parsed.errors[0].contains("line #3"));
+            assert!(!parsed.errors[0].contains("private-secret"));
+        }
+    }
+
+    #[test]
+    fn extended_uri_defaults_and_strict_parameters() {
+        let hy2 = parse_uri_subscription("hy2://secret@example.com").unwrap();
+        assert_eq!(hy2.nodes[0].1["server_port"], 443);
+        assert_eq!(hy2.nodes[0].1["tls"]["insecure"], false);
+        let mixed = parse_uri_subscription("bad-entry\nsocks5://example.com:1080").unwrap();
+        assert_eq!(mixed.nodes.len(), 1);
+        assert_eq!(mixed.unsupported_count, 1);
+        for uri in [
+            "hy2://secret@example.com?fastopen=maybe",
+            "hy2://secret@example.com?obfs-password=p",
+            "socks5://user:p%ZZ@example.com:1080",
+            "hy2://secret@example.com?obfs-password=%FF",
+            "hy2://secret@example.com?sni=a&peer=b",
+            "hy2://secret@example.com?unknown=secret",
+            "socks5://example.com:1080/ignored-path",
+            "socks5://:secret@example.com:1080",
+            "vless://123e4567-e89b-12d3-a456-426614174000@example.com:443?security=none&alpn=h2",
+            "vless://123e4567-e89b-12d3-a456-426614174000@example.com:443?packetEncoding=xudp&packet_encoding=packetaddr",
+            "http://example.com?insecure=1",
+            "vless://123e4567-e89b-12d3-a456-426614174000@example.com:443?type=tcp&path=%2Fignored",
+        ] {
+            let result = parse_uri_subscription_with_options(uri, true).unwrap();
+            assert!(result.nodes.is_empty(), "invalid URI accepted");
+            assert_eq!(result.errors.len(), 1);
+        }
+    }
+
+    #[test]
     fn parse_uri_subscription_skips_unsupported_uri_types() {
         let result = parse_uri_subscription("vmess://ignored\nss://bad").unwrap();
 
         assert_eq!(result.total_count, 2);
         assert!(result.nodes.is_empty());
         assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.unsupported_count, 1);
     }
 
     #[test]
@@ -1099,7 +1305,7 @@ proxies:
         assert_eq!(result.nodes.len(), 1);
         assert_eq!(result.nodes[0].0, "valid-node");
         // 3 errors: missing-server, zero-port, missing-password
-        // unsupported-type (snell) is silently skipped, not reported as error
+        // unsupported-type (snell) is counted separately from invalid nodes
         assert_eq!(result.errors.len(), 3);
 
         // Verify error messages contain node names
@@ -1616,7 +1822,7 @@ proxies:
 
         let result = parse_clash_proxies(yaml).unwrap();
 
-        // Snell remains unsupported and is silently skipped.
+        // Snell is counted as unsupported rather than invalid.
         assert_eq!(result.nodes.len(), 4);
         assert!(result.errors.is_empty());
 
@@ -1723,3 +1929,6 @@ proxies:
         assert_eq!(display, "Test Node (192.168.1.1:8388) [shadowsocks]");
     }
 }
+
+#[cfg(test)]
+mod integration_tests;

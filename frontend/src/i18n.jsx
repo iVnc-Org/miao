@@ -140,6 +140,8 @@ const ZH = {
   'subModal.displayNamePh': '例如：备用订阅',
   'subModal.content': '订阅内容',
   'subModal.contentPh': 'Base64、URI 列表或 Clash YAML',
+  'subModal.importHttpProxies': '将 HTTP/HTTPS 链接作为代理导入',
+  'subModal.protocolHint': 'URI 支持 SS、AnyTLS、SOCKS5、Hysteria2、TUIC 和 VLESS。普通网页链接默认跳过。',
 
   'poolTest.title': '代理节点测试',
   'poolTest.closeAria': '关闭测试结果',
@@ -438,6 +440,8 @@ const EN = {
   'subModal.displayNamePh': 'e.g. backup',
   'subModal.content': 'Subscription content',
   'subModal.contentPh': 'Base64, URI list, or Clash YAML',
+  'subModal.importHttpProxies': 'Import HTTP/HTTPS links as proxies',
+  'subModal.protocolHint': 'URI supports SS, AnyTLS, SOCKS5, Hysteria2, TUIC and VLESS. Web links are skipped by default.',
 
   'poolTest.title': 'Proxy node test',
   'poolTest.closeAria': 'Close test result',

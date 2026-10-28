@@ -14,7 +14,7 @@ use crate::services::{
         hydrate_sub_status, is_local_subscription, load_sub_nodes, save_sub_nodes, StoredNode,
         LOCAL_SUBSCRIPTION_PREFIX,
     },
-    subscription::parse_subscription_text,
+    subscription::parse_subscription_text_with_options,
 };
 use crate::state::AppState;
 use crate::validation::Validator;
@@ -115,30 +115,22 @@ pub async fn add_sub_content(
     let source = format!(
         "{}{}",
         LOCAL_SUBSCRIPTION_PREFIX,
-        hex::encode(Sha256::digest(content.as_bytes()))
+        hex::encode(Sha256::digest(if req.import_http_proxies {
+            format!("http-proxies\0{content}").into_bytes()
+        } else {
+            content.as_bytes().to_vec()
+        }))
     );
-    let parsed = parse_subscription_text(&source, &content)
+    let parsed = parse_subscription_text_with_options(&source, &content, req.import_http_proxies)
         .map_err(|error| status_error(StatusCode::BAD_REQUEST, error))?;
     if parsed.node_names.is_empty() {
-        let message = if parsed.parse_errors.is_empty() {
-            "Subscription content contains no supported nodes".to_string()
-        } else {
-            format!(
-                "Subscription content contains no valid nodes; {} entries failed to parse",
-                parsed.parse_errors.len()
-            )
-        };
-        return Err(status_error(StatusCode::BAD_REQUEST, message));
+        return Err(status_error(
+            StatusCode::BAD_REQUEST,
+            parsed.no_nodes_message(),
+        ));
     }
 
-    let parse_warning = if parsed.parse_errors.is_empty() {
-        None
-    } else {
-        Some(format!(
-            "{} nodes skipped due to parse errors",
-            parsed.parse_errors.len()
-        ))
-    };
+    let parse_warning = parsed.diagnostic_summary();
     let nodes: Vec<StoredNode> = parsed
         .node_names
         .into_iter()
@@ -158,26 +150,21 @@ pub async fn add_sub_content(
 
     let previous_store = load_sub_nodes().await;
     let mut staged_store = previous_store.clone();
-    staged_store.record_local_success(
-        &source,
-        name.clone(),
-        content,
-        nodes,
-        None,
-    );
+    staged_store.record_local_success(&source, name.clone(), content, nodes, None);
+    let staged_entry = staged_store
+        .subs
+        .get_mut(&source)
+        .expect("staged local subscription");
+    staged_entry.import_http_proxies = req.import_http_proxies;
+    staged_entry.parse_warning = parse_warning.clone();
     save_sub_nodes(&staged_store)
         .await
         .map_err(|error| status_error(StatusCode::INTERNAL_SERVER_ERROR, error))?;
 
     let mut new_config = old_config.clone();
     new_config.subs.push(source.clone());
-    if let Err(apply_error) = apply_config_change(
-        &state,
-        &old_config,
-        &new_config,
-        SubFetchPolicy::CacheOnly,
-    )
-    .await
+    if let Err(apply_error) =
+        apply_config_change(&state, &old_config, &new_config, SubFetchPolicy::CacheOnly).await
     {
         if let Err(restore_error) = save_sub_nodes(&previous_store).await {
             return Err(status_error(
@@ -270,24 +257,20 @@ pub async fn replace_sub(
         .map_err(|error| status_error(StatusCode::BAD_REQUEST, error))?;
     let previous_store = load_sub_nodes().await;
     let mut staged_store = previous_store.clone();
-    staged_store.record_success(
-        &req.new_url,
-        fetched.nodes,
-        Some(fetched.fetched_at),
-    );
+    staged_store.record_success(&req.new_url, fetched.nodes, Some(fetched.fetched_at));
+    staged_store
+        .subs
+        .get_mut(&req.new_url)
+        .expect("staged replacement")
+        .parse_warning = fetched.parse_warning.clone();
     save_sub_nodes(&staged_store)
         .await
         .map_err(|error| status_error(StatusCode::INTERNAL_SERVER_ERROR, error))?;
 
     let mut new_config = old_config.clone();
     new_config.subs[index] = req.new_url.clone();
-    if let Err(apply_error) = apply_config_change(
-        &state,
-        &old_config,
-        &new_config,
-        SubFetchPolicy::CacheOnly,
-    )
-    .await
+    if let Err(apply_error) =
+        apply_config_change(&state, &old_config, &new_config, SubFetchPolicy::CacheOnly).await
     {
         if let Err(restore_error) = save_sub_nodes(&previous_store).await {
             return Err(status_error(
@@ -342,6 +325,28 @@ mod tests {
 
     use super::get_subs;
     use crate::{error::AppError, models::Config, test_support::app_state};
+
+    #[tokio::test]
+    async fn content_import_reports_unsupported_protocol_without_mutating_config() {
+        use axum::response::IntoResponse;
+        use base64::Engine as _;
+        let state = app_state(Config::default());
+        let request: crate::models::ContentSubRequest = serde_json::from_value(serde_json::json!({
+            "content": base64::engine::general_purpose::STANDARD.encode("vmess://private-secret\nhttps://example.com/info")
+        })).unwrap();
+        let response = super::add_sub_content(State(state.clone()), Json(request))
+            .await
+            .err()
+            .expect("unsupported content must fail")
+            .into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        let body = crate::test_support::response_json(response).await;
+        let message = body["message"].as_str().unwrap();
+        assert!(message.contains("unsupported protocol vmess"));
+        assert!(message.contains("1 HTTP(S) links skipped"));
+        assert!(!message.contains("private-secret"));
+        assert!(state.config.read().await.subs.is_empty());
+    }
 
     #[test]
     fn app_error_context_message_stays_user_visible() {

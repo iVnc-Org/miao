@@ -68,6 +68,8 @@ pub struct SubRequest {
 pub struct ContentSubRequest {
     pub content: String,
     #[serde(default)]
+    pub import_http_proxies: bool,
+    #[serde(default)]
     pub name: Option<String>,
 }
 

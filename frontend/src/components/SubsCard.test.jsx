@@ -31,4 +31,13 @@ describe('SubsCard', () => {
     const add = screen.getByRole('button', { name: '添加订阅' })
     expect(refresh.compareDocumentPosition(add) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
+  it('shows skipped entries as a warning when valid nodes were imported', () => {
+    render(<SubsCard
+      subs={[{ url: 'content://test', local: true, state: 'ok', node_count: 13, error: '24 HTTP(S) links skipped' }]}
+      loadingAction="" onAddSub={vi.fn()} onDeleteSub={vi.fn()} onReplaceSub={vi.fn()}
+      onRefreshSubs={vi.fn()} isInitializing={false}
+    />)
+    expect(screen.getByText('24 HTTP(S) links skipped')).toHaveClass('warning')
+  })
+
 })

@@ -20,9 +20,12 @@ export function CommitBadge({ versionInfo }) {
   const { t } = useI18n()
   const label = commitLabel(versionInfo)
   const href = commitHref(versionInfo, label)
-  const title = versionInfo.has_update
+  const commitTitle = versionInfo.has_update
     ? (versionInfo.latest || label)
     : (versionInfo.commit_full || label)
+  const title = versionInfo.sing_box_version
+    ? `${commitTitle}\nsing-box ${versionInfo.sing_box_version}\n${versionInfo.sing_box_revision || ''}\n${versionInfo.sing_box_tags || ''}`
+    : commitTitle
 
   if (href) {
     return (

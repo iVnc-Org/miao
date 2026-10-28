@@ -28,6 +28,8 @@ jobs:
       - name: Build frontend
         run: |
           npm --prefix frontend ci
+          npm --prefix frontend test
+          npm --prefix frontend run lint
           npm --prefix frontend run build
 
       - name: Upload frontend artifact
@@ -66,7 +68,10 @@ jobs:
           targets: ${{ matrix.rust_target }}
 
       - name: Clone sing-box source
-        run: git clone --depth=1 https://github.com/SagerNet/sing-box.git sing-box-src
+        run: |
+          source scripts/sing-box.env
+          git clone --depth=1 --branch "v$SING_BOX_VERSION" https://github.com/SagerNet/sing-box.git sing-box-src
+          test "$(git -C sing-box-src rev-parse HEAD)" = "$SING_BOX_REVISION"
 
       - name: Determine required Go version
         id: go-version
@@ -89,16 +94,19 @@ jobs:
       - name: Build sing-box binary
         run: |
           mkdir -p embedded
+          source scripts/sing-box.env
           cd sing-box-src
+          SING_BOX_LDFLAGS="-s -w -buildid= -X github.com/sagernet/sing-box/constant.Version=$SING_BOX_VERSION"
 
-          go build -ldflags "-s -w -buildid=" ./cmd/sing-box
+          CGO_ENABLED=0 go build -trimpath -ldflags "$SING_BOX_LDFLAGS" -tags "$SING_BOX_TAGS" ./cmd/sing-box
+          ./sing-box version
           mv sing-box ../embedded/sing-box-host
 
           GOARCH=${{ matrix.goarch }} GOOS=linux CGO_ENABLED=0 go build \
             -v \
             -trimpath \
-            -ldflags "-s -w -buildid=" \
-            -tags "with_quic,with_clash_api,with_utls" \
+            -ldflags "$SING_BOX_LDFLAGS" \
+            -tags "$SING_BOX_TAGS" \
             ./cmd/sing-box
           mv sing-box ../embedded/sing-box-${{ matrix.target }}
 
@@ -133,6 +141,12 @@ jobs:
           ./embedded/sing-box-host rule-set compile /tmp/direct-list.json -o embedded/geosite-geolocation-cn.srs
           rm -f /tmp/direct-list.txt /tmp/direct-list.json
           ls -lh embedded/*.srs
+
+      - name: Test parsers and core compatibility
+        if: matrix.target == 'amd64'
+        env:
+          MIAO_TEST_SING_BOX: ${{ github.workspace }}/embedded/sing-box-host
+        run: cargo test -- --include-ignored --skip private_subscription_acceptance
 
       - name: Build release for ${{ matrix.target }}
         env:
