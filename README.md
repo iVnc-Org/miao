@@ -179,7 +179,7 @@ miao 会把成功解析的订阅节点持久化到 `$HOME/.miao/sub_nodes.json`�
 
 “添加节点 → VPS 部署”支持通过 SSH 安装 Hysteria2、恢复已有 Miao 节点或迁移旧部署。支持密码/密钥认证、自定义 SSH 和节点端口、IPv6/私网/NAT 映射；进度持久化，刷新后恢复弹窗。未知部署默认保护，安装失败执行事务回滚，新节点固定信任证书。
 
-默认放行 SSH 22/TCP 与 Hysteria2 543/UDP；安全组和防火墙不会自动修改。部署入口默认只允许 localhost，远程访问需 HTTPS 与服务端 `MIAO_VPS_TOKEN`（至少 32 字符）。SSH 凭据不保存。
+默认放行 SSH 22/TCP 与 Hysteria2 543/UDP；安全组和防火墙不会自动修改。部署入口支持通过服务器 IP/域名使用 HTTP 或 HTTPS 访问；远程访问需服务端配置 `MIAO_VPS_TOKEN`（至少 32 字符），并在弹窗填写同一令牌。真实 localhost 连接免令牌。HTTP 会明文传输令牌及 SSH 凭据，建议使用 HTTPS 或 SSH 隧道。SSH 凭据不保存。
 
 原有 `vps_ip` 配置继续支持，改用同一后台引擎和本机密钥认证，SSH 期间不占配置锁，探测失败不再自动重装：
 

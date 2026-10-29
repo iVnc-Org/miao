@@ -24,6 +24,11 @@ pub fn build_router(app_state: Arc<AppState>) -> Router {
         .route("/favicon.svg", get(serve_favicon))
         .route("/api/status", get(get_status))
         .route(
+            "/api/vps/access",
+            get(crate::handlers::vps::access)
+                .layer(axum::middleware::from_fn(crate::handlers::vps::no_store)),
+        )
+        .route(
             "/api/vps/preflight",
             post(crate::handlers::vps::preflight)
                 .layer(axum::middleware::from_fn(crate::handlers::vps::no_store)),

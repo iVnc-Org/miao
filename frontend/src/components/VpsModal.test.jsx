@@ -4,7 +4,7 @@ import { expect, it, vi } from 'vitest'
 import { VpsModal } from './VpsModal.jsx'
 import { PrefsProvider, LOCALE_STORAGE_KEY } from '../i18n.jsx'
 
-const controller = () => ({ open: true, close: vi.fn(), jobs: [], token: '', updateToken: vi.fn(), request: vi.fn(), error: '' })
+const controller = () => ({ access: { local: false, token_configured: true, authorized: true }, open: true, close: vi.fn(), jobs: [], token: '', updateToken: vi.fn(), request: vi.fn(), error: '' })
 
 it('requires inspection, blocks unknown services and clears credentials after closing', async () => {
   const vps = controller()
@@ -59,5 +59,32 @@ it('shows English connection results and security requirements', () => {
   vps.jobs = [{ id: 'task', host: '203.0.113.10', stage: 'connectivity_failed', active: false, events: [] }]
   render(<PrefsProvider><VpsModal vps={vps} /></PrefsProvider>)
   expect(screen.getByText('Node saved; connectivity check failed')).toBeInTheDocument()
-  expect(screen.getByText(/Remote access requires HTTPS/)).toBeInTheDocument()
+  expect(screen.getByText(/Remote HTTP\/HTTPS access requires/)).toBeInTheDocument()
+})
+
+for (const auth of ['password', 'private_key', 'local_key']) {
+  it(`allows inspection using ${auth} over remote HTTP with authorized access`, async () => {
+    const vps = controller()
+    vps.request.mockResolvedValue({ action: 'recover' })
+    render(<VpsModal vps={vps} />)
+    fireEvent.change(screen.getByLabelText('VPS 管理地址'), { target: { value: '203.0.113.10' } })
+    fireEvent.change(screen.getByLabelText('SSH 认证'), { target: { value: auth } })
+    if (auth !== 'local_key') fireEvent.change(screen.getByLabelText(auth === 'password' ? 'root 密码' : 'SSH 私钥'), { target: { value: 'secret' } })
+    fireEvent.click(screen.getByRole('button', { name: '检查环境' }))
+    await waitFor(() => expect(vps.request).toHaveBeenCalledWith('preflight', expect.objectContaining({ auth }), expect.any(AbortSignal)))
+    expect(screen.getByText(/当前连接使用 HTTP/)).toBeInTheDocument()
+    expect(screen.getByLabelText('部署访问令牌')).toBeVisible()
+  })
+}
+
+it('explains missing configuration and invalid tokens before inspection, including active tasks', () => {
+  const vps = controller()
+  vps.access = { local: false, token_configured: false, authorized: false }
+  const { rerender } = render(<VpsModal vps={vps} />)
+  expect(screen.getByText(/远程部署尚未启用/)).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: '检查环境' })).toBeDisabled()
+  rerender(<VpsModal vps={{ ...vps, access: { ...vps.access, token_configured: true } }} />)
+  expect(screen.getByText('请填写有效的部署访问令牌后检查环境。')).toBeInTheDocument()
+  rerender(<VpsModal vps={{ ...vps, jobs: [{ active: true, stage: 'checking', host: 'host', events: [] }] }} />)
+  expect(screen.getByLabelText('部署访问令牌')).toBeVisible()
 })
