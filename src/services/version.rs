@@ -20,6 +20,8 @@ use crate::services::singbox::{
 };
 use crate::state::{AppState, VersionCache};
 
+const GITHUB_PROXY_PREFIX: &str = "https://httptunnel.top/gh/";
+
 const RELEASE_REPO: &str = "iVnc-Org/miao";
 const RELEASE_API_URL: &str = "https://api.github.com/repos/iVnc-Org/miao/releases/tags/latest";
 const RELEASE_COMMIT_API_URL: &str = "https://api.github.com/repos/iVnc-Org/miao/commits/latest";
@@ -179,7 +181,7 @@ pub fn start_upgrade(state: Arc<AppState>) -> AppResult<UpgradeStatus> {
 }
 
 async fn accessible_get(client: &reqwest::Client, url: &str) -> AppResult<reqwest::Response> {
-    accessible_get_with_proxy(client, url, "https://sina.dev/").await
+    accessible_get_with_proxy(client, url, GITHUB_PROXY_PREFIX).await
 }
 
 async fn accessible_get_with_proxy(
@@ -188,7 +190,7 @@ async fn accessible_get_with_proxy(
     proxy: &str,
 ) -> AppResult<reqwest::Response> {
     // GET validates the actual resource; many release servers do not implement HEAD reliably.
-    if url.starts_with("https://sina.dev/") {
+    if url.starts_with(proxy) {
         return Ok(client
             .get(url)
             .header("User-Agent", "miao")
@@ -255,7 +257,7 @@ async fn fetch_checksum_hex_retried(client: &reqwest::Client, url: &str) -> AppR
             );
         }
         let attempt_url = if attempt > 0 {
-            format!("https://sina.dev/{url}")
+            format!("{GITHUB_PROXY_PREFIX}{url}")
         } else {
             url.into()
         };
@@ -278,8 +280,8 @@ async fn download_binary_streaming_once(
 ) -> AppResult<()> {
     let response = accessible_get(client, url).await?;
     let source =
-        if response.url().host_str() == Some("sina.dev") || url.starts_with("https://sina.dev/") {
-            "sina.dev"
+        if response.url().host_str() == Some("httptunnel.top") || url.starts_with(GITHUB_PROXY_PREFIX) {
+            "httptunnel.top/gh"
         } else {
             "GitHub"
         };
@@ -392,12 +394,12 @@ async fn download_binary_streaming_retried(
             );
         }
         let attempt_url = if attempt > 0 {
-            format!("https://sina.dev/{url}")
+            format!("{GITHUB_PROXY_PREFIX}{url}")
         } else {
             url.into()
         };
         if attempt > 0 {
-            stage(state, "Retrying binary download via sina.dev")?;
+            stage(state, "Retrying binary download via httptunnel.top/gh")?;
         }
         match download_binary_streaming_once(
             client,
@@ -425,7 +427,7 @@ async fn fetch_release_json<T: serde::de::DeserializeOwned>(
         async { Ok::<T, AppError>(accessible_get(client, url).await?.json::<T>().await?) }.await;
     match first {
         Ok(value) => Ok(value),
-        Err(_) => Ok(accessible_get(client, &format!("https://sina.dev/{url}"))
+        Err(_) => Ok(accessible_get(client, &format!("{GITHUB_PROXY_PREFIX}{url}"))
             .await?
             .json::<T>()
             .await?),
@@ -668,7 +670,7 @@ pub async fn upgrade_binary(state: &Arc<AppState>) -> AppResult<String> {
     })?;
     stage(
         state,
-        "Checking download access and checksum (GitHub, fallback sina.dev)",
+        "Checking download access and checksum (GitHub, fallback httptunnel.top/gh)",
     )?;
     let expected_hex = fetch_checksum_hex_retried(&state.http_client, &checksum_url).await?;
 
@@ -684,7 +686,7 @@ pub async fn upgrade_binary(state: &Arc<AppState>) -> AppResult<String> {
         "starting upgrade download"
     );
 
-    stage(state, "Downloading binary (GitHub, fallback sina.dev)")?;
+    stage(state, "Downloading binary (GitHub, fallback httptunnel.top/gh)")?;
     download_binary_streaming_retried(
         &state.http_client,
         &binary_url,
@@ -877,7 +879,7 @@ mod tests {
         let app = Router::new()
             .route("/binary", get(|| async { StatusCode::FORBIDDEN }))
             .fallback(|uri: axum::http::Uri| async move {
-                if uri.path().starts_with("/proxy/http://127.0.0.1:") {
+                if uri.path().starts_with("/gh/http://127.0.0.1:") {
                     (StatusCode::OK, "proxied binary").into_response()
                 } else {
                     StatusCode::NOT_FOUND.into_response()
@@ -887,7 +889,7 @@ mod tests {
         let response = super::accessible_get_with_proxy(
             &reqwest::Client::new(),
             &format!("{base}/binary"),
-            &format!("{base}/proxy/"),
+            &format!("{base}/gh/"),
         )
         .await
         .unwrap();

@@ -6,11 +6,11 @@ export function UpgradeModal({ upgrade }) {
   const zh = locale === 'zh'
   const labels = {
     'Checking release': '检查最新版本',
-    'Checking download access and checksum (GitHub, fallback sina.dev)': '检查下载地址与校验文件（GitHub 直连失败后使用 sina.dev）',
-    'Downloading binary (GitHub, fallback sina.dev)': '下载程序（GitHub 直连失败后使用 sina.dev）',
+    'Checking download access and checksum (GitHub, fallback httptunnel.top/gh)': '检查下载地址与校验文件（GitHub 直连失败后使用 httptunnel.top/gh）',
+    'Downloading binary (GitHub, fallback httptunnel.top/gh)': '下载程序（GitHub 直连失败后使用 httptunnel.top/gh）',
     'Downloading binary via GitHub': '正在从 GitHub 下载程序',
-    'Downloading binary via sina.dev': '正在通过 sina.dev 下载程序',
-    'Retrying binary download via sina.dev': '正在通过 sina.dev 重试下载',
+    'Downloading binary via httptunnel.top/gh': '正在通过 httptunnel.top/gh 下载程序',
+    'Retrying binary download via httptunnel.top/gh': '正在通过 httptunnel.top/gh 重试下载',
     'Verifying SHA256 and executable version': '校验 SHA256 与程序版本',
     'Backing up and installing binary': '备份并安装新程序',
     'Stopping sing-box': '停止 sing-box',

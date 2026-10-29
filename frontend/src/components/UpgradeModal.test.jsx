@@ -5,8 +5,8 @@ import { TopBar } from './TopBar.jsx'
 
 it('shows progress, history and reconnection while the upgrade is active', () => {
   render(<UpgradeModal upgrade={{ open: true, offline: true, dismiss: vi.fn(), status: {
-    active: true, stage: 'Downloading binary via sina.dev', downloaded: 50, total: 100,
-    events: ['Checking release', 'Downloading binary via sina.dev'],
+    active: true, stage: 'Downloading binary via httptunnel.top/gh', downloaded: 50, total: 100,
+    events: ['Checking release', 'Downloading binary via httptunnel.top/gh'],
   } }} />)
   expect(screen.getByRole('dialog')).toBeInTheDocument()
   expect(screen.getByRole('progressbar')).toHaveAttribute('value', '50')
