@@ -236,8 +236,8 @@ export function PoolTestResultModal({ result, onClose }) {
   )
 }
 
-export function NodeModal({ open, editing, nodeType, setNodeType, form, setForm, loading, onClose, onSubmit }) {
-  const { t } = useI18n()
+export function NodeModal({ open, editing, nodeType, setNodeType, form, setForm, loading, onClose, onSubmit, onDeployVps }) {
+  const { t, locale } = useI18n()
   if (!open) return null
 
   const activeLabel = NODE_TYPE_OPTIONS.find((option) => option.value === nodeType)?.label || nodeType
@@ -275,6 +275,8 @@ export function NodeModal({ open, editing, nodeType, setNodeType, form, setForm,
             <X size={16} />
           </button>
         </div>
+
+        {!editing && onDeployVps && <div className="modal-actions"><Button tone="ghost" onClick={onDeployVps}>{locale === 'zh' ? 'VPS 部署' : 'VPS deployment'}</Button></div>}
 
         <div className="form-grid single">
           <label className="field">

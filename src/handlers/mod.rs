@@ -7,6 +7,7 @@ pub mod static_assets;
 pub mod subs;
 pub mod tun_process;
 pub mod version;
+pub mod vps;
 
 use std::sync::Arc;
 

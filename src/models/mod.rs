@@ -13,8 +13,7 @@ pub use config::{
     DEFAULT_PORT, DEFAULT_SOCKS_LISTEN, DEFAULT_SOCKS_PORT,
 };
 pub use node::{
-    DeleteNodeRequest, Hysteria2, Hysteria2Obfs, ManualNodeInfo, NodeInfo, NodeInventory,
-    NodeRequest, Tls, UpdateNodeRequest,
+    DeleteNodeRequest, ManualNodeInfo, NodeInfo, NodeInventory, NodeRequest, UpdateNodeRequest,
 };
 pub use proxy::LastProxy;
 pub use version::{GitHubAsset, GitHubCommit, GitHubRelease, VersionInfo};

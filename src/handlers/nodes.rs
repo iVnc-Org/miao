@@ -414,6 +414,18 @@ pub async fn add_node(
     }
 }
 
+fn preserve_inline_trust(original: &JsonValue, candidate: &mut JsonValue) {
+    if original["type"] == "hysteria2"
+        && candidate["type"] == "hysteria2"
+        && candidate["tls"]["enabled"] == true
+        && candidate["tls"]["insecure"] != true
+    {
+        if let Some(certificate) = original["tls"].get("certificate") {
+            candidate["tls"]["certificate"] = certificate.clone();
+        }
+    }
+}
+
 pub async fn update_node(
     State(state): State<Arc<AppState>>,
     Json(req): Json<UpdateNodeRequest>,
@@ -430,13 +442,7 @@ pub async fn update_node(
         .map_err(|e| status_error(StatusCode::BAD_REQUEST, e))?;
     let node_type = requested_node_type(&req.node)
         .map_err(|message| status_error(StatusCode::BAD_REQUEST, message))?;
-    let node_value = build_node_value(&req.node, node_type);
-    let node_json = serde_json::to_string(&node_value).map_err(|e| {
-        status_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to serialize node: {}", e),
-        )
-    })?;
+    let mut node_value = build_node_value(&req.node, node_type);
 
     let _config_update = state.config_update.lock().await;
     let was_running = sing_box_is_running(&state).await;
@@ -458,7 +464,13 @@ pub async fn update_node(
         ));
     }
 
-    new_config.nodes[node_index] = node_json;
+    // The form does not expose inline trust certificates. Retain the deployed
+    // certificate when editing a secure Hysteria2 node (e.g. renaming it).
+    if let Ok(original) = serde_json::from_str::<JsonValue>(&old_config.nodes[node_index]) {
+        preserve_inline_trust(&original, &mut node_value);
+    }
+    new_config.nodes[node_index] = serde_json::to_string(&node_value)
+        .map_err(|e| status_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     match apply_persistent_config_change(
         &state,
@@ -776,5 +788,20 @@ mod tests {
         assert_eq!(nodes.len(), 2);
         assert_eq!(nodes[0].tag, "香港节点");
         assert_eq!(nodes[1].tag, "日本サーバー");
+    }
+}
+
+#[cfg(test)]
+mod vps_trust_tests {
+    use super::*;
+    #[test]
+    fn editing_a_deployed_node_retains_its_trust_certificate() {
+        let old = json!({"type":"hysteria2","tls":{"enabled":true,"certificate":["trusted-pem"]}});
+        let mut renamed = json!({"type":"hysteria2","tag":"renamed","tls":{"enabled":true,"insecure":false}});
+        preserve_inline_trust(&old, &mut renamed);
+        assert_eq!(renamed["tls"]["certificate"], json!(["trusted-pem"]));
+        let mut different = json!({"type":"http","tls":{"enabled":true}});
+        preserve_inline_trust(&old, &mut different);
+        assert!(different["tls"].get("certificate").is_none());
     }
 }

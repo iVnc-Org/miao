@@ -1948,3 +1948,6 @@ html[data-embed-mode='true'] .modal-card {
 .subscription-details { margin-top: 6px; font-size: 12px; overflow-wrap: anywhere; }
 .subscription-details summary { cursor: pointer; }
 .subscription-details ul { padding-left: 20px; margin: 6px 0; }
+
+/* Reopen persistent remote deployment tasks from every application screen. */
+.vps-task-status { position: fixed; right: 1rem; bottom: 1rem; z-index: 40; padding: .6rem 1rem; border: 1px solid var(--border); background: var(--surface); color: var(--text-strong); border-radius: var(--radius); cursor: pointer; }

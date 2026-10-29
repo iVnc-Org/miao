@@ -21,6 +21,8 @@ pub struct AppState {
     pub initializing: AtomicBool,
     pub http_client: reqwest::Client,
     pub version_cache: ArcSwap<VersionCache>, // 使用 ArcSwap 实现无锁读取
+    pub shutting_down: AtomicBool,
+    pub vps_active: AtomicBool,
     pub upgrading: AtomicBool,                // 防止并发升级
 }
 
@@ -50,6 +52,8 @@ impl AppState {
                 release: None,
                 fetched_at: None,
             })),
+            shutting_down: AtomicBool::new(false),
+            vps_active: AtomicBool::new(false),
             upgrading: AtomicBool::new(false),
         })
     }

@@ -124,6 +124,9 @@ pub fn watch_upgrade_recovery(state: Arc<AppState>) {
 }
 
 pub fn start_upgrade(state: Arc<AppState>) -> AppResult<UpgradeStatus> {
+    if state.shutting_down.load(Ordering::SeqCst) {
+        return Err(AppError::message("Miao is shutting down"));
+    }
     if state.initializing.load(Ordering::SeqCst) {
         return Err(AppError::message("Service is still initializing"));
     }
@@ -133,6 +136,10 @@ pub fn start_upgrade(state: Arc<AppState>) -> AppResult<UpgradeStatus> {
         .is_err()
     {
         return Err(AppError::message("Upgrade already in progress"));
+    }
+    if state.vps_active.load(Ordering::SeqCst) {
+        state.upgrading.store(false, Ordering::SeqCst);
+        return Err(AppError::message("VPS deployment in progress"));
     }
     let initial = update_status(&state, |s| {
         *s = UpgradeStatus {
@@ -975,5 +982,17 @@ mod tests {
         assert!(!status.active);
         assert!(status.stage.contains("recovery failed"));
         std::fs::remove_file(super::status_path(&state)).unwrap();
+    }
+    #[tokio::test]
+    async fn upgrade_does_not_start_during_vps_deployment() {
+        use super::start_upgrade;
+        use std::sync::atomic::Ordering;
+        let state = crate::test_support::app_state(crate::models::Config::default());
+        state.initializing.store(false, Ordering::SeqCst);
+        state.vps_active.store(true, Ordering::SeqCst);
+        let error = start_upgrade(state.clone())
+            .err().expect("deployment must block upgrade");
+        assert!(error.to_string().contains("VPS deployment"));
+        assert!(!state.upgrading.load(Ordering::SeqCst));
     }
 }

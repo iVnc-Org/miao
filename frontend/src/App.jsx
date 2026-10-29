@@ -1,3 +1,5 @@
+import { useVps } from './hooks/useVps.js'
+import { VpsModal, VpsStatus } from './components/VpsModal.jsx'
 import { useUpgrade } from './hooks/useUpgrade.js'
 import { UpgradeModal } from './components/UpgradeModal.jsx'
 import { useEffect, useMemo, useState, useCallback } from 'react'
@@ -66,6 +68,7 @@ export default function App() {
   const [firstLoadDone, setFirstLoadDone] = useState(false)
   const [loadingAction, setLoadingAction] = useState('')
   const upgrade = useUpgrade()
+  const vps = useVps()
   const upgrading = Boolean(upgrade.status?.active)
   const [checkingVersion, setCheckingVersion] = useState(false)
   const [nodeForm, setNodeForm] = useState(EMPTY_NODE_FORM)
@@ -721,12 +724,12 @@ export default function App() {
   }, [openConfirm, handleDeleteSubscription, t])
 
   if (!firstLoadDone) {
-    return <div className="shell"><UpgradeModal upgrade={upgrade} /><div className="onboarding-loading">{t('app.loading')}</div></div>
+    return <div className="shell"><UpgradeModal upgrade={upgrade} /><VpsModal vps={vps} /><VpsStatus vps={vps} /><div className="onboarding-loading">{t('app.loading')}</div></div>
   }
 
   if (needsOnboarding) {
     return (
-      <div className="shell"><UpgradeModal upgrade={upgrade} />
+      <div className="shell"><UpgradeModal upgrade={upgrade} /><VpsModal vps={vps} /><VpsStatus vps={vps} />
         <OnboardingScreen
           onAddSub={handleAddSubscription}
           loadingAction={loadingAction}
@@ -743,6 +746,7 @@ export default function App() {
           loading={loadingAction === 'addNode' || loadingAction === 'updateNode'}
           onClose={handleCloseNodeModal}
           onSubmit={handleSaveNode}
+          onDeployVps={() => { setShowNodeModal(false); vps.setOpen(true) }}
         />
       </div>
     )
@@ -751,7 +755,7 @@ export default function App() {
   const displayedProxyMode = modeSetup || status.mode
 
   return (
-    <div className="shell"><UpgradeModal upgrade={upgrade} />
+    <div className="shell"><UpgradeModal upgrade={upgrade} /><VpsModal vps={vps} /><VpsStatus vps={vps} />
       <TopBar
         status={status}
         versionInfo={versionInfo}
@@ -854,6 +858,7 @@ export default function App() {
         loading={loadingAction === 'addNode' || loadingAction === 'updateNode'}
         onClose={handleCloseNodeModal}
         onSubmit={handleSaveNode}
+          onDeployVps={() => { setShowNodeModal(false); vps.setOpen(true) }}
       />
 
       <ConnectionsModal

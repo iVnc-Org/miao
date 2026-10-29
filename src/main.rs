@@ -28,7 +28,6 @@ use services::{
     runtime::{load_runtime_state, save_running_state},
     singbox::{extract_sing_box, start_sing_internal, stop_sing_internal},
     sub_nodes::hydrate_sub_status,
-    vps::ensure_vps_hysteria_node,
 };
 use state::AppState;
 
@@ -390,24 +389,9 @@ async fn main() -> AppResult<()> {
 
     // Background: generate config, check dependencies, and start sing-box
     tokio::spawn(async move {
-        let mut config = config;
-
-        // 监听端口在 spawn 之前就已经绑定，面板在整个初始化窗口内都在接请求
-        // （VPS 探测 + 订阅抓取都可能是几十秒）。这里持锁是为了和 /api/subs、
-        // /api/nodes、/api/share 等 handler 的配置写入/生成串行化，
-        // 否则 ensure_vps_hysteria_node 收尾时的整份写回会盖掉用户刚提交的修改。
         let config_update = state_for_init.config_update.lock().await;
-
-        match ensure_vps_hysteria_node(&mut config, &state_for_init.config_path).await {
-            Ok(_) => {
-                *state_for_init.config.write().await = config.clone();
-            }
-            Err(e) => {
-                error!(error = %e, "Failed to provision VPS from vps_ip");
-                *state_for_init.config_warning.lock().await =
-                    Some(format!("VPS 自动部署失败: {}", e));
-            }
-        }
+        // Remote provisioning runs separately and commits against the latest config.
+        let config = state_for_init.config.read().await.clone();
 
         // 用本地缓存回填订阅状态。必须在下面两个提前返回之前做——服务处于停止
         // 状态时恰恰最需要它，否则面板上订阅节点数会是 0。
@@ -504,10 +488,21 @@ async fn main() -> AppResult<()> {
             .store(false, std::sync::atomic::Ordering::Relaxed);
     });
 
+    services::vps::recover_jobs(&app_state).await;
+    let vps_state = app_state.clone();
+    tokio::spawn(async move {
+        while vps_state.initializing.load(std::sync::atomic::Ordering::Relaxed) {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+        services::vps::initialize_legacy(vps_state).await;
+    });
     let state_for_shutdown = app_state.clone();
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(state_for_shutdown))
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal(state_for_shutdown))
+    .await?;
     Ok(())
 }
 
@@ -522,6 +517,8 @@ async fn shutdown_signal(state: Arc<AppState>) {
         _ = sigterm.recv() => {}
     }
 
+    state.shutting_down.store(true, std::sync::atomic::Ordering::SeqCst);
+    let _config_update = state.config_update.lock().await;
     info!("Shutting down, stopping sing-box...");
     stop_sing_internal(&state).await;
 }

@@ -175,22 +175,16 @@ miao 会把成功解析的订阅节点持久化到 `$HOME/.miao/sub_nodes.json`�
 
 ## 实验性功能
 
-### 自动初始化 Hysteria2 VPS
+### VPS 部署与恢复
 
-如果你有一台全新的 VPS，并且当前运行 Miao 的 root 环境可以通过 SSH 私钥免交互登录 `root@<vps_ip>`，可以在当前配置文件中添加：
+“添加节点 → VPS 部署”支持通过 SSH 安装 Hysteria2、恢复已有 Miao 节点或迁移旧部署。支持密码/密钥认证、自定义 SSH 和节点端口、IPv6/私网/NAT 映射；进度持久化，刷新后恢复弹窗。未知部署默认保护，安装失败执行事务回滚，新节点固定信任证书。
+
+默认放行 SSH 22/TCP 与 Hysteria2 543/UDP；安全组和防火墙不会自动修改。部署入口默认只允许 localhost，远程访问需 HTTPS 与服务端 `MIAO_VPS_TOKEN`（至少 32 字符）。SSH 凭据不保存。
+
+原有 `vps_ip` 配置继续支持，改用同一后台引擎和本机密钥认证，SSH 期间不占配置锁，探测失败不再自动重装：
 
 ```yaml
 vps_ip: "203.0.113.10"
 ```
 
-启动时，Miao 会检查 `nodes` 中是否已经存在 `server` 相同的手动节点。不存在时，它会通过 SSH 在该 VPS 上安装 Hysteria2，写入 `/etc/hysteria/config.yaml`，使用 543 端口、自签名证书、随机密码和 Gecko 混淆，然后重启 `hysteria-server.service`。部署成功后，Miao 会把对应的 Hysteria2 手动节点写回解析到的本地配置文件。
-
-如果 `vps_ip` 仍保留，但本地对应的手动节点被删除，Miao 会先尝试通过 SSH 读取远端已有的 `/etc/hysteria/config.yaml` 并恢复本地节点；如果远端配置缺少 Gecko 混淆，Miao 会补写后再恢复本地节点。只有远端没有可复用配置时才重新初始化。
-
-运行前建议先确认：
-
-```bash
-sudo ssh -o BatchMode=yes root@203.0.113.10 true
-```
-
-如果这条命令失败，自动初始化也会失败。使用 root 运行 Miao 时，SSH 使用的是 `/root/.ssh` 下的密钥和配置。
+详细前提、网络配置、失败恢复、访问控制和测试说明见 [VPS 部署文档](docs/vps-deployment.md)。
