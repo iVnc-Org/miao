@@ -86,9 +86,13 @@ pub async fn switch_proxy(
     Path(group): Path<String>,
     axum::extract::Json(body): axum::extract::Json<serde_json::Value>,
 ) -> Response<Body> {
+    state
+        .startup_cancelled
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let _config_update = state.config_update.lock().await;
     let selected_name = selected_proxy_name(&body).map(str::to_string);
     let path = format!("/proxies/{}", urlencoding::encode(&group));
-    let response = clash_request(state, Method::PUT, &path, Some(body)).await;
+    let response = clash_request(state.clone(), Method::PUT, &path, Some(body)).await;
 
     if response.status().is_success() {
         if let Some(name) = selected_name {

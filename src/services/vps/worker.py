@@ -11,6 +11,7 @@ from pathlib import Path
 import platform
 import secrets
 import signal
+import stat
 import shutil
 import subprocess
 import sys
@@ -25,6 +26,7 @@ RC = Path('/etc/init.d/hysteria-server')
 LOGROTATE = Path('/etc/logrotate.d/miao-hysteria')
 VERSION = 'v2.12.1'
 SERVICE = 'hysteria-server'
+LOCK_WAIT_SECONDS = 120
 
 
 def run(args, timeout=60, check=True):
@@ -261,14 +263,82 @@ def restore(task, journal):
         raise error
 
 
-def execute(req, task, reconcile=False):
-    def stage(value, **extra):
-        atomic(task / 'status.json', {'stage': value, 'updated': int(time.time()), **extra})
-    with open(ROOT / 'deploy.lock', 'a') as lock:
+def publish_status(task, value, **extra):
+    # Preserve short-lived phases between SSH polls. Never retain node secrets or
+    # subprocess output in the progress history.
+    previous = {}
+    with contextlib.suppress(OSError, ValueError):
+        previous = json.loads((task / 'status.json').read_text())
+    if not isinstance(previous, dict):
+        previous = {}
+    history = previous.get('phase_history', [previous['stage']] if previous.get('stage') else [])
+    if not isinstance(history, list):
+        history = []
+    history = [phase for phase in history if isinstance(phase, str) and phase.replace('_', '').isascii()
+               and phase.replace('_', '').isalpha()]
+    offset = previous.get('phase_history_start', 0)
+    if not isinstance(offset, int) or offset < 0:
+        offset = 0
+    if not history or history[-1] != value:
+        history.append(value)
+    offset += max(0, len(history) - 100)
+    history = history[-100:]
+    progress = {key: previous[key] for key in ('downloaded', 'total', 'source') if key in previous}
+    atomic(task / 'status.json', {'stage': value, 'updated': int(time.time()),
+                                 'phase_history': history, 'phase_history_start': offset, **progress, **extra})
+
+
+def deployment_lock():
+    # Never follow a lock symlink or replace its inode: every Miao must lock
+    # the same root-owned file, including read-only preflight inspections.
+    fd = os.open(ROOT / 'deploy.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    lock = os.fdopen(fd, 'r+')
+    st = os.fstat(lock.fileno())
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != 0 or st.st_mode & 0o022:
+        lock.close()
+        raise RuntimeError('unsafe_permissions')
+    return lock
+
+
+def preflight(req):
+    if os.geteuid() != 0 or platform.system() != 'Linux':
+        raise RuntimeError('requires_root_linux')
+    if not ROOT.exists():
+        # No managed files can be activated until ROOT and its lock exist.
+        ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if ROOT.is_symlink() or ROOT.stat().st_uid != 0 or ROOT.stat().st_mode & 0o022:
+        raise RuntimeError('unsafe_permissions')
+    with deployment_lock() as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return {'action': 'busy'}
+        info, _ = inspect(req)
+        return info
+
+
+def wait_for_deployment_lock(lock, stage):
+    deadline = time.monotonic() + LOCK_WAIT_SECONDS
+    waiting = False
+    while True:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
         except BlockingIOError:
-            raise RuntimeError('host_deployment_busy')
+            if not waiting:
+                stage('waiting_for_deployment')
+                waiting = True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError('host_deployment_busy_timeout')
+            time.sleep(min(1, remaining))
+
+
+def execute(req, task, reconcile=False):
+    def stage(value, **extra):
+        publish_status(task, value, **extra)
+    with deployment_lock() as lock:
+        wait_for_deployment_lock(lock, stage)
         # Repair an interrupted previous activation before allowing new work.
         for journal_path in sorted((ROOT / 'tasks').glob('*/journal.json')):
             old = json.loads(journal_path.read_text())
@@ -278,7 +348,7 @@ def execute(req, task, reconcile=False):
                 restore(journal_path.parent, old)
                 old['phase'] = 'rolled_back'
                 atomic(journal_path, old)
-                atomic(journal_path.parent / 'status.json', {'stage': 'rolled_back'})
+                publish_status(journal_path.parent, 'rolled_back')
                 if journal_path.parent == task:
                     return
         stage('checking')
@@ -287,6 +357,8 @@ def execute(req, task, reconcile=False):
         deployment_id = (json.loads((ROOT / 'deployment.json').read_text()).get('id')
                          if (ROOT / 'deployment.json').exists() else secrets.token_hex(16))
         if config and info['action'] != 'migrate':
+            if info['action'] == 'recover':
+                stage('recovering_existing')
             if info['action'] == 'repair':
                 stage('repairing')
                 # No config rewrite and no credential rotation for repair.
@@ -446,7 +518,7 @@ def main():
         signal.signal(signal.SIGINT, interrupted)
     if sys.argv[1] == 'inspect':
         try:
-            info, _ = inspect(req)
+            info = preflight(req)
             print(json.dumps(info))
         except ImportError:
             print(json.dumps({'action': 'dependencies_required'}))
@@ -463,11 +535,11 @@ def main():
         journal_path = task / 'journal.json'
         healthy = journal_path.exists() and json.loads(journal_path.read_text()).get('phase') == 'healthy'
         if healthy and current.get('stage') != 'remote_ready':
-            atomic(task / 'status.json', {'stage': 'unknown'})
+            publish_status(task, 'unknown')
         elif current.get('stage') not in ('rolled_back', 'recovery_required', 'remote_ready'):
             # Only expose fixed error codes, never subprocess stderr or config data.
             code = str(exc) if isinstance(exc, RuntimeError) else type(exc).__name__
-            atomic(task / 'status.json', {'stage': 'error', 'error': code})
+            publish_status(task, 'error', error=code)
         if current.get('stage') != 'recovery_required' and not healthy:
             with contextlib.suppress(OSError):
                 for artifact in ('binary', 'hashes.txt', 'config'):

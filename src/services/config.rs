@@ -264,10 +264,9 @@ pub async fn regenerate_and_restart(
 pub async fn finalize_started_config(config: &Config, state: &Arc<AppState>, outcome: &GenOutcome) {
     update_config_warning(config, state, outcome).await;
 
-    let state_for_proxy = state.clone();
-    tokio::spawn(async move {
-        restore_last_proxy(&state_for_proxy).await;
-    });
+    // Restore under the configuration lock so a delayed task cannot
+    // overwrite a newer CLI or web node selection.
+    restore_last_proxy(state).await;
 }
 
 async fn update_config_warning(config: &Config, state: &Arc<AppState>, outcome: &GenOutcome) {
@@ -1734,6 +1733,7 @@ mod tests {
             };
             let mut built = build_sing_box_config(&config, vec!["test-node".into()],
                 vec![json!({"type":"socks","tag":"test-node","server":"127.0.0.1","server_port":1080})], vec![], vec![]).unwrap();
+            crate::services::startup::pin_selector(&mut built, "test-node").unwrap();
             for rule in built["route"]["rule_set"].as_array_mut().unwrap() {
                 let filename = if rule["tag"] == "chinaip" {
                     "geoip-cn.srs"

@@ -167,16 +167,27 @@ fn write_password(
     result
 }
 use std::os::unix::fs::DirBuilderExt;
-/// Internal upgrade exec must not replay an old startup password after a web change.
+/// Internal upgrade exec restores persisted state, never replaying one-shot CLI intent or secrets.
 pub fn restart_args(args: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut result = Vec::new();
     let mut args = args.into_iter().skip(1);
     while let Some(arg) = args.next() {
-        if arg == "--password" {
+        let transient = [
+            "--password",
+            "--mode",
+            "--vps-host",
+            "--vps-ssh-port",
+            "--vps-password",
+        ];
+        if transient.contains(&arg.as_str()) {
             args.next();
             continue;
         }
-        if arg.starts_with("--password=") {
+        if arg == "--no-start"
+            || transient
+                .iter()
+                .any(|key| arg.starts_with(&format!("{key}=")))
+        {
             continue;
         }
         let has_value = ["--config", "--socks-port", "--socks-listen"].contains(&arg.as_str());
@@ -1030,6 +1041,29 @@ mod tests {
             vec!["--config", "--password=filename", "--socks-port", "1080"]
         );
     }
+    #[test]
+    fn internal_restart_does_not_replay_cli_deployment_or_mode_intent() {
+        let args = [
+            "miao",
+            "--config",
+            "--mode=filename",
+            "--mode",
+            "global",
+            "--vps-host=example.com",
+            "--vps-ssh-port",
+            "22",
+            "--vps-password",
+            "--no-start",
+            "--password=secret",
+            "--no-start",
+            "--socks-port=1080",
+        ];
+        assert_eq!(
+            restart_args(args.map(String::from)),
+            vec!["--config", "--mode=filename", "--socks-port=1080"]
+        );
+    }
+
     #[test]
     fn concurrent_writers_preserve_atomic_valid_credentials() {
         let state = state();

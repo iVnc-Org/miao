@@ -90,3 +90,33 @@ it('keeps deployment details hidden until requested and does not ask for a separ
   fireEvent.focus(help)
   expect(help).toHaveAttribute('aria-describedby', screen.getByRole('tooltip').id)
 })
+
+for (const [stage, label] of [
+  ['inspecting', '检查 SSH 和远程环境'],
+  ['waiting_for_deployment', '其他 Miao 正在部署，最多等待 120 秒后重新检查'],
+  ['recovering_existing', '复用已有节点，保留密码和证书，不重启服务'],
+  ['proxy_starting', '启用全局代理并选择节点'],
+  ['proxy_ready', '全局代理已启用，连接验证通过'],
+  ['proxy_failed', '节点已保存，代理启用失败'],
+  ['activation_cancelled', '自动启用已取消，节点保留'],
+]) {
+  it(`shows CLI deployment activation stage ${stage}`, () => {
+    const vps = controller()
+    vps.jobs = [{ id: 'cli-task', host: '203.0.113.10', active: stage === 'proxy_starting', stage, events: [] }]
+    render(<VpsModal vps={vps} />)
+    expect(screen.getByText(label)).toBeInTheDocument()
+    expect(screen.queryByText(stage)).not.toBeInTheDocument()
+  })
+}
+
+it('allows a busy deployment to wait remotely instead of treating it as a blocked service', async () => {
+  const vps = controller()
+  vps.request.mockResolvedValueOnce({ action: 'busy' }).mockResolvedValueOnce({ id: 'task' })
+  render(<VpsModal vps={vps} />)
+  fireEvent.change(screen.getByLabelText('VPS 管理地址'), { target: { value: '203.0.113.10' } })
+  fireEvent.change(screen.getByLabelText('SSH 认证'), { target: { value: 'local_key' } })
+  fireEvent.click(screen.getByRole('button', { name: '检查环境' }))
+  expect(await screen.findByText(/其他 Miao 正在部署；执行后最多等待 120 秒/)).toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: '按检查结果执行' }))
+  await waitFor(() => expect(vps.request).toHaveBeenCalledWith('deployments', expect.any(Object), expect.any(AbortSignal)))
+})

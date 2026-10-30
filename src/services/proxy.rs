@@ -21,10 +21,17 @@ fn get_legacy_last_proxy_path() -> PathBuf {
 pub async fn save_last_proxy(proxy: &LastProxy) -> AppResult<()> {
     let json = serde_json::to_string(proxy)?;
     let path = get_last_proxy_path();
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
+    super::write_file_atomic(&path, &json, "last proxy selection").await
+}
+
+pub async fn clear_last_proxy() -> AppResult<()> {
+    for path in [get_last_proxy_path(), get_legacy_last_proxy_path()] {
+        match tokio::fs::remove_file(path).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
     }
-    tokio::fs::write(path, json).await?;
     Ok(())
 }
 

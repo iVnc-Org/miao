@@ -125,6 +125,8 @@ pub struct Job {
     pub total: u64,
     #[serde(default)]
     pub source: String,
+    #[serde(default)]
+    pub remote_history_count: u64,
 }
 fn directory(state: &AppState) -> PathBuf {
     state.config_path.with_extension("vps")
@@ -170,12 +172,20 @@ async fn save(state: &AppState, job: &Job) -> AppResult<()> {
     file.write_all(&serde_json::to_vec(job)?)?;
     file.sync_all()?;
     std::fs::rename(temp, path)?;
+    std::fs::File::open(&dir)?.sync_all()?;
+    let _ = state.vps_progress.send(job.clone());
     Ok(())
 }
 pub async fn jobs(state: &AppState) -> AppResult<Vec<Job>> {
     let mut jobs = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(directory(state)) {
-        for entry in entries.flatten() {
+    let entries = match std::fs::read_dir(directory(state)) {
+        Ok(entries) => Some(entries),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    if let Some(entries) = entries {
+        for entry in entries {
+            let entry = entry?;
             if entry.path().extension().is_some_and(|v| v == "json") {
                 jobs.push(serde_json::from_slice::<Job>(&std::fs::read(
                     entry.path(),
@@ -384,14 +394,56 @@ pub async fn start(state: Arc<AppState>, mut req: Connection) -> AppResult<Job> 
 async fn stage(state: &AppState, job: &mut Job, value: &str) -> AppResult<()> {
     if job.stage != value {
         job.stage = value.into();
-        job.events.push(value.into());
-        if job.events.len() > 100 {
-            job.events.remove(0);
+        if job.events.last().map(String::as_str) != Some(value) {
+            job.events.push(value.into());
         }
+        let excess = job.events.len().saturating_sub(100);
+        job.events.drain(..excess);
         save(state, job).await?;
     }
     Ok(())
 }
+/// Publish CLI activation through the same persisted task seen by the web UI.
+pub(super) async fn activation_stage(
+    state: &AppState,
+    job: &mut Job,
+    value: &str,
+) -> AppResult<()> {
+    stage(state, job, value).await
+}
+
+fn merge_remote_history(job: &mut Job, value: &Value) -> bool {
+    let Some(history) = value["phase_history"]
+        .as_array()
+        .filter(|items| items.len() <= 100)
+    else {
+        return false;
+    };
+    let start = value["phase_history_start"].as_u64().unwrap_or(0);
+    let count = start.saturating_add(history.len() as u64);
+    if count <= job.remote_history_count {
+        return false;
+    }
+    for item in history
+        .iter()
+        .skip(job.remote_history_count.saturating_sub(start).min(100) as usize)
+    {
+        if let Some(phase) = item.as_str().filter(|phase| {
+            !phase.is_empty()
+                && phase.len() <= 64
+                && phase.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+        }) {
+            if job.events.last().map(String::as_str) != Some(phase) {
+                job.events.push(phase.into());
+            }
+        }
+    }
+    job.remote_history_count = count;
+    let excess = job.events.len().saturating_sub(100);
+    job.events.drain(..excess);
+    true
+}
+
 async fn run_job(
     state: &Arc<AppState>,
     req: &Connection,
@@ -399,6 +451,7 @@ async fn run_job(
     resume: bool,
 ) -> AppResult<()> {
     if !resume {
+        stage(state, job, "inspecting").await?;
         let report = match preflight(req.clone()).await {
             Ok(report) => report,
             Err(error) => {
@@ -425,7 +478,9 @@ async fn run_job(
         .await?;
         let value: Value = serde_json::from_slice(&data)?;
         let status = value["stage"].as_str().unwrap_or("unknown");
-        if status == "downloading" {
+        let history_changed = merge_remote_history(job, &value);
+        let progress_changed = value["downloaded"].is_u64();
+        if progress_changed {
             job.downloaded = value["downloaded"].as_u64().unwrap_or(0);
             job.total = value["total"].as_u64().unwrap_or(0);
             job.source = if value["source"] == "proxy" {
@@ -434,9 +489,11 @@ async fn run_job(
                 "direct"
             }
             .into();
-            save(state, job).await?;
         }
         stage(state, job, status).await?;
+        if history_changed || progress_changed {
+            save(state, job).await?;
+        }
         match status {
             "remote_ready" => {
                 let node = value
@@ -642,7 +699,7 @@ impl Drop for PrivateDirectory {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
-async fn verify_node(node: &Value) -> AppResult<()> {
+pub(super) async fn verify_node(node: &Value) -> AppResult<()> {
     use std::io::Write;
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
     // Isolated core never changes the user's active proxy selection.
@@ -753,6 +810,63 @@ mod tests {
             ..Default::default()
         }
     }
+    #[tokio::test]
+    async fn task_storage_errors_are_not_treated_as_a_fresh_installation() {
+        let state = crate::test_support::app_state(crate::models::Config::default());
+        let path = directory(&state);
+        let _ = std::fs::remove_file(&path);
+        assert!(jobs(&state).await.unwrap().is_empty());
+        std::fs::write(&path, "not a directory").unwrap();
+        assert!(jobs(&state).await.is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn progress_notifications_follow_persisted_snapshots_without_duplicate_phases() {
+        let state = crate::test_support::app_state(crate::models::Config::default());
+        let mut receiver = state.vps_progress.subscribe();
+        let mut job = Job {
+            id: "a".repeat(48),
+            active: true,
+            stage: "starting".into(),
+            events: vec!["remote_ready".into()],
+            ..Default::default()
+        };
+        stage(&state, &mut job, "remote_ready").await.unwrap();
+        assert_eq!(job.events, ["remote_ready"]);
+        assert_eq!(receiver.try_recv().unwrap().stage, "remote_ready");
+        assert_eq!(jobs(&state).await.unwrap()[0].stage, "remote_ready");
+        std::fs::remove_dir_all(directory(&state)).unwrap();
+    }
+
+    #[test]
+    fn remote_history_recovers_short_phases_once_and_supports_trimmed_offsets() {
+        let mut job = Job::default();
+        let value = json!({"phase_history":["checking", "downloading", "verifying_download", "remote_ready"]});
+        assert!(merge_remote_history(&mut job, &value));
+        assert_eq!(
+            job.events,
+            [
+                "checking",
+                "downloading",
+                "verifying_download",
+                "remote_ready"
+            ]
+        );
+        assert!(!merge_remote_history(&mut job, &value));
+        let value = json!({"phase_history_start":3,"phase_history":["remote_ready","checking","remote_ready"]});
+        assert!(merge_remote_history(&mut job, &value));
+        assert_eq!(job.remote_history_count, 6);
+        assert_eq!(job.events.len(), 6);
+        let value = json!({"phase_history_start":6,"phase_history":["password=secret", "bad\nphase", "checking"]});
+        merge_remote_history(&mut job, &value);
+        assert_eq!(job.events.last().unwrap(), "checking");
+        assert!(!job
+            .events
+            .iter()
+            .any(|event| event.contains("secret") || event.contains('\n')));
+    }
+
     #[test]
     fn validates_targets_and_keeps_credentials_out_of_payloads() {
         let mut req = request();

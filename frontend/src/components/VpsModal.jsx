@@ -5,6 +5,13 @@ import { useI18n } from '../i18n.jsx'
 import { Button } from './ui.jsx'
 
 const PHASES = {
+  waiting_for_deployment: ['其他 Miao 正在部署，最多等待 120 秒后重新检查', 'Another Miao is deploying; wait up to 120 seconds, then recheck'],
+  recovering_existing: ['复用已有节点，保留密码和证书，不重启服务', 'Reuse existing node and credentials without restarting'],
+  inspecting: ['检查 SSH 和远程环境', 'Checking SSH and remote environment'],
+  proxy_starting: ['启用全局代理并选择节点', 'Starting global proxy and selecting node'],
+  proxy_ready: ['全局代理已启用，连接验证通过', 'Global proxy enabled; connectivity verified'],
+  proxy_failed: ['节点已保存，代理启用失败', 'Node saved; proxy activation failed'],
+  activation_cancelled: ['自动启用已取消，节点保留', 'Automatic activation cancelled; node retained'],
   installing_dependencies: ['安装缺失依赖', 'Installing missing prerequisites'], starting: ['准备部署', 'Preparing deployment'], reconnecting: ['重新核查远端', 'Inspecting remote task'],
   checking: ['检查远端', 'Checking remote host'], downloading: ['下载 Hysteria2', 'Downloading Hysteria2'],
   verifying_download: ['校验下载', 'Verifying download'], preparing: ['准备配置和证书', 'Preparing configuration and certificate'],
@@ -128,7 +135,7 @@ export function VpsModal({ vps }) {
         </div>
       </details>
       <p className="vps-compact-note">{text('需开放 SSH TCP 和节点 UDP 端口', 'Allow SSH TCP and node UDP ports')} <Help label={text('网络要求说明', 'About network requirements')}>{text('安全组、防火墙及 NAT 映射不会自动修改。默认 SSH 22/TCP、节点 543/UDP，可在高级设置修改。无公网 IP 时须有私网/VPN 互通或 UDP 映射。', 'Security groups, firewalls and NAT mappings are not changed. Defaults: SSH 22/TCP and node 543/UDP; customize in advanced settings. Private VPS requires private/VPN connectivity or UDP mapping.')}</Help></p>
-      {report && <p role="status">{text('检查结果：', 'Inspection: ')}{({ install: text('可全新安装', 'Ready to install'), recover: text('恢复已有节点，不重启服务', 'Recover existing node without restarting'), repair: text('修复已有服务，将重启服务', 'Repair existing service; service will restart'), migrate: text('迁移旧部署的证书和内核，保留密码和混淆，将重启服务', 'Migrate legacy certificate and binary; preserve credentials and obfs; restart service'), dependencies_required: text('需安装依赖后进一步检查，未知部署仍会被保护', 'Dependencies required before further inspection; unknown deployments remain protected'), blocked: text('检查未通过：', 'Blocked: ') + (report.error || '') })[report.action] || report.action}</p>}
+      {report && <p role="status">{text('检查结果：', 'Inspection: ')}{({ busy: text('其他 Miao 正在部署；执行后最多等待 120 秒，再检查并复用节点', 'Another Miao is deploying; execute to wait up to 120 seconds, then recheck and reuse the node'), install: text('可全新安装', 'Ready to install'), recover: text('恢复已有节点，不重启服务', 'Recover existing node without restarting'), repair: text('修复已有服务，将重启服务', 'Repair existing service; service will restart'), migrate: text('迁移旧部署的证书和内核，保留密码和混淆，将重启服务', 'Migrate legacy certificate and binary; preserve credentials and obfs; restart service'), dependencies_required: text('需安装依赖后进一步检查，未知部署仍会被保护', 'Dependencies required before further inspection; unknown deployments remain protected'), blocked: text('检查未通过：', 'Blocked: ') + (report.error || '') })[report.action] || report.action}</p>}
       {error && <p role="alert">{error}</p>}
       <div className="modal-actions"><Button disabled={busy || !form.host || (form.auth !== 'local_key' && !form.secret)} onClick={() => execute(false)}>{busy ? text('处理中…', 'Working…') : text('检查环境', 'Inspect')}</Button>
         <Button tone="primary" disabled={busy || (!resume && (!report || report.action === 'blocked')) || !form.host || (form.auth !== 'local_key' && !form.secret)} onClick={() => execute(true)}>{resume ? text('核查远端任务', 'Inspect remote task') : text('按检查结果执行', 'Execute inspected action')}</Button>

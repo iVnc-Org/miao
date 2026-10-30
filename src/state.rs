@@ -24,6 +24,9 @@ pub struct AppState {
     pub version_cache: ArcSwap<VersionCache>, // 使用 ArcSwap 实现无锁读取
     pub shutting_down: AtomicBool,
     pub vps_active: AtomicBool,
+    /// A web action supersedes this process's one-time CLI startup intent.
+    pub startup_cancelled: AtomicBool,
+    pub vps_progress: tokio::sync::broadcast::Sender<crate::services::vps::Job>,
     pub upgrading: AtomicBool, // 防止并发升级
     pub upgrade_attempt: AtomicU64,
     /// `Some(attempt)` asks that attempt to stop before installation.
@@ -59,6 +62,8 @@ impl AppState {
             })),
             shutting_down: AtomicBool::new(false),
             vps_active: AtomicBool::new(false),
+            startup_cancelled: AtomicBool::new(false),
+            vps_progress: tokio::sync::broadcast::channel(128).0,
             upgrading: AtomicBool::new(false),
             upgrade_attempt: AtomicU64::new(0),
             upgrade_cancel: StdMutex::new(None),

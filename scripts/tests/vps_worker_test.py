@@ -134,6 +134,29 @@ class DeploymentTests(unittest.TestCase):
     def status(self):
         return json.loads((self.task / 'status.json').read_text())
 
+    def test_progress_preserves_fast_phases_and_download_without_secret_history(self):
+        w.publish_status(self.task, 'checking')
+        w.publish_status(self.task, 'downloading', downloaded=4096, total=4096, source='direct')
+        w.publish_status(self.task, 'verifying_download')
+        w.publish_status(self.task, 'remote_ready', node={'password': 'never-copy-to-history'})
+        value = json.loads((self.task / 'status.json').read_text())
+        self.assertEqual(value['phase_history'], ['checking', 'downloading', 'verifying_download', 'remote_ready'])
+        self.assertEqual(value['downloaded'], 4096)
+        self.assertNotIn('never-copy-to-history', json.dumps(value['phase_history']))
+        w.publish_status(self.task, 'checking')
+        self.assertNotIn('node', json.loads((self.task / 'status.json').read_text()))
+
+    def test_progress_is_bounded_with_stable_offsets_and_no_duplicate_phase(self):
+        for i in range(110):
+            w.publish_status(self.task, 'checking' if i % 2 == 0 else 'downloading')
+        value = json.loads((self.task / 'status.json').read_text())
+        self.assertEqual(len(value['phase_history']), 100)
+        self.assertEqual(value['phase_history_start'], 10)
+        w.publish_status(self.task, 'downloading', downloaded=2048)
+        repeated = json.loads((self.task / 'status.json').read_text())
+        self.assertEqual(repeated['phase_history_start'], 10)
+        self.assertEqual(repeated['phase_history'], value['phase_history'])
+
     def test_new_install_uses_nat_port_and_secure_node(self):
         w.execute(self.req, self.task)
         self.assertEqual(self.status()['stage'], 'remote_ready')
@@ -148,6 +171,7 @@ class DeploymentTests(unittest.TestCase):
         before = (w.CONFIG / 'config.yaml').read_bytes()
         w.execute(self.req, self.task)
         self.assertEqual(self.restarts, 0)
+        self.assertIn('recovering_existing', self.status()['phase_history'])
         self.assertEqual((w.CONFIG / 'config.yaml').read_bytes(), before)
         self.assertEqual(self.status()['node']['password'], config['auth']['password'])
 
@@ -270,7 +294,42 @@ class DeploymentTests(unittest.TestCase):
         import fcntl
         with open(w.ROOT / 'deploy.lock', 'a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            with self.assertRaisesRegex(RuntimeError, 'busy'): w.execute(self.req, self.task)
+            with patch.object(w, 'LOCK_WAIT_SECONDS', 0):
+                with self.assertRaisesRegex(RuntimeError, 'host_deployment_busy_timeout'):
+                    w.execute(self.req, self.task)
+            self.assertEqual(self.status()['stage'], 'waiting_for_deployment')
+            self.assertFalse(w.CONFIG.exists())
+            self.assertEqual(w.preflight(self.req), {'action': 'busy'})
+
+    def test_waiting_client_rechecks_and_recovers_completed_deployment(self):
+        import fcntl
+        with w.deployment_lock() as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            def finish_first_deployment(_seconds):
+                self.existing()
+                fcntl.flock(lock, fcntl.LOCK_UN)
+            with patch.object(w.time, 'sleep', side_effect=finish_first_deployment):
+                w.execute(self.req, self.task)
+        self.assertEqual(self.status()['stage'], 'remote_ready')
+        self.assertIn('waiting_for_deployment', self.status()['phase_history'])
+        self.assertIn('recovering_existing', self.status()['phase_history'])
+        self.assertEqual(self.restarts, 0)
+        w.download.assert_not_called()
+
+    def test_preflight_preserves_real_blockers_after_lock_release(self):
+        config = self.existing()
+        config['auth']['password'] = 'externally-modified'
+        w.atomic(w.CONFIG / 'config.yaml', config)
+        with self.assertRaisesRegex(RuntimeError, 'managed_config_changed'):
+            w.preflight(self.req)
+
+    def test_lock_symlink_is_rejected(self):
+        target = self.root / 'unrelated'
+        target.write_text('unchanged')
+        (w.ROOT / 'deploy.lock').symlink_to(target)
+        with self.assertRaises(OSError):
+            w.preflight(self.req)
+        self.assertEqual(target.read_text(), 'unchanged')
 
 
 class BootstrapTests(unittest.TestCase):

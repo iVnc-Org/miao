@@ -3,6 +3,7 @@ pub mod node_parser;
 pub mod openwrt;
 pub mod proxy;
 pub mod runtime;
+pub mod startup;
 pub mod share_ports;
 pub mod singbox;
 pub mod sub_nodes;

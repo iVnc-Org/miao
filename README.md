@@ -44,6 +44,17 @@ sudo ./miao --password '你的密码'
 
 认证文件为配置文件同名的 `.auth.json`，明文存储密码，权限 `0600`。启动不带 `--password` 时沿用保存的密码；显式带此参数会重设密码，因此服务配置长期使用普通启动命令，避免重启覆盖网页改密。内置升级重启不会重放密码参数。登录会话有效期 7 天；改密、CLI 重置或进程重启后需要重新登录。命令行明文密码可能进入 shell 历史/进程参数，推荐交互输入。HTTP 支持保留，但不提供传输加密。详细说明见 [面板认证](docs/panel-auth.md)。
 
+首次无参数运行只启动面板；后续无参数启动恢复上次代理运行/停止状态、模式和节点选择。也可显式启动指定模式，或使用一条命令部署 VPS 并开启全局代理：
+
+```bash
+sudo ./miao --mode global             # 也支持 process / pool
+sudo ./miao --no-start                # 仅开面板并保存停止状态
+sudo ./miao --mode global --vps-host 154.202.118.100
+sudo ./miao --mode global --vps-host 154.202.118.100 --vps-ssh-port 22 --vps-password 'SSH密码'
+```
+
+VPS 默认使用 root、SSH 22/TCP、节点 543/UDP；不带 SSH 密码时使用运行 Miao 账户的本机 SSH 密钥。部署过程及下载进度实时显示在终端，节点连接验证通过后才开启全局代理并选中该节点。高级配置在 Web 设置。详见 [CLI 启动与 VPS 引导](docs/cli-startup.md)。
+
 查看启动参数：
 
 ```bash

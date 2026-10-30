@@ -26,7 +26,7 @@ use services::{
     },
     openwrt::check_and_install_openwrt_dependencies,
     proxy::restore_last_proxy,
-    runtime::{load_runtime_state, save_running_state},
+    runtime::{load_runtime_state_report, save_running_state},
     singbox::{extract_sing_box, start_sing_internal, stop_sing_internal},
     sub_nodes::hydrate_sub_status,
 };
@@ -41,6 +41,11 @@ struct CliOptions {
     show_version: bool,
     socks_listen: Option<String>,
     socks_port: Option<u16>,
+    mode: Option<ProxyMode>,
+    no_start: bool,
+    vps_host: Option<String>,
+    vps_ssh_port: Option<u16>,
+    vps_password: Option<String>,
 }
 
 impl std::fmt::Debug for CliOptions {
@@ -60,15 +65,27 @@ Usage:
   miao [OPTIONS]
   miao [--config PATH] password set [PASSWORD]
 
+Without startup options: first run starts the panel only; later runs restore saved state.
+
 Options:
   -h, --help                    Show this help message
   -V, --version                 Show version information
       --config <PATH>           Configuration file path
       --password <PASSWORD>     Set persistent panel password and start
+      --mode <MODE>             Start proxy: global, process, pool
+      --no-start                Start panel only; persist stopped state
+      --vps-host <HOST>         Deploy/recover VPS and select it (--mode global)
+      --vps-ssh-port <PORT>     VPS SSH port (default: 22; root user)
+      --vps-password <PASSWORD> SSH password; omitted uses local SSH keys
+                               Password arguments may appear in shell history/process listings
       --socks-listen <ADDR>     SOCKS5 listen address (default: {DEFAULT_SOCKS_LISTEN})
       --socks-port <PORT>       SOCKS5 listen port (default: {DEFAULT_SOCKS_PORT})
 
 Examples:
+  miao --mode global
+  miao --mode global --vps-host 154.202.118.100
+  miao --mode global --vps-host 154.202.118.100 --vps-ssh-port 22 --vps-password 'secret'
+  miao --no-start
   miao --socks-listen 0.0.0.0 --socks-port 1080
   miao --socks-listen=0.0.0.0 --socks-port=1080
 "#
@@ -83,7 +100,64 @@ where
     let mut options = CliOptions::default();
     let mut args = args.into_iter().map(Into::into).skip(1).peekable();
     while let Some(arg) = args.next() {
+        let (key, inline) = arg
+            .split_once('=')
+            .map_or((arg.as_str(), None), |(k, v)| (k, Some(v)));
+        if ["--mode", "--vps-host", "--vps-ssh-port", "--vps-password"].contains(&key) {
+            let value = match inline {
+                Some(value) => value.to_owned(),
+                None => args
+                    .next()
+                    .ok_or_else(|| AppError::message(format!("{key} requires a value")))?,
+            };
+            let duplicate = match key {
+                "--mode" => options.mode.is_some(),
+                "--vps-host" => options.vps_host.is_some(),
+                "--vps-ssh-port" => options.vps_ssh_port.is_some(),
+                _ => options.vps_password.is_some(),
+            };
+            if duplicate || value.trim().is_empty() {
+                return Err(AppError::message(format!(
+                    "{key} must be specified once with a non-empty value"
+                )));
+            }
+            match key {
+                "--mode" => {
+                    options.mode = Some(match value.as_str() {
+                        "global" => ProxyMode::Global,
+                        "process" => ProxyMode::Process,
+                        "pool" => ProxyMode::Pool,
+                        _ => {
+                            return Err(AppError::message("--mode must be global, process or pool"))
+                        }
+                    })
+                }
+                "--vps-host" => {
+                    validation::Validator::server_address(&value).map_err(AppError::message)?;
+                    options.vps_host = Some(value);
+                }
+                "--vps-ssh-port" => {
+                    options.vps_ssh_port = Some(
+                        value
+                            .parse::<u16>()
+                            .ok()
+                            .filter(|p| *p > 0)
+                            .ok_or_else(|| {
+                                AppError::message("--vps-ssh-port must be between 1 and 65535")
+                            })?,
+                    )
+                }
+                _ => options.vps_password = Some(value),
+            }
+            continue;
+        }
         match arg.as_str() {
+            "--no-start" => {
+                if options.no_start {
+                    return Err(AppError::message("--no-start specified more than once"));
+                }
+                options.no_start = true;
+            }
             "-h" | "--help" => options.show_help = true,
             "-V" | "--version" => options.show_version = true,
             "--config" => {
@@ -149,6 +223,28 @@ where
         }
     }
 
+    if options.no_start && (options.mode.is_some() || options.vps_host.is_some()) {
+        return Err(AppError::message(
+            "--no-start cannot be combined with --mode or VPS deployment",
+        ));
+    }
+    if options.vps_host.is_some() && options.mode != Some(ProxyMode::Global) {
+        return Err(AppError::message(
+            "VPS deployment requires explicit --mode global",
+        ));
+    }
+    if options.vps_host.is_none()
+        && (options.vps_ssh_port.is_some() || options.vps_password.is_some())
+    {
+        return Err(AppError::message("VPS SSH options require --vps-host"));
+    }
+    if options.password_command
+        && (options.mode.is_some() || options.no_start || options.vps_host.is_some())
+    {
+        return Err(AppError::message(
+            "password set cannot be combined with startup options",
+        ));
+    }
     Ok(options)
 }
 
@@ -359,39 +455,50 @@ async fn main() -> AppResult<()> {
         "Resolved configuration path"
     );
 
-    let (mut config, migration_warning): (Config, Option<String>) =
+    let (mut config, mut migration_warning): (Config, Option<String>) =
         match tokio::fs::read_to_string(&config_path).await {
-        Ok(content) => {
-            let mode_declared = config_declares_key(&content, "mode");
-            let mut config: Config = serde_yaml::from_str(&content)?;
-            let (migrated, warning) = migrate_proxy_mode(&mut config, mode_declared);
-            if migrated {
-                let backup_path = config_backup_path(&config_path);
-                tokio::fs::copy(&config_path, &backup_path)
-                    .await
-                    .map_err(|error| AppError::context("Failed to back up config before mode migration", error))?;
-                save_config_to(&config_path, &config).await?;
-                info!(config_path = ?config_path, backup_path = ?backup_path, mode = ?config.mode, "Migrated legacy proxy mode configuration");
-                if let Some(message) = &warning {
-                    warn!("{message}");
+            Ok(content) => {
+                let mode_declared = config_declares_key(&content, "mode");
+                let mut config: Config = serde_yaml::from_str(&content)?;
+                let (migrated, warning) = migrate_proxy_mode(&mut config, mode_declared);
+                if migrated {
+                    let backup_path = config_backup_path(&config_path);
+                    tokio::fs::copy(&config_path, &backup_path)
+                        .await
+                        .map_err(|error| {
+                            AppError::context(
+                                "Failed to back up config before mode migration",
+                                error,
+                            )
+                        })?;
+                    save_config_to(&config_path, &config).await?;
+                    info!(config_path = ?config_path, backup_path = ?backup_path, mode = ?config.mode, "Migrated legacy proxy mode configuration");
+                    if let Some(message) = &warning {
+                        warn!("{message}");
+                    }
                 }
+                (config, warning)
             }
-            (config, warning)
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            info!(
-                config_path = ?config_path,
-                "No config file found, using in-memory default configuration"
-            );
-            (Config::default(), None)
-        }
-        Err(e) => return Err(e.into()),
-    };
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                info!(
+                    config_path = ?config_path,
+                    "No config file found, using in-memory default configuration"
+                );
+                (Config::default(), None)
+            }
+            Err(e) => return Err(e.into()),
+        };
     apply_cli_overrides(&mut config, &cli_options);
     if let Err(error) = migrate_legacy_subscription_nodes(&config).await {
         warn!(error = %error, "Failed to import subscription nodes from legacy config cache");
     }
-    let runtime_state = load_runtime_state().await;
+    let (runtime_state, runtime_warning) = load_runtime_state_report().await;
+    if let Some(warning) = runtime_warning {
+        migration_warning = Some(match migration_warning {
+            Some(previous) => format!("{previous}; {warning}"),
+            None => warning,
+        });
+    }
     let port = config.port.unwrap_or(DEFAULT_PORT);
     let socks_listen = config
         .socks_listen
@@ -434,6 +541,25 @@ async fn main() -> AppResult<()> {
         });
     }
 
+    services::vps::recover_jobs(&app_state).await;
+    if cli_options.no_start {
+        save_running_state(false).await?;
+    }
+    let requested_mode = cli_options.mode;
+    let no_start = cli_options.no_start;
+    let startup_request = cli_options.vps_host.map(|host| services::vps::Connection {
+        host,
+        ssh_port: cli_options.vps_ssh_port.unwrap_or(22),
+        auth: if cli_options.vps_password.is_some() {
+            "password"
+        } else {
+            "local_key"
+        }
+        .into(),
+        secret: cli_options.vps_password.unwrap_or_default(),
+        ..Default::default()
+    });
+
     // Background: generate config, check dependencies, and start sing-box
     tokio::spawn(async move {
         let config_update = state_for_init.config_update.lock().await;
@@ -447,6 +573,20 @@ async fn main() -> AppResult<()> {
         }
         hydrate_sub_status(&state_for_init, &config.subs).await;
 
+        if let Some(mode) = requested_mode {
+            drop(config_update);
+            if let Err(error) =
+                services::startup::run(state_for_init.clone(), mode, startup_request).await
+            {
+                eprintln!("[失败] {error}\n[面板] 服务继续运行，可在 Web 查看节点和 VPS 任务");
+                *state_for_init.config_warning.lock().await = Some(error.to_string());
+            }
+            state_for_init
+                .initializing
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            return;
+        }
+
         if config.subs.is_empty() && config.nodes.is_empty() {
             info!("No subscriptions or nodes configured, waiting for onboarding");
             state_for_init
@@ -455,7 +595,7 @@ async fn main() -> AppResult<()> {
             return;
         }
 
-        if !runtime_state.running {
+        if no_start || !runtime_state.running {
             info!("Previous runtime state was stopped, not starting sing-box");
             state_for_init
                 .initializing
@@ -515,6 +655,18 @@ async fn main() -> AppResult<()> {
         let config_update = state_for_init.config_update.lock().await;
         let config = state_for_init.config.read().await.clone();
 
+        if state_for_init
+            .startup_cancelled
+            .load(std::sync::atomic::Ordering::SeqCst)
+            || state_for_init
+                .shutting_down
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            state_for_init
+                .initializing
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            return;
+        }
         match start_sing_internal(&state_for_init).await {
             Ok(_) => {
                 info!("sing-box started successfully");
@@ -522,10 +674,9 @@ async fn main() -> AppResult<()> {
                     error!(error = %e, "Failed to save runtime state after startup");
                 }
                 save_config_cache(&config).await;
-                let state_for_proxy = state_for_init.clone();
-                tokio::spawn(async move {
-                    restore_last_proxy(&state_for_proxy).await;
-                });
+                // Restore under the configuration lock so a delayed task cannot
+                // overwrite a newer CLI or web node selection.
+                restore_last_proxy(&state_for_init).await;
             }
             Err(e) => error!("Failed to start sing-box: {}", e),
         }
@@ -535,13 +686,17 @@ async fn main() -> AppResult<()> {
             .store(false, std::sync::atomic::Ordering::Relaxed);
     });
 
-    services::vps::recover_jobs(&app_state).await;
     let vps_state = app_state.clone();
     tokio::spawn(async move {
-        while vps_state.initializing.load(std::sync::atomic::Ordering::Relaxed) {
+        while vps_state
+            .initializing
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
-        services::vps::initialize_legacy(vps_state).await;
+        if requested_mode.is_none() && !no_start {
+            services::vps::initialize_legacy(vps_state).await;
+        }
     });
     let state_for_shutdown = app_state.clone();
     axum::serve(
@@ -564,7 +719,14 @@ async fn shutdown_signal(state: Arc<AppState>) {
         _ = sigterm.recv() => {}
     }
 
-    state.shutting_down.store(true, std::sync::atomic::Ordering::SeqCst);
+    state
+        .shutting_down
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    if let Ok(jobs) = services::vps::jobs(&state).await {
+        for job in jobs.iter().filter(|job| job.active) {
+            eprintln!("[VPS] 本机退出不保证远程任务终止；任务 {}，目标 {}:{}。重启后请核查原任务，勿重复部署。", job.id, job.host, job.ssh_port);
+        }
+    }
     let _config_update = state.config_update.lock().await;
     info!("Shutting down, stopping sing-box...");
     stop_sing_internal(&state).await;
@@ -574,6 +736,69 @@ async fn shutdown_signal(state: Arc<AppState>) {
 mod tests {
     use super::{config_declares_key, migrate_proxy_mode, parse_cli_args};
     use crate::models::{Config, ProxyMode};
+
+    #[test]
+    fn cli_modes_and_minimal_vps_options() {
+        for (name, mode) in [
+            ("global", ProxyMode::Global),
+            ("process", ProxyMode::Process),
+            ("pool", ProxyMode::Pool),
+        ] {
+            let opts = parse_cli_args(["miao", "--mode", name]).unwrap();
+            assert_eq!(opts.mode, Some(mode));
+        }
+        let opts = parse_cli_args([
+            "miao",
+            "--mode=global",
+            "--vps-host=154.202.118.100",
+            "--vps-ssh-port=2222",
+            "--vps-password",
+            "中文 $ ' secret",
+        ])
+        .unwrap();
+        assert_eq!(opts.vps_ssh_port, Some(2222));
+        assert_eq!(opts.vps_password.as_deref(), Some("中文 $ ' secret"));
+        assert!(!format!("{opts:?}").contains("secret"));
+        let opts =
+            parse_cli_args(["miao", "--mode", "global", "--vps-host", "2001:db8::1"]).unwrap();
+        assert!(opts.vps_password.is_none());
+        assert!(parse_cli_args(["miao"]).unwrap().mode.is_none());
+        assert!(parse_cli_args(["miao", "--no-start"]).unwrap().no_start);
+    }
+
+    #[test]
+    fn cli_rejects_ambiguous_startup_requests_without_echoing_secrets() {
+        for args in [
+            vec!["--mode", "invalid"],
+            vec!["--mode"],
+            vec!["--mode=global", "--mode=pool"],
+            vec!["--no-start", "--mode=global"],
+            vec!["--no-start", "--no-start"],
+            vec!["--vps-host=154.202.118.100"],
+            vec!["--mode=pool", "--vps-host=154.202.118.100"],
+            vec!["--vps-ssh-port=22"],
+            vec!["--vps-password=topsecret"],
+            vec![
+                "--mode=global",
+                "--vps-host=154.202.118.100",
+                "--vps-password=",
+            ],
+            vec![
+                "--mode=global",
+                "--vps-host=154.202.118.100",
+                "--vps-ssh-port=0",
+            ],
+            vec![
+                "--mode=global",
+                "--vps-host=154.202.118.100",
+                "--vps-ssh-port=65536",
+            ],
+            vec!["password", "set", "topsecret", "--mode=global"],
+        ] {
+            let error = parse_cli_args(std::iter::once("miao").chain(args)).unwrap_err();
+            assert!(!error.to_string().contains("topsecret"));
+        }
+    }
 
     #[test]
     fn config_declares_top_level_key() {

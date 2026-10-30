@@ -66,6 +66,9 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> Json<ApiResponse<
 pub async fn start_service(State(state): State<Arc<AppState>>) -> HandlerResult {
     // 与其它会重新生成配置的 handler 共用同一把锁：start 也可能走到 gen_config，
     // 不持锁会和并发的配置变更互相覆盖生成产物与端口分配账本。
+    state
+        .startup_cancelled
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     let _config_update = state.config_update.lock().await;
     let config_path = get_sing_box_home().join("config.json");
     if !config_path.exists() {
@@ -112,10 +115,9 @@ pub async fn start_service(State(state): State<Arc<AppState>>) -> HandlerResult 
                     format!("Failed to save runtime state: {}", e),
                 ));
             }
-            let state_for_proxy = state.clone();
-            tokio::spawn(async move {
-                restore_last_proxy(&state_for_proxy).await;
-            });
+            // Restore under the configuration lock so a delayed task cannot
+            // overwrite a newer CLI or web node selection.
+            restore_last_proxy(&state).await;
             Ok(success_no_data("sing-box started successfully"))
         }
         Err(AppError::AlreadyRunning) => Err(status_error(
@@ -130,6 +132,9 @@ pub async fn start_service(State(state): State<Arc<AppState>>) -> HandlerResult 
 }
 
 pub async fn stop_service(State(state): State<Arc<AppState>>) -> HandlerResult {
+    state
+        .startup_cancelled
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     let _config_update = state.config_update.lock().await;
     stop_sing_internal(&state).await;
     if let Err(e) = save_running_state(false).await {
@@ -145,6 +150,9 @@ pub async fn set_mode(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ModeRequest>,
 ) -> HandlerResult {
+    state
+        .startup_cancelled
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     let _config_update = state.config_update.lock().await;
     let was_running = sing_box_is_running(&state).await;
     let old_config = state.config.read().await.clone();

@@ -2,6 +2,8 @@
 
 在“添加节点 → VPS 部署”填写管理地址和 SSH 凭据，先检查环境，再执行检查结果。支持 root 密码、临时未加密私钥或 Miao 主机已有密钥。SSH 凭据不写入配置、任务记录或浏览器存储；临时文件权限为 0600，关闭弹窗清空 SSH 凭据输入。
 
+CLI 自动部署并启用全局代理、实时终端输出与状态恢复见 [CLI 启动与 VPS 引导](cli-startup.md)。
+
 Install or recover Hysteria2 from **Add node → VPS deployment**. Inspect first, then execute. Root access is required. SSH passwords and private keys are not persisted in configuration, task history or browser storage.
 
 ## 前提与访问控制
