@@ -40,7 +40,29 @@ async fn tail(mut pipe: impl AsyncRead + Unpin) -> std::io::Result<Vec<u8>> {
     }
 }
 
-pub async fn script(connection: &Connection, body: &str, seconds: u64) -> AppResult<Vec<u8>> {
+#[derive(Clone, Copy)]
+pub enum Operation {
+    Inspect,
+    Launch,
+    Poll,
+}
+
+impl Operation {
+    fn timeout_message(self) -> &'static str {
+        match self {
+            Self::Inspect => "VPS environment inspection timed out; check SSH connectivity and retry",
+            Self::Launch => "VPS deployment launch timed out; remote outcome unknown, reconnect to inspect before retrying",
+            Self::Poll => "VPS deployment status check timed out; reconnect to inspect the remote task before retrying deployment",
+        }
+    }
+}
+
+pub async fn script(
+    connection: &Connection,
+    body: &str,
+    seconds: u64,
+    operation: Operation,
+) -> AppResult<Vec<u8>> {
     let directory = std::env::temp_dir().join(format!(
         "miao-vps-ssh-{}-{}",
         std::process::id(),
@@ -150,17 +172,31 @@ pub async fn script(connection: &Connection, body: &str, seconds: u64) -> AppRes
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    execute(&mut command, body, Duration::from_secs(seconds), operation).await
+}
+
+// Keep transport I/O independent of SSH credential setup so EOF and timeout
+// behavior can be exercised without connecting to a VPS.
+async fn execute(
+    command: &mut Command,
+    body: &str,
+    duration: Duration,
+    operation: Operation,
+) -> AppResult<Vec<u8>> {
     let mut child = command
         .spawn()
         .map_err(|_| AppError::message("SSH client unavailable"))?;
     let mut stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
-    let result = timeout(Duration::from_secs(seconds), async {
+    let result = timeout(duration, async {
         tokio::join!(
-            async {
-                stdin.write_all(body.as_bytes()).await?;
-                stdin.shutdown().await
+            async move {
+                // ChildStdin::shutdown is a no-op on Unix. Owning the pipe in
+                // this future closes it on success, write failure or cancellation.
+                let result = stdin.write_all(body.as_bytes()).await;
+                drop(stdin);
+                result
             },
             tail(stdout),
             tail(stderr),
@@ -193,9 +229,7 @@ pub async fn script(connection: &Connection, body: &str, seconds: u64) -> AppRes
         }
         Err(_) => {
             let _ = child.kill().await;
-            Err(AppError::message(
-                "SSH timed out; remote outcome unknown, reconnect to inspect before retrying",
-            ))
+            Err(AppError::message(operation.timeout_message()))
         }
     }
 }
@@ -234,6 +268,92 @@ pub fn cleanup_credentials() {
                     let _ = std::fs::remove_dir_all(entry.path());
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shell(program: &str) -> Command {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", program])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        command
+    }
+
+    #[tokio::test]
+    async fn closes_input_after_sending_script() {
+        for operation in [Operation::Inspect, Operation::Launch, Operation::Poll] {
+            let output = execute(
+                &mut shell("sh -s; printf EOF_RECEIVED"),
+                "printf SCRIPT_COMPLETED\n",
+                Duration::from_secs(3),
+                operation,
+            )
+            .await
+            .unwrap();
+            assert_eq!(output, b"SCRIPT_COMPLETEDEOF_RECEIVED");
+        }
+    }
+
+    #[tokio::test]
+    async fn drains_both_outputs_while_sending_large_input() {
+        // Fill both output pipes before reading a body larger than the input
+        // pipe. Sequential writing/reading would deadlock here.
+        let program =
+            "head -c 262144 /dev/zero; head -c 262144 /dev/zero >&2; cat >/dev/null; printf DONE";
+        let output = execute(
+            &mut shell(program),
+            &"x".repeat(262144),
+            Duration::from_secs(3),
+            Operation::Inspect,
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.len(), 131072);
+        assert!(output.ends_with(b"DONE"));
+    }
+
+    #[tokio::test]
+    async fn closed_input_returns_error_without_waiting_for_timeout() {
+        let error = execute(
+            &mut shell("exec 0<&-; exit 0"),
+            &"x".repeat(262144),
+            Duration::from_secs(3),
+            Operation::Inspect,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, AppError::Io(_)));
+    }
+
+    #[tokio::test]
+    async fn timeout_kills_and_reaps_child_and_identifies_operation() {
+        for operation in [Operation::Inspect, Operation::Launch, Operation::Poll] {
+            let path = std::env::temp_dir().join(format!("miao-ssh-test-{}", random_id().unwrap()));
+            let mut command = shell("echo $$ > \"$1\"; exec sleep 60");
+            command.arg("test").arg(&path);
+            let error = execute(&mut command, "", Duration::from_millis(300), operation)
+                .await
+                .unwrap_err();
+            assert_eq!(error.to_string(), operation.timeout_message());
+            let pid: i32 = std::fs::read_to_string(&path)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            assert_eq!(unsafe { nix::libc::kill(pid, 0) }, -1);
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(nix::libc::ESRCH)
+            );
+            std::fs::remove_file(path).unwrap();
         }
     }
 }

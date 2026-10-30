@@ -206,7 +206,7 @@ fn inspect_script(req: &Connection) -> String {
 }
 pub async fn preflight(mut req: Connection) -> AppResult<Value> {
     req.validate()?;
-    let out = ssh::script(&req, &inspect_script(&req), 45).await?;
+    let out = ssh::script(&req, &inspect_script(&req), 45, ssh::Operation::Inspect).await?;
     serde_json::from_slice(&out)
         .map_err(|_| AppError::message("Remote inspection returned invalid data"))
 }
@@ -413,10 +413,16 @@ async fn run_job(
             stage(state, job, "error").await?;
             return Ok(());
         }
-        ssh::script(req, &launcher(req), 30).await?;
+        ssh::script(req, &launcher(req), 30, ssh::Operation::Launch).await?;
     }
     for index in 0..900 {
-        let data = ssh::script(req, &poll_script(req, resume && index == 0), 30).await?;
+        let data = ssh::script(
+            req,
+            &poll_script(req, resume && index == 0),
+            30,
+            ssh::Operation::Poll,
+        )
+        .await?;
         let value: Value = serde_json::from_slice(&data)?;
         let status = value["stage"].as_str().unwrap_or("unknown");
         if status == "downloading" {
