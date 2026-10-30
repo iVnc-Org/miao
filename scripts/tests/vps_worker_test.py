@@ -43,6 +43,23 @@ class DeploymentTests(unittest.TestCase):
         self.kind = 'systemd'
         self.start(patch.object(w, 'init_kind', side_effect=lambda: self.kind))
         self.start(patch.object(w.os, 'geteuid', return_value=0))
+        # Simulate root ownership only inside this fixture. Mocking geteuid
+        # alone leaves real runner-owned stat/fstat results on non-root CI.
+        real_stat, real_fstat = Path.stat, os.fstat
+        fixture_uid = real_stat(self.root).st_uid
+        def root_owned(path, result):
+            if (path == self.root or self.root in path.parents) and result.st_uid == fixture_uid:
+                fields = list(result)
+                fields[4] = 0  # st_uid; retain actual type/mode for safety checks.
+                return os.stat_result(fields)
+            return result
+        def fixture_stat(path, *args, **kwargs):
+            return root_owned(path, real_stat(path, *args, **kwargs))
+        def fixture_fstat(fd):
+            path = Path(os.readlink('/proc/self/fd/' + str(fd)))
+            return root_owned(path, real_fstat(fd))
+        self.start(patch.object(Path, 'stat', fixture_stat))
+        self.start(patch.object(w.os, 'fstat', side_effect=fixture_fstat))
         self.start(patch.object(w.platform, 'system', return_value='Linux'))
         self.start(patch.object(w.platform, 'machine', return_value='x86_64'))
         self.start(patch.object(w.shutil, 'disk_usage', return_value=type('Disk', (), {'free': 1024**3})()))
@@ -330,6 +347,36 @@ class DeploymentTests(unittest.TestCase):
         with self.assertRaises(OSError):
             w.preflight(self.req)
         self.assertEqual(target.read_text(), 'unchanged')
+
+    def test_lock_rejects_wrong_owner(self):
+        original = w.os.fstat
+        def wrong_owner(fd):
+            fields = list(original(fd))
+            fields[4] = 12345
+            return os.stat_result(fields)
+        with patch.object(w.os, 'fstat', side_effect=wrong_owner):
+            with self.assertRaisesRegex(RuntimeError, 'unsafe_permissions'):
+                w.deployment_lock()
+
+    def test_preflight_rejects_wrong_directory_owner(self):
+        original = Path.stat
+        def wrong_owner(path, *args, **kwargs):
+            result = original(path, *args, **kwargs)
+            if path == w.ROOT:
+                fields = list(result)
+                fields[4] = 12345
+                return os.stat_result(fields)
+            return result
+        with patch.object(Path, 'stat', wrong_owner):
+            with self.assertRaisesRegex(RuntimeError, 'unsafe_permissions'):
+                w.preflight(self.req)
+
+    def test_lock_rejects_group_writable_permissions(self):
+        path = w.ROOT / 'deploy.lock'
+        path.touch(mode=0o600)
+        path.chmod(0o620)
+        with self.assertRaisesRegex(RuntimeError, 'unsafe_permissions'):
+            w.deployment_lock()
 
 
 class BootstrapTests(unittest.TestCase):
