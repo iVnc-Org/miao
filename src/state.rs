@@ -1,8 +1,8 @@
 use arc_swap::ArcSwap;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock};
 
@@ -25,6 +25,9 @@ pub struct AppState {
     pub shutting_down: AtomicBool,
     pub vps_active: AtomicBool,
     pub upgrading: AtomicBool, // 防止并发升级
+    pub upgrade_attempt: AtomicU64,
+    /// `Some(attempt)` asks that attempt to stop before installation.
+    pub upgrade_cancel: StdMutex<Option<u64>>,
 }
 
 impl AppState {
@@ -57,6 +60,8 @@ impl AppState {
             shutting_down: AtomicBool::new(false),
             vps_active: AtomicBool::new(false),
             upgrading: AtomicBool::new(false),
+            upgrade_attempt: AtomicU64::new(0),
+            upgrade_cancel: StdMutex::new(None),
         })
     }
 }

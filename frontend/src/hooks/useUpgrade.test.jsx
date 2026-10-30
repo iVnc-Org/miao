@@ -27,6 +27,22 @@ it('restores an active upgrade after refresh and keeps it visible across downtim
   unmount()
 })
 
+it('starts with the selected proxy and requests cancellation', async () => {
+  const fetch = vi.fn()
+    .mockResolvedValueOnce(reply({ id: '', active: false, stage: '', events: [] }))
+    .mockResolvedValueOnce(reply({ id: 'job', active: true, stage: 'Checking release', events: [] }))
+    .mockResolvedValueOnce(reply({ id: 'job', active: false, stage: 'Upgrade cancelled', events: [] }))
+  vi.stubGlobal('fetch', fetch)
+  const { result } = renderHook(() => useUpgrade())
+  await waitFor(() => expect(result.current.status).not.toBeNull())
+  await act(async () => { await result.current.start('https://example.test/gh/') })
+  expect(fetch.mock.calls[1][0]).toBe('/api/upgrade')
+  expect(JSON.parse(fetch.mock.calls[1][1].body)).toEqual({ github_proxy: 'https://example.test/gh/' })
+  await act(async () => { await result.current.cancel() })
+  expect(fetch.mock.calls[2][0]).toBe('/api/upgrade/cancel')
+  expect(result.current.status.stage).toBe('Upgrade cancelled')
+})
+
 it('shows an unacknowledged failure after refresh', async () => {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(reply({ id: 'failed-job', active: false, stage: 'Upgrade failed: SHA256 mismatch' })))
   const { result } = renderHook(() => useUpgrade())

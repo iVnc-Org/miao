@@ -59,6 +59,10 @@ pub fn build_router(app_state: Arc<AppState>) -> Router {
             "/api/upgrade",
             get(crate::handlers::version::get_upgrade).post(upgrade),
         )
+        .route(
+            "/api/upgrade/cancel",
+            post(crate::handlers::version::cancel_upgrade),
+        )
         .route("/api/subs", get(get_subs))
         .route("/api/subs", post(add_sub))
         .route("/api/subs/content", post(add_sub_content))

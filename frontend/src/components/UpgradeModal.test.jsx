@@ -1,7 +1,21 @@
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { expect, it, vi } from 'vitest'
 import { UpgradeModal } from './UpgradeModal.jsx'
 import { TopBar } from './TopBar.jsx'
+
+it('offers cancellation while downloading and explains when replacement has started', async () => {
+  const cancel = vi.fn().mockResolvedValue()
+  const { rerender } = render(<UpgradeModal upgrade={{ open: true, offline: false, cancel, dismiss: vi.fn(), status: {
+    active: true, stage: 'Downloading binary via example.test', downloaded: 10, total: 100, events: [],
+  } }} />)
+  fireEvent.click(screen.getByRole('button', { name: '取消升级' }))
+  expect(cancel).toHaveBeenCalledOnce()
+  rerender(<UpgradeModal upgrade={{ open: true, offline: false, cancel, dismiss: vi.fn(), status: {
+    active: true, stage: 'Backing up and installing binary', events: [],
+  } }} />)
+  expect(screen.getByRole('button', { name: '取消升级' })).toBeDisabled()
+  expect(screen.getByText('程序即将替换，无法取消')).toBeInTheDocument()
+})
 
 it('shows progress, history and reconnection while the upgrade is active', () => {
   render(<UpgradeModal upgrade={{ open: true, offline: true, dismiss: vi.fn(), status: {

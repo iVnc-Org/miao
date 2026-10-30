@@ -1967,6 +1967,9 @@ html[data-embed-mode='true'] .modal-card {
 .vps-help-content { position: fixed; z-index: 10000; box-sizing: border-box; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--toast-bg); color: var(--text); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; box-shadow: var(--shadow); max-height: min(260px, 45vh); overflow-y: auto; }
 .vps-compact-note { font-size: 13px; }
 .auth-inline-error { margin: 0; padding: 8px 24px 0; color: var(--danger); font-size: 12px; text-align: right; }
+.upgrade-proxy-row { display: flex; align-items: center; gap: 8px; }
+.upgrade-proxy-row input { flex: 1; min-width: 0; }
+.upgrade-proxy-hint { margin: 0; color: var(--text-muted); font-size: 12px; }
 .auth-page { min-height: 100dvh; display: grid; place-items: center; padding: 24px; }
 .auth-card { width: min(100%, 420px); }
 .auth-card form { display: grid; gap: 16px; }

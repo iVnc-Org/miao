@@ -21,6 +21,7 @@ use crate::services::singbox::{
 use crate::state::{AppState, VersionCache};
 
 const GITHUB_PROXY_PREFIX: &str = "https://httptunnel.top/gh/";
+const CANCELLED_STAGE: &str = "Upgrade cancelled";
 
 const RELEASE_REPO: &str = "iVnc-Org/miao";
 const RELEASE_API_URL: &str = "https://api.github.com/repos/iVnc-Org/miao/releases/tags/latest";
@@ -53,6 +54,13 @@ fn update_status(
     change: impl FnOnce(&mut UpgradeStatus),
 ) -> AppResult<UpgradeStatus> {
     let _lock = STATUS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    write_status_locked(state, change)
+}
+
+fn write_status_locked(
+    state: &AppState,
+    change: impl FnOnce(&mut UpgradeStatus),
+) -> AppResult<UpgradeStatus> {
     let path = status_path(state);
     let mut status: UpgradeStatus = fs::read(&path)
         .ok()
@@ -74,6 +82,86 @@ fn stage(state: &AppState, message: &str) -> AppResult<()> {
         }
     })?;
     Ok(())
+}
+
+struct UpgradeRun {
+    attempt: u64,
+    proxy: String,
+    temp_path: std::path::PathBuf,
+}
+
+fn normalize_github_proxy(value: &str) -> AppResult<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(GITHUB_PROXY_PREFIX.to_string());
+    }
+    let url = url::Url::parse(trimmed).map_err(|_| AppError::message("Invalid GitHub proxy"))?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(AppError::message(
+            "GitHub proxy must be an HTTPS prefix without credentials or query",
+        ));
+    }
+    let mut prefix = trimmed.to_string();
+    if !prefix.ends_with('/') {
+        prefix.push('/');
+    }
+    Ok(prefix)
+}
+
+fn upgrade_cancelled(state: &AppState, attempt: u64) -> bool {
+    state
+        .upgrade_cancel
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .is_some_and(|requested| requested == attempt)
+}
+
+fn ensure_running(state: &AppState, attempt: u64) -> AppResult<()> {
+    if upgrade_cancelled(state, attempt) {
+        Err(AppError::message(CANCELLED_STAGE))
+    } else {
+        Ok(())
+    }
+}
+
+fn stage_is_cancellable(stage: &str) -> bool {
+    !matches!(
+        stage,
+        "Backing up and installing binary"
+            | "Stopping sing-box"
+            | "Restarting"
+            | "Upgrade complete"
+    )
+}
+
+pub async fn cancel_upgrade(state: &Arc<AppState>) -> AppResult<UpgradeStatus> {
+    let _lock = STATUS_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let status: UpgradeStatus = match fs::read(status_path(state)) {
+        Ok(bytes) => serde_json::from_slice(&bytes)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => UpgradeStatus::default(),
+        Err(error) => return Err(error.into()),
+    };
+    if !state.upgrading.load(Ordering::SeqCst)
+        || !status.active
+        || !stage_is_cancellable(&status.stage)
+    {
+        return Err(AppError::message("Upgrade can no longer be cancelled"));
+    }
+    let attempt = state.upgrade_attempt.load(Ordering::SeqCst);
+    *state
+        .upgrade_cancel
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = Some(attempt);
+    drop(_lock);
+    Ok(upgrade_status(state).await?)
 }
 
 pub async fn upgrade_status(state: &Arc<AppState>) -> AppResult<UpgradeStatus> {
@@ -125,7 +213,11 @@ pub fn watch_upgrade_recovery(state: Arc<AppState>) {
     });
 }
 
-pub fn start_upgrade(state: Arc<AppState>) -> AppResult<UpgradeStatus> {
+pub fn start_upgrade(
+    state: Arc<AppState>,
+    github_proxy: Option<String>,
+) -> AppResult<UpgradeStatus> {
+    let proxy = normalize_github_proxy(github_proxy.as_deref().unwrap_or(""))?;
     if state.shutting_down.load(Ordering::SeqCst) {
         return Err(AppError::message("Miao is shutting down"));
     }
@@ -162,15 +254,36 @@ pub fn start_upgrade(state: Arc<AppState>) -> AppResult<UpgradeStatus> {
         state.upgrading.store(false, Ordering::SeqCst);
         return initial;
     }
+    let attempt = state.upgrade_attempt.fetch_add(1, Ordering::SeqCst) + 1;
+    *state
+        .upgrade_cancel
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = None;
+    let temp_path = std::path::PathBuf::from(get_temp_binary_path());
     tokio::spawn(async move {
-        match upgrade_binary(&state).await {
+        let run = UpgradeRun {
+            attempt,
+            proxy,
+            temp_path,
+        };
+        match upgrade_binary(&state, &run).await {
             Ok(message) if message == "Already up to date" => {
                 let _ = stage(&state, &message);
                 let _ = update_status(&state, |s| s.active = false);
                 state.upgrading.store(false, Ordering::SeqCst);
             }
             Ok(_) => {} // Keep the guard until exec; the new process reconciles persisted state.
+            Err(e) if e.to_string() == CANCELLED_STAGE => {
+                let _ = tokio::fs::remove_file(&run.temp_path).await;
+                let _ = update_status(&state, |s| {
+                    s.active = false;
+                    s.stage = CANCELLED_STAGE.into();
+                    s.events.push(CANCELLED_STAGE.into());
+                });
+                state.upgrading.store(false, Ordering::SeqCst);
+            }
             Err(e) => {
+                let _ = tokio::fs::remove_file(&run.temp_path).await;
                 let _ = stage(&state, &format!("Upgrade failed: {e}"));
                 let _ = update_status(&state, |s| s.active = false);
                 state.upgrading.store(false, Ordering::SeqCst);
@@ -181,42 +294,81 @@ pub fn start_upgrade(state: Arc<AppState>) -> AppResult<UpgradeStatus> {
 }
 
 async fn accessible_get(client: &reqwest::Client, url: &str) -> AppResult<reqwest::Response> {
-    accessible_get_with_proxy(client, url, GITHUB_PROXY_PREFIX).await
+    accessible_get_with_proxy(client, url, GITHUB_PROXY_PREFIX, None).await
+}
+
+async fn until_cancelled(state: &AppState, attempt: u64) {
+    while !upgrade_cancelled(state, attempt) {
+        sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn send_get(
+    client: &reqwest::Client,
+    url: &str,
+    run: Option<(&AppState, u64)>,
+) -> AppResult<reqwest::Response> {
+    let request = client
+        .get(url)
+        .header("User-Agent", "miao")
+        .timeout(Duration::from_secs(120))
+        .send();
+    let response = match run {
+        Some((state, attempt)) => {
+            tokio::select! {
+                biased;
+                _ = until_cancelled(state, attempt) => return Err(AppError::message(CANCELLED_STAGE)),
+                result = request => result,
+            }
+        }
+        None => request.await,
+    }?;
+    if let Some((state, attempt)) = run {
+        if upgrade_cancelled(state, attempt) {
+            // The headers already arrived. Read the body so the connection closes
+            // instead of staying checked out of the shared pool.
+            tokio::spawn(async move {
+                let _ = response.bytes().await;
+            });
+            return Err(AppError::message(CANCELLED_STAGE));
+        }
+    }
+    Ok(response.error_for_status()?)
 }
 
 async fn accessible_get_with_proxy(
     client: &reqwest::Client,
     url: &str,
     proxy: &str,
+    run: Option<(&AppState, u64)>,
 ) -> AppResult<reqwest::Response> {
+    if let Some((state, attempt)) = run {
+        ensure_running(state, attempt)?;
+    }
     // GET validates the actual resource; many release servers do not implement HEAD reliably.
     if url.starts_with(proxy) {
-        return Ok(client
-            .get(url)
-            .header("User-Agent", "miao")
-            .timeout(Duration::from_secs(120))
-            .send()
-            .await?
-            .error_for_status()?);
+        return send_get(client, url, run).await;
     }
-    match tokio::time::timeout(
-        Duration::from_secs(8),
-        client
-            .get(url)
-            .header("User-Agent", "miao")
-            .timeout(Duration::from_secs(120))
-            .send(),
-    )
-    .await
-    {
-        Ok(Ok(response)) if response.status().is_success() => Ok(response),
-        _ => Ok(client
-            .get(format!("{proxy}{url}"))
-            .header("User-Agent", "miao")
-            .timeout(Duration::from_secs(120))
-            .send()
-            .await?
-            .error_for_status()?),
+    let direct = tokio::time::timeout(Duration::from_secs(8), send_get(client, url, run));
+    let direct = match run {
+        Some((state, attempt)) => {
+            tokio::select! {
+                biased;
+                _ = until_cancelled(state, attempt) => return Err(AppError::message(CANCELLED_STAGE)),
+                result = direct => result,
+            }
+        }
+        None => direct.await,
+    };
+    match direct {
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(error)) if error.to_string() == CANCELLED_STAGE => Err(error),
+        _ => {
+            if let Some((state, attempt)) = run {
+                ensure_running(state, attempt)?;
+            }
+            send_get(client, &format!("{proxy}{url}"), run).await
+        }
     }
 }
 
@@ -235,21 +387,37 @@ fn parse_sha256sum_line(line: &str) -> AppResult<String> {
     Ok(hex.to_ascii_lowercase())
 }
 
-async fn fetch_checksum_hex(client: &reqwest::Client, url: &str) -> AppResult<String> {
-    let text = accessible_get(client, url).await?.text().await?;
+async fn fetch_checksum_hex(
+    client: &reqwest::Client,
+    url: &str,
+    proxy: &str,
+    run: Option<(&AppState, u64)>,
+) -> AppResult<String> {
+    let text = accessible_get_with_proxy(client, url, proxy, run)
+        .await?
+        .text()
+        .await?;
 
     let first = text.lines().next().unwrap_or("").trim();
     parse_sha256sum_line(first)
 }
 
-async fn fetch_checksum_hex_retried(client: &reqwest::Client, url: &str) -> AppResult<String> {
+async fn fetch_checksum_hex_retried(
+    client: &reqwest::Client,
+    url: &str,
+    state: &AppState,
+    run: &UpgradeRun,
+) -> AppResult<String> {
     let mut last_err: Option<AppError> = None;
     for attempt in 0..DOWNLOAD_MAX_ATTEMPTS {
+        ensure_running(state, run.attempt)?;
         if attempt > 0 {
-            sleep(Duration::from_millis(
-                DOWNLOAD_RETRY_BASE_MS * (1 << (attempt - 1)),
-            ))
-            .await;
+            let delay = Duration::from_millis(DOWNLOAD_RETRY_BASE_MS * (1 << (attempt - 1)));
+            tokio::select! {
+                biased;
+                _ = until_cancelled(state, run.attempt) => return Err(AppError::message(CANCELLED_STAGE)),
+                _ = sleep(delay) => {}
+            }
             warn!(
                 attempt = attempt + 1,
                 max = DOWNLOAD_MAX_ATTEMPTS,
@@ -257,12 +425,14 @@ async fn fetch_checksum_hex_retried(client: &reqwest::Client, url: &str) -> AppR
             );
         }
         let attempt_url = if attempt > 0 {
-            format!("{GITHUB_PROXY_PREFIX}{url}")
+            format!("{}{url}", run.proxy)
         } else {
             url.into()
         };
-        match fetch_checksum_hex(client, &attempt_url).await {
+        match fetch_checksum_hex(client, &attempt_url, &run.proxy, Some((state, run.attempt))).await
+        {
             Ok(v) => return Ok(v),
+            Err(e) if e.to_string() == CANCELLED_STAGE => return Err(e),
             Err(e) => last_err = Some(e),
         }
     }
@@ -270,6 +440,25 @@ async fn fetch_checksum_hex_retried(client: &reqwest::Client, url: &str) -> AppR
 }
 
 /// 流式下载到临时文件并增量 SHA256；成功时文件已关闭且校验通过。
+fn proxy_label(proxy: &str) -> String {
+    if proxy == GITHUB_PROXY_PREFIX {
+        "httptunnel.top/gh".into()
+    } else {
+        url::Url::parse(proxy)
+            .ok()
+            .and_then(|value| value.host_str().map(str::to_string))
+            .unwrap_or_else(|| "GitHub proxy".into())
+    }
+}
+
+fn proxy_source(url: &str, proxy: &str) -> String {
+    if url.starts_with(proxy) {
+        proxy_label(proxy)
+    } else {
+        "GitHub".into()
+    }
+}
+
 async fn download_binary_streaming_once(
     client: &reqwest::Client,
     url: &str,
@@ -277,15 +466,21 @@ async fn download_binary_streaming_once(
     expected_hex: &str,
     temp_path: &Path,
     state: &Arc<AppState>,
+    run: Option<&UpgradeRun>,
 ) -> AppResult<()> {
-    let response = accessible_get(client, url).await?;
-    let source =
-        if response.url().host_str() == Some("httptunnel.top") || url.starts_with(GITHUB_PROXY_PREFIX) {
-            "httptunnel.top/gh"
-        } else {
-            "GitHub"
-        };
+    let response = match run {
+        Some(run) => {
+            accessible_get_with_proxy(client, url, &run.proxy, Some((state, run.attempt))).await?
+        }
+        None => accessible_get(client, url).await?,
+    };
+    let source = run
+        .map(|run| proxy_source(url, &run.proxy))
+        .unwrap_or_else(|| "GitHub".into());
     stage(state, &format!("Downloading binary via {source}"))?;
+    if let Some(run) = run {
+        ensure_running(state, run.attempt)?;
+    }
 
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
@@ -304,7 +499,24 @@ async fn download_binary_streaming_once(
     let mut last_logged_percent = 0u8;
     let mut stream = response.bytes_stream();
 
-    while let Some(chunk_result) = stream.next().await {
+    loop {
+        let chunk_result = match run {
+            Some(run) => {
+                tokio::select! {
+                    biased;
+                    _ = until_cancelled(state, run.attempt) => {
+                        // Finish one read so the pooled connection is released.
+                        let _ = stream.next().await;
+                        return Err(AppError::message(CANCELLED_STAGE));
+                    }
+                    chunk = stream.next() => chunk,
+                }
+            }
+            None => stream.next().await,
+        };
+        let Some(chunk_result) = chunk_result else {
+            break;
+        };
         let chunk: bytes::Bytes =
             chunk_result.map_err(|e| AppError::context("Download stream error", e))?;
         let n = chunk.len() as u64;
@@ -376,17 +588,21 @@ async fn download_binary_streaming_retried(
     url: &str,
     expected_size: u64,
     expected_hex: &str,
-    temp_path: &Path,
     state: &Arc<AppState>,
+    run: &UpgradeRun,
 ) -> AppResult<()> {
+    let temp_path = run.temp_path.as_path();
     let mut last_err: Option<AppError> = None;
     for attempt in 0..DOWNLOAD_MAX_ATTEMPTS {
+        ensure_running(state, run.attempt)?;
         if attempt > 0 {
             let _ = tokio::fs::remove_file(temp_path).await;
-            sleep(Duration::from_millis(
-                DOWNLOAD_RETRY_BASE_MS * (1 << (attempt - 1)),
-            ))
-            .await;
+            let delay = Duration::from_millis(DOWNLOAD_RETRY_BASE_MS * (1 << (attempt - 1)));
+            tokio::select! {
+                biased;
+                _ = until_cancelled(state, run.attempt) => return Err(AppError::message(CANCELLED_STAGE)),
+                _ = sleep(delay) => {}
+            }
             warn!(
                 attempt = attempt + 1,
                 max = DOWNLOAD_MAX_ATTEMPTS,
@@ -394,12 +610,13 @@ async fn download_binary_streaming_retried(
             );
         }
         let attempt_url = if attempt > 0 {
-            format!("{GITHUB_PROXY_PREFIX}{url}")
+            format!("{}{url}", run.proxy)
         } else {
             url.into()
         };
         if attempt > 0 {
-            stage(state, "Retrying binary download via httptunnel.top/gh")?;
+            let source = proxy_source(&attempt_url, &run.proxy);
+            stage(state, &format!("Retrying binary download via {source}"))?;
         }
         match download_binary_streaming_once(
             client,
@@ -408,10 +625,12 @@ async fn download_binary_streaming_retried(
             expected_hex,
             temp_path,
             state,
+            Some(run),
         )
         .await
         {
             Ok(()) => return Ok(()),
+            Err(e) if e.to_string() == CANCELLED_STAGE => return Err(e),
             Err(e) => last_err = Some(e),
         }
     }
@@ -423,15 +642,19 @@ async fn fetch_release_json<T: serde::de::DeserializeOwned>(
     client: &reqwest::Client,
     url: &str,
 ) -> AppResult<T> {
-    let first =
-        async { Ok::<T, AppError>(accessible_get(client, url).await?.json::<T>().await?) }.await;
-    match first {
-        Ok(value) => Ok(value),
-        Err(_) => Ok(accessible_get(client, &format!("{GITHUB_PROXY_PREFIX}{url}"))
-            .await?
-            .json::<T>()
-            .await?),
-    }
+    fetch_release_json_with_proxy(client, url, GITHUB_PROXY_PREFIX, None).await
+}
+
+async fn fetch_release_json_with_proxy<T: serde::de::DeserializeOwned>(
+    client: &reqwest::Client,
+    url: &str,
+    proxy: &str,
+    run: Option<(&AppState, u64)>,
+) -> AppResult<T> {
+    Ok(accessible_get_with_proxy(client, url, proxy, run)
+        .await?
+        .json::<T>()
+        .await?)
 }
 
 async fn fetch_latest_release_uncached(client: &reqwest::Client) -> AppResult<GitHubRelease> {
@@ -648,11 +871,39 @@ fn stdout_version_matches_release(stdout: &str, tag_name: &str) -> bool {
     stdout.contains(tag_trim) || stdout.contains(no_v)
 }
 
-pub async fn upgrade_binary(state: &Arc<AppState>) -> AppResult<String> {
+async fn upgrade_binary(state: &Arc<AppState>, run: &UpgradeRun) -> AppResult<String> {
+    ensure_running(state, run.attempt)?;
     invalidate_release_cache(state).await;
-    let release = fetch_latest_release(&state.http_client, state).await?;
+    ensure_running(state, run.attempt)?;
+    let release = fetch_release_json_with_proxy(
+        &state.http_client,
+        RELEASE_API_URL,
+        &run.proxy,
+        Some((state, run.attempt)),
+    )
+    .await?;
     let current = current_version();
-    let latest = resolve_latest_version(&state.http_client, &release).await;
+    ensure_running(state, run.attempt)?;
+    let latest = match fetch_release_json_with_proxy::<GitHubCommit>(
+        &state.http_client,
+        RELEASE_COMMIT_API_URL,
+        &run.proxy,
+        Some((state, run.attempt)),
+    )
+    .await
+    {
+        Ok(commit) => {
+            let from_release = release_version_label(&release);
+            let resolved = normalize_commit_id(&commit.sha);
+            if looks_like_commit_id(&from_release) || resolved.is_empty() {
+                from_release
+            } else {
+                resolved
+            }
+        }
+        Err(error) if error.to_string() == CANCELLED_STAGE => return Err(error),
+        Err(_) => release_version_label(&release),
+    };
 
     if !release_is_newer_than_current(&current, &latest) {
         return Ok("Already up to date".to_string());
@@ -668,14 +919,16 @@ pub async fn upgrade_binary(state: &Arc<AppState>) -> AppResult<String> {
         s.target = latest.clone();
         s.total = binary_asset.size;
     })?;
+    let fallback = proxy_label(&run.proxy);
+    ensure_running(state, run.attempt)?;
     stage(
         state,
-        "Checking download access and checksum (GitHub, fallback httptunnel.top/gh)",
+        &format!("Checking download access and checksum (GitHub, fallback {fallback})"),
     )?;
-    let expected_hex = fetch_checksum_hex_retried(&state.http_client, &checksum_url).await?;
+    let expected_hex =
+        fetch_checksum_hex_retried(&state.http_client, &checksum_url, state, run).await?;
 
-    let temp_path = get_temp_binary_path();
-    let temp_path = Path::new(&temp_path);
+    let temp_path = run.temp_path.as_path();
 
     info!(
         from_version = %current,
@@ -686,26 +939,43 @@ pub async fn upgrade_binary(state: &Arc<AppState>) -> AppResult<String> {
         "starting upgrade download"
     );
 
-    stage(state, "Downloading binary (GitHub, fallback httptunnel.top/gh)")?;
+    ensure_running(state, run.attempt)?;
+    stage(
+        state,
+        &format!("Downloading binary (GitHub, fallback {fallback})"),
+    )?;
     download_binary_streaming_retried(
         &state.http_client,
         &binary_url,
         binary_asset.size,
         &expected_hex,
-        temp_path,
         state,
+        run,
     )
     .await?;
 
+    ensure_running(state, run.attempt)?;
     stage(state, "Verifying SHA256 and executable version")?;
     if let Err(e) = verify_temp_binary_executable(temp_path, &latest).await {
         let _ = tokio::fs::remove_file(temp_path).await;
         return Err(e);
     }
+    {
+        // Same lock as cancel_upgrade, so the marker and the cancel flag
+        // cannot cross. write_status_locked must not lock again.
+        let _install_gate = STATUS_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if upgrade_cancelled(state, run.attempt) {
+            return Err(AppError::message(CANCELLED_STAGE));
+        }
+        write_status_locked(state, |status| {
+            status.stage = "Backing up and installing binary".into();
+            status.events.push(status.stage.clone());
+        })?;
+    }
 
     let current_exe = std::env::current_exe()?;
-
-    stage(state, "Backing up and installing binary")?;
     let backup_path = format!("{}.bak", current_exe.display());
     fs::rename(&current_exe, &backup_path)
         .map_err(|e| AppError::context("Failed to backup current binary", e))?;
@@ -754,9 +1024,7 @@ pub async fn upgrade_binary(state: &Arc<AppState>) -> AppResult<String> {
         }
 
         let args = crate::auth::restart_args(std::env::args());
-        let err = std::process::Command::new(&current_exe)
-            .args(&args)
-            .exec();
+        let err = std::process::Command::new(&current_exe).args(&args).exec();
 
         error!("Failed to exec new binary: {}", err);
         error!("Attempting to restore from backup...");
@@ -764,9 +1032,7 @@ pub async fn upgrade_binary(state: &Arc<AppState>) -> AppResult<String> {
         if fs::rename(&backup_path, &current_exe).is_ok() {
             let _ = fs::set_permissions(&current_exe, fs::Permissions::from_mode(0o755));
             error!("Restored from backup, restarting with old version...");
-            let _ = std::process::Command::new(&current_exe)
-                .args(&args)
-                .exec();
+            let _ = std::process::Command::new(&current_exe).args(&args).exec();
         }
         let diag = format!(
             "miao upgrade failure: exec and backup restore both failed.\nbinary: {:?}\nbackup: {}\n",
@@ -862,6 +1128,121 @@ mod tests {
     }
 
     #[test]
+    fn github_proxy_accepts_https_prefix_and_rejects_credentials() {
+        assert_eq!(
+            super::normalize_github_proxy("").unwrap(),
+            "https://httptunnel.top/gh/"
+        );
+        assert_eq!(
+            super::normalize_github_proxy("https://example.test/gh").unwrap(),
+            "https://example.test/gh/"
+        );
+        assert!(super::normalize_github_proxy("http://example.test/gh/").is_err());
+        assert!(super::normalize_github_proxy("https://user:secret@example.test/gh/").is_err());
+        assert!(super::normalize_github_proxy("https://example.test/gh/?token=1").is_err());
+    }
+
+    #[tokio::test]
+    async fn custom_proxy_is_used_without_builtin_fallback_and_download_cancel_stops() {
+        use axum::{http::StatusCode, routing::get, Router};
+        use std::sync::{atomic::Ordering, Arc};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recorded = Arc::clone(&calls);
+        let app = Router::new().route(
+            "/mirror/{*path}",
+            get(move |path: axum::extract::Path<String>| {
+                let recorded = Arc::clone(&recorded);
+                async move {
+                    recorded.fetch_add(1, Ordering::SeqCst);
+                    assert!(path.starts_with("https://github.com/"));
+                    assert!(!path.contains("httptunnel.top"));
+                    (StatusCode::OK, "proxied")
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let state = crate::test_support::app_state(crate::models::Config::default());
+        state.upgrade_attempt.store(7, Ordering::SeqCst);
+        let run = super::UpgradeRun {
+            attempt: 7,
+            proxy: format!("{base}/mirror/"),
+            temp_path: state.config_path.with_extension("download"),
+        };
+        let response = super::accessible_get_with_proxy(
+            &reqwest::Client::new(),
+            "https://github.com/iVnc-Org/miao/releases/download/latest/asset",
+            &run.proxy,
+            Some((&state, run.attempt)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.text().await.unwrap(), "proxied");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let hang = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let hang_url = format!("http://{}/", hang.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((socket, _)) = hang.accept().await else {
+                    break;
+                };
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                drop(socket);
+            }
+        });
+        let state_for_cancel = std::sync::Arc::clone(&state);
+        let hanging = tokio::spawn(async move {
+            super::send_get(
+                &reqwest::Client::new(),
+                &hang_url,
+                Some((&state_for_cancel, 7)),
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        *state.upgrade_cancel.lock().unwrap() = Some(7);
+        let cancelled = tokio::time::timeout(std::time::Duration::from_secs(2), hanging)
+            .await
+            .expect("cancellation should interrupt the request");
+        assert_eq!(
+            cancelled.unwrap().unwrap_err().to_string(),
+            "Upgrade cancelled"
+        );
+        *state.upgrade_cancel.lock().unwrap() = Some(7);
+        let cancelled = super::download_binary_streaming_retried(
+            &reqwest::Client::new(),
+            "https://github.com/iVnc-Org/miao/releases/download/latest/miao",
+            4,
+            &"ab".repeat(32),
+            &state,
+            &run,
+        )
+        .await;
+        assert_eq!(cancelled.unwrap_err().to_string(), "Upgrade cancelled");
+        assert!(!run.temp_path.exists());
+        assert!(super::cancel_upgrade(&state).await.is_err());
+        state.upgrading.store(true, Ordering::SeqCst);
+        super::update_status(&state, |status| {
+            status.active = true;
+            status.stage = "Downloading binary via example.test".into();
+        })
+        .unwrap();
+        *state.upgrade_cancel.lock().unwrap() = None;
+        assert!(super::cancel_upgrade(&state).await.is_ok());
+        super::update_status(&state, |status| {
+            status.stage = "Backing up and installing binary".into();
+        })
+        .unwrap();
+        *state.upgrade_cancel.lock().unwrap() = None;
+        let refused = super::cancel_upgrade(&state).await;
+        assert!(refused.is_err());
+        assert!(refused.err().unwrap().to_string().contains("no longer"));
+        server.abort();
+    }
+
+    #[test]
     fn current_arch_asset_name_matches_supported_targets() {
         if cfg!(target_arch = "x86_64") {
             assert_eq!(current_arch_asset_name(), Some("miao-rust-linux-amd64"));
@@ -890,6 +1271,7 @@ mod tests {
             &reqwest::Client::new(),
             &format!("{base}/binary"),
             &format!("{base}/gh/"),
+            None,
         )
         .await
         .unwrap();
@@ -914,7 +1296,7 @@ mod tests {
         let status = super::upgrade_status(&state).await.unwrap();
         assert!(status.active);
         assert_eq!(status.downloaded, 1024);
-        assert!(super::start_upgrade(state.clone()).is_err());
+        assert!(super::start_upgrade(state.clone(), None).is_err());
         // A fresh process loads the same file, but has no live download task.
         let restarted = std::sync::Arc::new(
             crate::state::AppState::with_config_path(
@@ -948,6 +1330,7 @@ mod tests {
             &checksum,
             &path,
             &state,
+            None,
         )
         .await
         .unwrap();
@@ -962,6 +1345,7 @@ mod tests {
             &"0".repeat(64),
             &path,
             &state,
+            None,
         )
         .await;
         assert!(result.unwrap_err().to_string().contains("SHA256 mismatch"));
@@ -992,8 +1376,9 @@ mod tests {
         let state = crate::test_support::app_state(crate::models::Config::default());
         state.initializing.store(false, Ordering::SeqCst);
         state.vps_active.store(true, Ordering::SeqCst);
-        let error = start_upgrade(state.clone())
-            .err().expect("deployment must block upgrade");
+        let error = start_upgrade(state.clone(), None)
+            .err()
+            .expect("deployment must block upgrade");
         assert!(error.to_string().contains("VPS deployment"));
         assert!(!state.upgrading.load(Ordering::SeqCst));
     }

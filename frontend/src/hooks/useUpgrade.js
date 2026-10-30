@@ -31,9 +31,19 @@ export function useUpgrade() {
     poll()
     return () => { stopped = true; clearTimeout(timer); request?.abort() }
   }, [accept])
-  const start = useCallback(async () => {
+  const start = useCallback(async (githubProxy) => {
     setOpen(true)
-    const response = await fetch('/api/upgrade', { method: 'POST' })
+    const response = await fetch('/api/upgrade', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ github_proxy: githubProxy || '' }),
+    })
+    const payload = await response.json()
+    if (!payload.success) throw new Error(payload.message)
+    accept(payload.data)
+  }, [accept])
+  const cancel = useCallback(async () => {
+    const response = await fetch('/api/upgrade/cancel', { method: 'POST' })
     const payload = await response.json()
     if (!payload.success) throw new Error(payload.message)
     accept(payload.data)
@@ -43,5 +53,5 @@ export function useUpgrade() {
     if (status?.id) localStorage.setItem('miao-upgrade-dismissed', status.id)
     setOpen(false)
   }
-  return { status, offline, open, start, dismiss, show: () => setOpen(true) }
+  return { status, offline, open, start, cancel, dismiss, show: () => setOpen(true) }
 }

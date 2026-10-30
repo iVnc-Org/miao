@@ -3,6 +3,7 @@ import { useVps } from './hooks/useVps.js'
 import { VpsModal, VpsStatus } from './components/VpsModal.jsx'
 import { useUpgrade } from './hooks/useUpgrade.js'
 import { UpgradeModal } from './components/UpgradeModal.jsx'
+import { UpgradeConfirm } from './components/UpgradeConfirm.jsx'
 import { useEffect, useMemo, useState, useCallback } from 'react'
 import {
   TopBar,
@@ -73,6 +74,7 @@ export default function App() {
   const vps = useVps()
   const upgrading = Boolean(upgrade.status?.active)
   const [checkingVersion, setCheckingVersion] = useState(false)
+  const [upgradeConfirm, setUpgradeConfirm] = useState(null)
   const [nodeForm, setNodeForm] = useState(EMPTY_NODE_FORM)
   const [nodeType, setNodeType] = useState('hysteria2')
   const [showNodeModal, setShowNodeModal] = useState(false)
@@ -703,19 +705,8 @@ export default function App() {
       return
     }
 
-    const targetVersion = versionInfo.latest
-    const currentVersion = versionInfo.current
-    openConfirm(
-      t('confirm.upgradeTitle'),
-      t('confirm.upgradeMessage', { current: currentVersion, target: targetVersion }),
-      async () => {
-        try {
-          await upgrade.start()
-        } catch (error) {
-          showToast(error.message, 'error')
-        }
-      })
-  }, [status.running, versionInfo, fetchVersion, showToast, openConfirm, t, upgrade, upgrading])
+    setUpgradeConfirm({ current: versionInfo.current, target: versionInfo.latest })
+  }, [status.running, versionInfo, fetchVersion, showToast, t, upgrade, upgrading])
 
   const handleOpenDeleteNodeConfirm = useCallback((tag) => {
     openConfirm(t('confirm.deleteNodeTitle'), t('confirm.deleteNodeMessage', { tag }), () => handleDeleteNode(tag))
@@ -724,6 +715,23 @@ export default function App() {
   const handleOpenDeleteSubConfirm = useCallback((url, label) => {
     openConfirm(t('confirm.deleteSubTitle'), t('confirm.deleteSubMessage', { label }), () => handleDeleteSubscription(url))
   }, [openConfirm, handleDeleteSubscription, t])
+
+  const confirmUpgrade = async (proxy) => {
+    setUpgradeConfirm(null)
+    try { await upgrade.start(proxy) } catch (error) { showToast(error.message, 'error') }
+  }
+  const upgradeDialogs = (
+    <>
+      <UpgradeModal upgrade={upgrade} />
+      <UpgradeConfirm
+        open={Boolean(upgradeConfirm)}
+        current={upgradeConfirm?.current}
+        target={upgradeConfirm?.target}
+        onCancel={() => setUpgradeConfirm(null)}
+        onConfirm={confirmUpgrade}
+      />
+    </>
+  )
 
   const authBar = (
     <TopBar
@@ -739,12 +747,12 @@ export default function App() {
   )
 
   if (!firstLoadDone) {
-    return <div className="shell">{authBar}<UpgradeModal upgrade={upgrade} /><VpsModal vps={vps} /><VpsStatus vps={vps} /><div className="onboarding-loading">{t('app.loading')}</div>{authError && <p className="auth-inline-error" role="alert">{authError}</p>}</div>
+    return <div className="shell">{authBar}{upgradeDialogs}<VpsModal vps={vps} /><VpsStatus vps={vps} /><div className="onboarding-loading">{t('app.loading')}</div>{authError && <p className="auth-inline-error" role="alert">{authError}</p>}</div>
   }
 
   if (needsOnboarding) {
     return (
-      <div className="shell">{authBar}<UpgradeModal upgrade={upgrade} /><VpsModal vps={vps} /><VpsStatus vps={vps} />
+      <div className="shell">{authBar}{upgradeDialogs}<VpsModal vps={vps} /><VpsStatus vps={vps} />
         <OnboardingScreen
           onAddSub={handleAddSubscription}
           loadingAction={loadingAction}
@@ -771,7 +779,7 @@ export default function App() {
   const displayedProxyMode = modeSetup || status.mode
 
   return (
-    <div className="shell">{authBar}<UpgradeModal upgrade={upgrade} /><VpsModal vps={vps} /><VpsStatus vps={vps} />
+    <div className="shell">{authBar}{upgradeDialogs}<VpsModal vps={vps} /><VpsStatus vps={vps} />
       <main className="workspace">
         <StatusCard 
           status={status} 
