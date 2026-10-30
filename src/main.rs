@@ -1,5 +1,6 @@
 mod auth;
 mod build_info;
+mod embedding;
 mod error;
 mod handlers;
 mod models;
@@ -39,6 +40,7 @@ struct CliOptions {
     password_command: bool,
     show_help: bool,
     show_version: bool,
+    show_integration_version: bool,
     socks_listen: Option<String>,
     socks_port: Option<u16>,
     mode: Option<ProxyMode>,
@@ -160,6 +162,7 @@ where
             }
             "-h" | "--help" => options.show_help = true,
             "-V" | "--version" => options.show_version = true,
+            "--ivnc-integration-version" => options.show_integration_version = true,
             "--config" => {
                 let path = args
                     .next()
@@ -409,6 +412,11 @@ async fn main() -> AppResult<()> {
 
     let cli_options = parse_cli_args(std::env::args())?;
 
+    if cli_options.show_integration_version {
+        println!("{}", embedding::INTEGRATION_VERSION);
+        return Ok(());
+    }
+
     if cli_options.show_help {
         print_help();
         return Ok(());
@@ -424,6 +432,7 @@ async fn main() -> AppResult<()> {
         std::process::exit(1);
     }
 
+    embedding::validate()?;
     if cli_options.password_command || cli_options.password.is_some() {
         let password = match &cli_options.password {
             Some(value) => value.clone(),
@@ -499,7 +508,8 @@ async fn main() -> AppResult<()> {
             None => warning,
         });
     }
-    let port = config.port.unwrap_or(DEFAULT_PORT);
+    // A host-provided panel port does not rewrite the user's standalone config.
+    let port = embedding::panel_port(config.port.unwrap_or(DEFAULT_PORT))?;
     let socks_listen = config
         .socks_listen
         .as_deref()
@@ -521,7 +531,7 @@ async fn main() -> AppResult<()> {
 
     // 初始化应用状态
     let app_state = Arc::new(
-        AppState::with_config_path(config.clone(), config_path)
+        AppState::with_embedding(config.clone(), config_path, embedding::enabled())
             .map_err(|e| AppError::context("Failed to create HTTP client", e))?,
     );
     *app_state.config_warning.lock().await = migration_warning.clone();
@@ -530,11 +540,16 @@ async fn main() -> AppResult<()> {
 
     // Start web server immediately so the panel is accessible during initialization
     let app = router::build_router(app_state.clone());
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
+    let listen = if app_state.embedded {
+        "127.0.0.1"
+    } else {
+        "0.0.0.0"
+    };
+    let listener = tokio::net::TcpListener::bind((listen, port)).await?;
     info!(port = port, url = %format!("http://localhost:{}", port), "Miao panel started");
 
     // Auto-open browser for onboarding when no subs/nodes configured
-    if config.subs.is_empty() && config.nodes.is_empty() {
+    if !app_state.embedded && config.subs.is_empty() && config.nodes.is_empty() {
         let url = format!("http://localhost:{}", port);
         tokio::spawn(async move {
             open_onboarding_browser(url).await;

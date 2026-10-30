@@ -378,9 +378,12 @@ pub async fn guard(State(state): State<Arc<AppState>>, request: Request, next: N
     response
         .headers_mut()
         .insert("cache-control", "no-store".parse().unwrap());
-    response
-        .headers_mut()
-        .insert("x-frame-options", "DENY".parse().unwrap());
+    response.headers_mut().insert(
+        "x-frame-options",
+        if state.embedded { "SAMEORIGIN" } else { "DENY" }
+            .parse()
+            .unwrap(),
+    );
     response
 }
 pub async fn status(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
@@ -394,7 +397,24 @@ pub async fn status(State(state): State<Arc<AppState>>, headers: HeaderMap) -> R
         }
     };
     let s = session(&state, &headers);
-    Json(serde_json::json!({"success":true,"data":{"configured":credentials.is_some(),"authenticated":s.is_some(),"csrf":s.map(|s|s.csrf)}})).into_response()
+    let config = state.config.read().await;
+    let socks_listen = config
+        .socks_listen
+        .clone()
+        .unwrap_or_else(|| crate::models::DEFAULT_SOCKS_LISTEN.into());
+    let socks_port = config
+        .socks_port
+        .unwrap_or(crate::models::DEFAULT_SOCKS_PORT);
+    drop(config);
+    let proxy_running = crate::services::singbox::sing_box_is_running(&state).await;
+    Json(serde_json::json!({"success":true,"data":{
+        "configured":credentials.is_some(), "authenticated":s.is_some(), "csrf":s.map(|s|s.csrf),
+        "service":"miao", "service_pid":std::process::id(), "embedded":state.embedded,
+        "integration_version":crate::embedding::INTEGRATION_VERSION,
+        "initializing":state.initializing.load(std::sync::atomic::Ordering::Relaxed),
+        "proxy_running":proxy_running, "socks_listen":socks_listen, "socks_port":socks_port
+    }}))
+    .into_response()
 }
 #[derive(Deserialize)]
 pub struct Login {
@@ -626,6 +646,90 @@ mod tests {
         let value = crate::test_support::response_json(response).await;
         (cookie, value["data"]["csrf"].as_str().unwrap().into())
     }
+    #[tokio::test]
+    async fn embedded_identity_frames_and_authentication_remain_consistent() {
+        for embedded in [false, true] {
+            let path = std::env::temp_dir()
+                .join(format!("miao-embedding-auth-{}", random().unwrap()))
+                .join("config.yaml");
+            let config = crate::models::Config {
+                socks_listen: Some("127.0.0.1".into()),
+                socks_port: Some(19080),
+                ..Default::default()
+            };
+            let state = Arc::new(AppState::with_embedding(config, path.clone(), embedded).unwrap());
+            let app = crate::router::build_router(state.clone());
+            let response = app
+                .clone()
+                .oneshot(req(
+                    "GET",
+                    "/api/auth/status",
+                    None,
+                    None,
+                    serde_json::json!({}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.headers()["x-frame-options"],
+                if embedded { "SAMEORIGIN" } else { "DENY" }
+            );
+            let status = crate::test_support::response_json(response).await;
+            assert_eq!(status["data"]["service_pid"], std::process::id());
+            assert_eq!(status["data"]["embedded"], embedded);
+            assert_eq!(
+                status["data"]["integration_version"],
+                crate::embedding::INTEGRATION_VERSION
+            );
+            assert_eq!(status["data"]["socks_port"], 19080);
+            assert_eq!(status["data"]["proxy_running"], false);
+            assert_eq!(
+                app.clone()
+                    .oneshot(req("GET", "/api/status", None, None, serde_json::json!({})))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+            set_password(&state.config_path, "embedded-test-password", None).unwrap();
+            let (cookie, csrf) = sign_in(&app, "embedded-test-password").await;
+            if embedded {
+                let response = app
+                    .clone()
+                    .oneshot(req(
+                        "POST",
+                        "/api/upgrade",
+                        Some(&cookie),
+                        Some(&csrf),
+                        serde_json::json!({}),
+                    ))
+                    .await
+                    .unwrap();
+                let result = crate::test_support::response_json(response).await;
+                assert_eq!(result["success"], false);
+                assert!(result.to_string().contains("managed by iVnc"));
+                let info = crate::services::version::get_version_info(&state).await;
+                assert_eq!(info.managed_by.as_deref(), Some("ivnc"));
+                assert!(!state.upgrading.load(std::sync::atomic::Ordering::SeqCst));
+            }
+            let mut cross_site = req(
+                "POST",
+                "/api/auth/logout",
+                Some(&cookie),
+                Some(&csrf),
+                serde_json::json!({}),
+            );
+            cross_site
+                .headers_mut()
+                .insert("origin", "https://foreign.example".parse().unwrap());
+            assert_eq!(
+                app.clone().oneshot(cross_site).await.unwrap().status(),
+                StatusCode::FORBIDDEN
+            );
+            let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        }
+    }
+
     #[tokio::test]
     async fn all_management_routes_require_login_including_loopback_and_vps() {
         let state = state();

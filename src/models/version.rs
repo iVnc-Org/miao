@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize)]
 pub struct VersionInfo {
+    pub managed_by: Option<String>,
     pub current: String,
     pub sing_box_version: String,
     pub sing_box_revision: String,

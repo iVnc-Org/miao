@@ -54,7 +54,8 @@ export function TopBar({ status, versionInfo, upgrading, checkingVersion = false
   const nextTheme = theme === 'dark' ? 'light' : 'dark'
   const nextLocale = locale === 'zh' ? 'en' : 'zh'
   const busy = upgrading || checkingVersion
-  const upgradeLabel = upgrading ? (locale === 'zh' ? '升级中' : 'Upgrading') : versionInfo.has_update ? t('prefs.upgradePending') : t('prefs.upgrade')
+  const managed = versionInfo.managed_by === 'ivnc'
+  const upgradeLabel = managed ? (locale === 'zh' ? '随 iVnc 更新' : 'Updated by iVnc') : upgrading ? (locale === 'zh' ? '升级中' : 'Upgrading') : versionInfo.has_update ? t('prefs.upgradePending') : t('prefs.upgrade')
 
   return (
     <header className="topbar">
@@ -114,7 +115,7 @@ export function TopBar({ status, versionInfo, upgrading, checkingVersion = false
           <button
             className={classNames('version-chip', versionInfo.has_update && 'has-update')}
             onClick={onUpgradeClick}
-            disabled={!upgrading && (checkingVersion || status.initializing)}
+            disabled={managed || (!upgrading && (checkingVersion || status.initializing))}
           >
             {busy && <LoaderCircle size={12} className="spin" />}
             {!busy && versionInfo.has_update && <span className="version-dot" />}

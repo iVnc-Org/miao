@@ -28,7 +28,7 @@ const IP_RULE_BINARY: &[u8] = include_bytes!("../../embedded/geoip-cn.srs");
 const SITE_RULE_BINARY: &[u8] = include_bytes!("../../embedded/geosite-geolocation-cn.srs");
 
 pub fn get_sing_box_home() -> PathBuf {
-    PathBuf::from("/tmp/miao-sing-box")
+    crate::embedding::runtime_dir()
 }
 
 pub fn extract_sing_box() -> AppResult<PathBuf> {

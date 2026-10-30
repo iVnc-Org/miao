@@ -55,3 +55,4 @@ sudo ./miao --mode global --vps-host 203.0.113.10
 | VPS 前提、端口、节点复用与失败恢复 | [VPS 部署](docs/vps-deployment.md) |
 | 网页升级、备份迁移与常见问题 | [升级与维护](docs/maintenance.md) |
 | 内核版本、源码构建与测试 | [构建与验证](docs/development.md) |
+| iVnc 后台应用、宿主环境与配套发布 | [iVnc 嵌入接口](docs/ivnc-embedding.md) |

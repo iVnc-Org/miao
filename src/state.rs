@@ -11,6 +11,7 @@ use crate::models::{Config, GitHubRelease, SubStatus};
 /// 应用状态容器 - 包含所有运行时状态
 /// 通过依赖注入传递，避免全局静态变量
 pub struct AppState {
+    pub embedded: bool,
     pub auth: crate::auth::Auth,
     pub config: RwLock<Config>, // 使用 RwLock 支持并发读
     pub config_path: PathBuf,
@@ -41,11 +42,20 @@ impl AppState {
     }
 
     pub fn with_config_path(config: Config, config_path: PathBuf) -> Result<Self, reqwest::Error> {
+        Self::with_embedding(config, config_path, false)
+    }
+
+    pub fn with_embedding(
+        config: Config,
+        config_path: PathBuf,
+        embedded: bool,
+    ) -> Result<Self, reqwest::Error> {
         let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
 
         Ok(Self {
+            embedded,
             auth: crate::auth::Auth::default(),
             config: RwLock::new(config),
             config_path,

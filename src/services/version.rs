@@ -217,6 +217,11 @@ pub fn start_upgrade(
     state: Arc<AppState>,
     github_proxy: Option<String>,
 ) -> AppResult<UpgradeStatus> {
+    if state.embedded {
+        return Err(AppError::message(
+            "Miao is managed by iVnc; upgrade iVnc to update Miao",
+        ));
+    }
     let proxy = normalize_github_proxy(github_proxy.as_deref().unwrap_or(""))?;
     if state.shutting_down.load(Ordering::SeqCst) {
         return Err(AppError::message("Miao is shutting down"));
@@ -709,7 +714,11 @@ async fn invalidate_release_cache(state: &Arc<AppState>) {
 }
 
 pub async fn get_version_info(state: &Arc<AppState>) -> VersionInfo {
-    let base = current_version_info();
+    let mut base = current_version_info();
+    if state.embedded {
+        base.managed_by = Some("ivnc".into());
+        return base;
+    }
     if !sing_box_is_running(state).await {
         return base;
     }
@@ -742,6 +751,7 @@ pub async fn get_version_info(state: &Arc<AppState>) -> VersionInfo {
 
 fn current_version_info() -> VersionInfo {
     VersionInfo {
+        managed_by: None,
         current: current_version(),
         sing_box_version: env!("SING_BOX_VERSION").into(),
         sing_box_revision: env!("SING_BOX_REVISION").into(),
