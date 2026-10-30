@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -57,9 +58,7 @@ pub async fn prepare_data_dir() -> AppResult<()> {
 
         tokio::fs::set_permissions(&target_dir, std::fs::Permissions::from_mode(0o700))
             .await
-            .map_err(|error| {
-                AppError::context("Failed to secure Miao data directory", error)
-            })?;
+            .map_err(|error| AppError::context("Failed to secure Miao data directory", error))?;
     }
 
     let legacy_dir = Path::new(LEGACY_CACHE_DIR);
@@ -71,7 +70,9 @@ pub async fn prepare_data_dir() -> AppResult<()> {
         }
 
         match tokio::fs::copy(&source, &target).await {
-            Ok(_) => tracing::info!(from = ?source, to = ?target, "Migrated legacy persistent data"),
+            Ok(_) => {
+                tracing::info!(from = ?source, to = ?target, "Migrated legacy persistent data")
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
                 return Err(AppError::context(
@@ -95,35 +96,25 @@ fn absolutize(path: PathBuf) -> AppResult<PathBuf> {
     }
 }
 
+#[cfg(test)]
 fn config_arg_from(args: impl IntoIterator<Item = OsString>) -> AppResult<Option<PathBuf>> {
-    let mut args = args.into_iter();
-    while let Some(arg) = args.next() {
-        if arg == "--config" {
-            let value = args
-                .next()
-                .ok_or_else(|| AppError::message("--config requires a path"))?;
-            return Ok(Some(PathBuf::from(value)));
-        }
-
-        if let Some(value) = arg.to_str().and_then(|arg| arg.strip_prefix("--config=")) {
-            if value.is_empty() {
-                return Err(AppError::message("--config requires a path"));
-            }
-            return Ok(Some(PathBuf::from(value)));
-        }
+    let mut values = vec!["miao".to_string()];
+    for arg in args {
+        values.push(
+            arg.into_string()
+                .map_err(|_| AppError::message("Invalid CLI argument encoding"))?,
+        );
     }
-
-    Ok(None)
+    Ok(crate::parse_cli_args(values)?.config_path)
 }
 
-pub fn resolve_config_path() -> AppResult<ConfigPathResolution> {
-    if let Some(path) = config_arg_from(std::env::args_os().skip(1))? {
+pub fn resolve_config_path_with(explicit: Option<PathBuf>) -> AppResult<ConfigPathResolution> {
+    if let Some(path) = explicit {
         return Ok(ConfigPathResolution {
             path: absolutize(path)?,
             source: ConfigPathSource::Explicit,
         });
     }
-
     let exe_dir_config = std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(|parent| parent.join(CONFIG_FILENAME)));

@@ -1,3 +1,4 @@
+mod auth;
 mod build_info;
 mod error;
 mod handlers;
@@ -31,12 +32,23 @@ use services::{
 };
 use state::AppState;
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Default, PartialEq, Eq)]
 struct CliOptions {
+    password: Option<String>,
+    config_path: Option<std::path::PathBuf>,
+    password_command: bool,
     show_help: bool,
     show_version: bool,
     socks_listen: Option<String>,
     socks_port: Option<u16>,
+}
+
+impl std::fmt::Debug for CliOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CliOptions")
+            .field("password_command", &self.password_command)
+            .finish_non_exhaustive()
+    }
 }
 
 fn print_help() {
@@ -46,11 +58,13 @@ fn print_help() {
 
 Usage:
   miao [OPTIONS]
+  miao [--config PATH] password set [PASSWORD]
 
 Options:
   -h, --help                    Show this help message
   -V, --version                 Show version information
       --config <PATH>           Configuration file path
+      --password <PASSWORD>     Set persistent panel password and start
       --socks-listen <ADDR>     SOCKS5 listen address (default: {DEFAULT_SOCKS_LISTEN})
       --socks-port <PORT>       SOCKS5 listen port (default: {DEFAULT_SOCKS_PORT})
 
@@ -67,51 +81,71 @@ where
     S: Into<String>,
 {
     let mut options = CliOptions::default();
-    let mut args = args.into_iter().map(Into::into).skip(1);
-
+    let mut args = args.into_iter().map(Into::into).skip(1).peekable();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => options.show_help = true,
             "-V" | "--version" => options.show_version = true,
             "--config" => {
-                let value = args
+                let path = args
                     .next()
+                    .filter(|v| !v.trim().is_empty())
                     .ok_or_else(|| AppError::message("--config requires a path"))?;
-                if value.trim().is_empty() {
-                    return Err(AppError::message("--config requires a path"));
+                options.config_path = Some(path.into());
+            }
+            "--password" => {
+                if options.password.is_some() {
+                    return Err(AppError::message("Password specified more than once"));
+                }
+                options.password = Some(
+                    args.next()
+                        .ok_or_else(|| AppError::message("--password requires a value"))?,
+                );
+            }
+            "password" => {
+                if options.password_command || args.next().as_deref() != Some("set") {
+                    return Err(AppError::message("Usage: miao password set [PASSWORD]"));
+                }
+                options.password_command = true;
+                if args.peek().is_some_and(|v| !v.starts_with('-')) {
+                    if options.password.is_some() {
+                        return Err(AppError::message("Password specified more than once"));
+                    }
+                    options.password = args.next();
                 }
             }
             "--socks-listen" => {
-                let value = args
-                    .next()
-                    .ok_or_else(|| AppError::message("--socks-listen requires an address"))?;
-                options.socks_listen = Some(parse_socks_listen(&value)?);
+                options.socks_listen =
+                    Some(parse_socks_listen(&args.next().ok_or_else(|| {
+                        AppError::message("--socks-listen requires an address")
+                    })?)?)
             }
             "--socks-port" => {
-                let value = args
-                    .next()
-                    .ok_or_else(|| AppError::message("--socks-port requires a port"))?;
-                options.socks_port = Some(parse_socks_port(&value)?);
-            }
-            _ if arg.starts_with("--socks-listen=") => {
-                let value = arg.trim_start_matches("--socks-listen=");
-                options.socks_listen = Some(parse_socks_listen(value)?);
-            }
-            _ if arg.starts_with("--socks-port=") => {
-                let value = arg.trim_start_matches("--socks-port=");
-                options.socks_port = Some(parse_socks_port(value)?);
+                options.socks_port =
+                    Some(parse_socks_port(&args.next().ok_or_else(|| {
+                        AppError::message("--socks-port requires a port")
+                    })?)?)
             }
             _ if arg.starts_with("--config=") => {
-                let value = arg.trim_start_matches("--config=");
-                if value.trim().is_empty() {
+                let path = &arg[9..];
+                if path.trim().is_empty() {
                     return Err(AppError::message("--config requires a path"));
                 }
+                options.config_path = Some(path.into());
             }
-            _ => {
-                return Err(AppError::message(format!(
-                    "Unknown argument: {arg}. Use --help for usage."
-                )));
+            _ if arg.starts_with("--password=") => {
+                if options.password.is_some() {
+                    return Err(AppError::message("Password specified more than once"));
+                }
+                options.password = Some(arg[11..].into());
             }
+            _ if arg.starts_with("--socks-listen=") => {
+                options.socks_listen = Some(parse_socks_listen(&arg[15..])?)
+            }
+            _ if arg.starts_with("--socks-port=") => {
+                options.socks_port = Some(parse_socks_port(&arg[13..])?)
+            }
+            _ => return Err(AppError::message("Unknown argument. Use --help for usage.")),
         }
     }
 
@@ -294,6 +328,19 @@ async fn main() -> AppResult<()> {
         std::process::exit(1);
     }
 
+    if cli_options.password_command || cli_options.password.is_some() {
+        let password = match &cli_options.password {
+            Some(value) => value.clone(),
+            None => auth::prompt_password()?,
+        };
+        let resolution = paths::resolve_config_path_with(cli_options.config_path.clone())?;
+        auth::set_password(&resolution.path, &password, None)?;
+        if cli_options.password_command {
+            println!("Panel password updated.");
+            return Ok(());
+        }
+    }
+
     paths::prepare_data_dir().await?;
 
     if let Ok(current_exe) = std::env::current_exe() {
@@ -304,7 +351,7 @@ async fn main() -> AppResult<()> {
     }
 
     info!("Reading configuration...");
-    let config_resolution = paths::resolve_config_path()?;
+    let config_resolution = paths::resolve_config_path_with(cli_options.config_path.clone())?;
     let config_path = config_resolution.path.clone();
     info!(
         config_path = ?config_path,
@@ -554,6 +601,32 @@ custom_rules:
         assert!(!config_declares_key("mode: [", "mode"));
     }
 
+    #[test]
+    fn cli_password_commands_preserve_values_and_config_paths() {
+        let options = parse_cli_args([
+            "miao",
+            "--config",
+            "/tmp/instance.yaml",
+            "password",
+            "set",
+            "中文 $ ' pass",
+        ])
+        .unwrap();
+        assert!(options.password_command);
+        assert_eq!(options.password.as_deref(), Some("中文 $ ' pass"));
+        assert_eq!(
+            options.config_path.unwrap(),
+            std::path::PathBuf::from("/tmp/instance.yaml")
+        );
+        let options = parse_cli_args(["miao", "--password", "--config"]).unwrap();
+        assert_eq!(options.password.as_deref(), Some("--config"));
+        assert!(options.config_path.is_none());
+        let options = parse_cli_args(["miao", "password", "set", "--config=/tmp/x.yaml"]).unwrap();
+        assert!(options.password_command);
+        assert!(options.password.is_none());
+        assert!(parse_cli_args(["miao", "password", "set", "a", "b"]).is_err());
+        assert!(parse_cli_args(["miao", "password", "set", "a", "--password=b"]).is_err());
+    }
     #[test]
     fn cli_accepts_config_path_forms() {
         assert!(parse_cli_args(["miao", "--config", "/tmp/miao.yaml"]).is_ok());

@@ -10,24 +10,12 @@ Install or recover Hysteria2 from **Add node → VPS deployment**. Inspect first
 - VPS：Linux amd64/arm64、实际运行的 systemd/OpenRC。正式部署按需安装 Python 3.8+、PyYAML、OpenSSL、CA、iproute 等依赖。发行版软件源必须可用；不执行系统升级。
 - 入站：SSH TCP（默认 22），节点 UDP（默认 543）。只开放 TCP 不能使用 Hysteria2。出站需访问软件源、GitHub、DNS 和代理目标。
 - 防火墙、安全组、NAT、sshd 配置均不自动修改。没有公网 IP 时，需私网/VPN 互通或支持 UDP 的端口映射。
-- 面板可监听 `0.0.0.0:6161`，通过服务器 IP 或域名访问。面板没有通用登录系统，因此 VPS API 仅对真实回环连接且 Host 为 localhost/回环 IP 免令牌；其他访问（含容器转发和反向代理）需要部署令牌。可使用 SSH 隧道访问 `http://localhost:6161`。
-- 远程网页访问支持 HTTP/HTTPS；在 **Miao 进程环境**配置至少 32 字符的 `MIAO_VPS_TOKEN`。在部署弹窗中输入同一令牌，仅保留到当前浏览器会话结束。反向代理须保留外部 Host 和同源 Origin/Referer；不信任 X-Forwarded-* 来识别用户。
-- 远程调用 API 也必须提供 `Authorization: Bearer …` 和匹配 Host 的 HTTP/HTTPS Origin。GET 允许使用同源 HTTP/HTTPS Referer。令牌拥有部署权限，应作为管理凭据保护。不要将未受保护的面板直接暴露到公网。
+- 面板可监听 `0.0.0.0:6161`，通过服务器 IP 或域名使用 HTTP/HTTPS 访问。所有管理接口（包含 localhost）均需面板密码登录；VPS 部署不再使用 `MIAO_VPS_TOKEN` 或独立令牌。
+- 使用 `miao password set` 设置/重置面板密码，或通过 `miao --password '密码'` 设置并启动。网页右上角可以改密、退出登录。参见 [面板认证](panel-auth.md)。
+- 反向代理保留外部 Host、Origin 和 Cookie。CSRF 凭证由网页自动处理；HTTPS 终止后后端使用 HTTP 受支持，不依赖转发头来授予权限。
+- HTTP 明文传输面板密码和 SSH 凭据。详细提示收纳在 `?` 中，推荐 HTTPS 或 localhost SSH 隧道。
 
-Remote HTTP/HTTPS access requires a server-side `MIAO_VPS_TOKEN` (32+ characters) and the matching token in the deployment dialog. HTTP sends the token and SSH credentials without encryption; HTTPS or a localhost SSH tunnel is recommended. First SSH contact uses TOFU: check the VPS fingerprint through the provider console when possible. Changed host keys are rejected; fix known_hosts only after independently verifying the replacement.
-
-HTTP 会明文传输部署令牌、SSH 密码和临时私钥。令牌控制部署权限，不提供传输加密；已有密钥虽然不经过浏览器传输，令牌泄露仍可能让他人借用 Miao 主机密钥。HTTP 不强制额外确认，建议在可信网络使用，或配置 HTTPS / SSH 隧道。
-
-令牌示例（不要使用固定示例字符串）：
-
-```bash
-# 当前终端启动；systemd/Docker 请配置到服务的实际进程环境并重启
-export MIAO_VPS_TOKEN="$(openssl rand -hex 32)"
-# 将生成的令牌保存在自己的密码管理器，并在弹窗填写；再从同一终端启动 Miao
-miao
-```
-
-`GET /api/vps/access` 仅返回 `local`、`token_configured`、`authorized` 三个访问状态，不返回凭据或任务。敏感 API 逐次重新鉴权，不能通过修改前端状态绕过。反向代理须保留外部 Host、Authorization 和 Origin/Referer；HTTPS 终止后内部使用 HTTP 也受支持。远程没有有效令牌时不读取任务；刷新后使用当前会话令牌恢复进度，修改令牌或鉴权失效时清空已展示任务。
+Sign in with the panel password to deploy VPS hosts; no separate VPS token is needed. Configure the password using `miao password set`. HTTP is supported but unencrypted. First SSH contact uses TOFU; changed host keys are rejected.
 
 ## NAT 与端口
 

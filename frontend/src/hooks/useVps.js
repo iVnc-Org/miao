@@ -1,16 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 export function useVps() {
-  const [token, setToken] = useState(() => sessionStorage.getItem('miao-vps-token') || '')
   const [jobs, setJobs] = useState([])
-  const [access, setAccess] = useState(null)
   const [open, setOpen] = useState(false)
   const [error, setError] = useState('')
   const hiddenTask = useRef('')
   const request = useCallback(async (endpoint, body, signal) => {
     const response = await fetch(`/api/vps/${endpoint}`, {
       method: body ? 'POST' : 'GET', signal,
-      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      headers: { 'Content-Type': 'application/json' },
       ...(body ? { body: JSON.stringify(body) } : {}),
     })
     const payload = await response.json()
@@ -20,7 +18,7 @@ export function useVps() {
       throw cause
     }
     return payload.data
-  }, [token])
+  }, [])
   useEffect(() => {
     let stopped = false
     let timer
@@ -29,14 +27,6 @@ export function useVps() {
       controller = new AbortController()
       const timeout = setTimeout(() => controller.abort(), 8000)
       try {
-        const permissions = await request('access', null, controller.signal)
-        if (stopped) return
-        setAccess(permissions)
-        if (!permissions.authorized) {
-          setJobs([])
-          setError('')
-          return
-        }
         const records = await request('deployments', null, controller.signal)
         if (!stopped) {
           setJobs(records)
@@ -49,7 +39,6 @@ export function useVps() {
           setError(cause.message)
           if (cause.status === 403) {
             setJobs([])
-            setAccess(null)
           }
         }
       } finally {
@@ -60,19 +49,11 @@ export function useVps() {
     poll()
     return () => { stopped = true; clearTimeout(timer); controller?.abort() }
   }, [request])
-  const updateToken = value => {
-    if (value === token) return
-    setAccess(null)
-    setJobs([])
-    setToken(value)
-    if (value) sessionStorage.setItem('miao-vps-token', value)
-    else sessionStorage.removeItem('miao-vps-token')
-  }
   const close = () => {
     const latest = jobs[0]
     if (latest) localStorage.setItem('miao-vps-dismissed', `${latest.id}:${latest.stage}`)
     hiddenTask.current = latest?.id || ''
     setOpen(false)
   }
-  return { jobs, access, open, setOpen, error, token, updateToken, request, close }
+  return { jobs, open, setOpen, error, request, close }
 }

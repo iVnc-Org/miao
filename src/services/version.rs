@@ -753,9 +753,9 @@ pub async fn upgrade_binary(state: &Arc<AppState>) -> AppResult<String> {
             }
         }
 
-        let args: Vec<String> = std::env::args().collect();
+        let args = crate::auth::restart_args(std::env::args());
         let err = std::process::Command::new(&current_exe)
-            .args(&args[1..])
+            .args(&args)
             .exec();
 
         error!("Failed to exec new binary: {}", err);
@@ -765,7 +765,7 @@ pub async fn upgrade_binary(state: &Arc<AppState>) -> AppResult<String> {
             let _ = fs::set_permissions(&current_exe, fs::Permissions::from_mode(0o755));
             error!("Restored from backup, restarting with old version...");
             let _ = std::process::Command::new(&current_exe)
-                .args(&args[1..])
+                .args(&args)
                 .exec();
         }
         let diag = format!(

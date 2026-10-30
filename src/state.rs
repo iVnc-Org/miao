@@ -11,6 +11,7 @@ use crate::models::{Config, GitHubRelease, SubStatus};
 /// 应用状态容器 - 包含所有运行时状态
 /// 通过依赖注入传递，避免全局静态变量
 pub struct AppState {
+    pub auth: crate::auth::Auth,
     pub config: RwLock<Config>, // 使用 RwLock 支持并发读
     pub config_path: PathBuf,
     pub config_update: Mutex<()>,
@@ -23,7 +24,7 @@ pub struct AppState {
     pub version_cache: ArcSwap<VersionCache>, // 使用 ArcSwap 实现无锁读取
     pub shutting_down: AtomicBool,
     pub vps_active: AtomicBool,
-    pub upgrading: AtomicBool,                // 防止并发升级
+    pub upgrading: AtomicBool, // 防止并发升级
 }
 
 impl AppState {
@@ -39,6 +40,7 @@ impl AppState {
             .build()?;
 
         Ok(Self {
+            auth: crate::auth::Auth::default(),
             config: RwLock::new(config),
             config_path,
             config_update: Mutex::new(()),

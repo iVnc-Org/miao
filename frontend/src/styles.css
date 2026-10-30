@@ -1951,3 +1951,14 @@ html[data-embed-mode='true'] .modal-card {
 
 /* Reopen persistent remote deployment tasks from every application screen. */
 .vps-task-status { position: fixed; right: 1rem; bottom: 1rem; z-index: 40; padding: .6rem 1rem; border: 1px solid var(--border); background: var(--surface); color: var(--text-strong); border-radius: var(--radius); cursor: pointer; }
+
+.vps-field-heading { display: flex; align-items: center; gap: 6px; }
+.vps-help { display: inline-flex; vertical-align: middle; }
+.vps-help-button { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: 1px solid currentColor; border-radius: 50%; background: transparent; color: inherit; font: inherit; font-size: 12px; cursor: help; }
+.vps-help-button:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
+.vps-help-content { position: fixed; z-index: 10000; box-sizing: border-box; padding: 10px 12px; border-radius: 8px; background: #20242b; color: #fff; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; box-shadow: 0 4px 16px #0003; max-height: min(260px, 45vh); overflow-y: auto; }
+.vps-compact-note { font-size: 13px; }
+.auth-page { min-height: 100dvh; display: grid; place-items: center; padding: 24px; }
+.auth-card { width: min(100%, 420px); }
+.auth-card form { display: grid; gap: 16px; }
+.auth-toolbar { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; padding: 8px 24px; }

@@ -20,14 +20,14 @@ use crate::state::AppState;
 
 pub fn build_router(app_state: Arc<AppState>) -> Router {
     Router::new()
+        .route("/api/auth/status", get(crate::auth::status))
+        .route("/api/auth/login", post(crate::auth::login))
+        .route("/api/auth/setup", post(crate::auth::setup))
+        .route("/api/auth/logout", post(crate::auth::logout))
+        .route("/api/auth/password", put(crate::auth::change_password))
         .route("/", get(serve_index))
         .route("/favicon.svg", get(serve_favicon))
         .route("/api/status", get(get_status))
-        .route(
-            "/api/vps/access",
-            get(crate::handlers::vps::access)
-                .layer(axum::middleware::from_fn(crate::handlers::vps::no_store)),
-        )
         .route(
             "/api/vps/preflight",
             post(crate::handlers::vps::preflight)
@@ -75,6 +75,10 @@ pub fn build_router(app_state: Arc<AppState>) -> Router {
         .route("/api/clash/proxies/{name}/delay", get(test_proxy_delay))
         .route("/api/clash/traffic", get(traffic_ws))
         .route("/api/last-proxy", post(set_last_proxy))
+        .layer(axum::middleware::from_fn_with_state(
+            app_state.clone(),
+            crate::auth::guard,
+        ))
         .with_state(app_state)
 }
 

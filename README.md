@@ -29,7 +29,20 @@ wget https://github.com/iVnc-Org/miao/releases/download/latest/miao-rust-linux-a
 sudo ./miao
 ```
 
-访问 `http://localhost:6161`，首次启动会进入引导页面，添加订阅链接或手动节点即可开始使用。
+访问 `http://localhost:6161`，未设置密码时会显示初始密码设置页面，设置成功后自动进入面板；已有密码时输入密码登录。首次进入后可添加订阅链接或手动节点。初始化完成前管理接口保持锁定。
+
+面板只有一个管理员密码，可在网页右上角修改密码或退出登录，也可通过 CLI 设置/重置：
+
+```bash
+# 交互输入两次，设置完成后退出；运行中的面板自动识别修改
+sudo ./miao password set
+# 明确指定配置实例；密码不会写入普通代理配置
+sudo ./miao --config /etc/miao/config.yaml password set '你的新密码'
+# 设置持久密码并启动
+sudo ./miao --password '你的密码'
+```
+
+认证文件为配置文件同名的 `.auth.json`，明文存储密码，权限 `0600`。启动不带 `--password` 时沿用保存的密码；显式带此参数会重设密码，因此服务配置长期使用普通启动命令，避免重启覆盖网页改密。内置升级重启不会重放密码参数。登录会话有效期 7 天；改密、CLI 重置或进程重启后需要重新登录。命令行明文密码可能进入 shell 历史/进程参数，推荐交互输入。HTTP 支持保留，但不提供传输加密。详细说明见 [面板认证](docs/panel-auth.md)。
 
 查看启动参数：
 
@@ -179,7 +192,7 @@ miao 会把成功解析的订阅节点持久化到 `$HOME/.miao/sub_nodes.json`�
 
 “添加节点 → VPS 部署”支持通过 SSH 安装 Hysteria2、恢复已有 Miao 节点或迁移旧部署。支持密码/密钥认证、自定义 SSH 和节点端口、IPv6/私网/NAT 映射；进度持久化，刷新后恢复弹窗。未知部署默认保护，安装失败执行事务回滚，新节点固定信任证书。
 
-默认放行 SSH 22/TCP 与 Hysteria2 543/UDP；安全组和防火墙不会自动修改。部署入口支持通过服务器 IP/域名使用 HTTP 或 HTTPS 访问；远程访问需服务端配置 `MIAO_VPS_TOKEN`（至少 32 字符），并在弹窗填写同一令牌。真实 localhost 连接免令牌。HTTP 会明文传输令牌及 SSH 凭据，建议使用 HTTPS 或 SSH 隧道。SSH 凭据不保存。
+默认放行 SSH 22/TCP 与 Hysteria2 543/UDP；安全组和防火墙不会自动修改。部署入口支持通过服务器 IP/域名使用 HTTP 或 HTTPS 访问，登录面板后直接使用，无需单独的 VPS 访问令牌。HTTP 会明文传输密码及 SSH 凭据，建议使用 HTTPS 或 SSH 隧道。SSH 凭据不保存。
 
 原有 `vps_ip` 配置继续支持，改用同一后台引擎和本机密钥认证，SSH 期间不占配置锁，探测失败不再自动重装：
 

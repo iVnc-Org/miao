@@ -4,7 +4,7 @@ import { expect, it, vi } from 'vitest'
 import { VpsModal } from './VpsModal.jsx'
 import { PrefsProvider, LOCALE_STORAGE_KEY } from '../i18n.jsx'
 
-const controller = () => ({ access: { local: false, token_configured: true, authorized: true }, open: true, close: vi.fn(), jobs: [], token: '', updateToken: vi.fn(), request: vi.fn(), error: '' })
+const controller = () => ({ open: true, close: vi.fn(), jobs: [], request: vi.fn(), error: '' })
 
 it('requires inspection, blocks unknown services and clears credentials after closing', async () => {
   const vps = controller()
@@ -59,7 +59,7 @@ it('shows English connection results and security requirements', () => {
   vps.jobs = [{ id: 'task', host: '203.0.113.10', stage: 'connectivity_failed', active: false, events: [] }]
   render(<PrefsProvider><VpsModal vps={vps} /></PrefsProvider>)
   expect(screen.getByText('Node saved; connectivity check failed')).toBeInTheDocument()
-  expect(screen.getByText(/Remote HTTP\/HTTPS access requires/)).toBeInTheDocument()
+  expect(screen.queryByLabelText('Deployment access token')).not.toBeInTheDocument()
 })
 
 for (const auth of ['password', 'private_key', 'local_key']) {
@@ -72,19 +72,21 @@ for (const auth of ['password', 'private_key', 'local_key']) {
     if (auth !== 'local_key') fireEvent.change(screen.getByLabelText(auth === 'password' ? 'root 密码' : 'SSH 私钥'), { target: { value: 'secret' } })
     fireEvent.click(screen.getByRole('button', { name: '检查环境' }))
     await waitFor(() => expect(vps.request).toHaveBeenCalledWith('preflight', expect.objectContaining({ auth }), expect.any(AbortSignal)))
-    expect(screen.getByText(/当前连接使用 HTTP/)).toBeInTheDocument()
-    expect(screen.getByLabelText('部署访问令牌')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'HTTP 连接说明' })).toBeInTheDocument()
+    expect(screen.queryByLabelText('部署访问令牌')).not.toBeInTheDocument()
   })
 }
 
-it('explains missing configuration and invalid tokens before inspection, including active tasks', () => {
+it('keeps deployment details hidden until requested and does not ask for a separate token', () => {
   const vps = controller()
-  vps.access = { local: false, token_configured: false, authorized: false }
-  const { rerender } = render(<VpsModal vps={vps} />)
-  expect(screen.getByText(/远程部署尚未启用/)).toBeInTheDocument()
-  expect(screen.getByRole('button', { name: '检查环境' })).toBeDisabled()
-  rerender(<VpsModal vps={{ ...vps, access: { ...vps.access, token_configured: true } }} />)
-  expect(screen.getByText('请填写有效的部署访问令牌后检查环境。')).toBeInTheDocument()
-  rerender(<VpsModal vps={{ ...vps, jobs: [{ active: true, stage: 'checking', host: 'host', events: [] }] }} />)
-  expect(screen.getByLabelText('部署访问令牌')).toBeVisible()
+  render(<VpsModal vps={vps} />)
+  expect(screen.queryByText(/部署访问令牌/)).not.toBeInTheDocument()
+  const help = screen.getByRole('button', { name: '部署说明' })
+  fireEvent.mouseEnter(help)
+  expect(screen.getByRole('tooltip')).toHaveTextContent('未知服务不会被覆盖')
+  fireEvent.keyDown(help, { key: 'Escape' })
+  expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
+  expect(vps.close).not.toHaveBeenCalled()
+  fireEvent.focus(help)
+  expect(help).toHaveAttribute('aria-describedby', screen.getByRole('tooltip').id)
 })
