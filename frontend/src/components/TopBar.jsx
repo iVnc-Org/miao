@@ -1,4 +1,4 @@
-import { Languages, LoaderCircle, Moon, Sun } from 'lucide-react'
+import { KeyRound, Languages, LoaderCircle, LogOut, Moon, Sun } from 'lucide-react'
 import { classNames } from '../utils.js'
 import { useI18n } from '../i18n.jsx'
 import { LogoIcon } from './ui.jsx'
@@ -49,7 +49,7 @@ export function CommitBadge({ versionInfo }) {
   )
 }
 
-export function TopBar({ status, versionInfo, upgrading, checkingVersion = false, onUpgradeClick }) {
+export function TopBar({ status, versionInfo, upgrading, checkingVersion = false, onUpgradeClick, onChangePassword, onSignOut, signingOut = false }) {
   const { t, theme, locale, setTheme, setLocale } = useI18n()
   const nextTheme = theme === 'dark' ? 'light' : 'dark'
   const nextLocale = locale === 'zh' ? 'en' : 'zh'
@@ -83,6 +83,27 @@ export function TopBar({ status, versionInfo, upgrading, checkingVersion = false
           >
             <Languages size={13} />
             <span>{locale === 'zh' ? t('prefs.en') : t('prefs.zh')}</span>
+          </button>
+          <button
+            type="button"
+            className="pref-chip"
+            onClick={(event) => onChangePassword?.(event.currentTarget)}
+            title={t('prefs.changePassword')}
+            aria-label={t('prefs.changePassword')}
+          >
+            <KeyRound size={13} />
+            <span>{t('prefs.changePassword')}</span>
+          </button>
+          <button
+            type="button"
+            className="pref-chip"
+            onClick={onSignOut}
+            disabled={signingOut}
+            title={t('prefs.signOut')}
+            aria-label={t('prefs.signOut')}
+          >
+            <LogOut size={13} />
+            <span>{t('prefs.signOut')}</span>
           </button>
         </div>
         <div className={classNames('run-badge', status.running ? 'running' : 'stopped')}>

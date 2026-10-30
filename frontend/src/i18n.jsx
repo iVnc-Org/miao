@@ -19,6 +19,8 @@ const ZH = {
   'prefs.upgradePending': '待升级',
   'prefs.openCommit': '查看当前版本提交',
   'prefs.openLatestCommit': '查看待升级版本提交',
+  'prefs.changePassword': '修改密码',
+  'prefs.signOut': '退出登录',
 
   'mode.global': '全局代理',
   'mode.process': '进程代理',
@@ -321,6 +323,8 @@ const EN = {
   'prefs.upgradePending': 'Update ready',
   'prefs.openCommit': 'Open the current commit',
   'prefs.openLatestCommit': 'Open the pending commit',
+  'prefs.changePassword': 'Change password',
+  'prefs.signOut': 'Sign out',
 
   'mode.global': 'Global',
   'mode.process': 'Process',

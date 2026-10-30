@@ -1,3 +1,4 @@
+import { useAuthActions } from './authActions.js'
 import { useVps } from './hooks/useVps.js'
 import { VpsModal, VpsStatus } from './components/VpsModal.jsx'
 import { useUpgrade } from './hooks/useUpgrade.js'
@@ -64,6 +65,7 @@ function hasProcessMatch(config) {
 }
 
 export default function App() {
+  const { openPassword, signOut, signingOut, authError } = useAuthActions()
   const { t } = useI18n()
   const [firstLoadDone, setFirstLoadDone] = useState(false)
   const [loadingAction, setLoadingAction] = useState('')
@@ -723,18 +725,32 @@ export default function App() {
     openConfirm(t('confirm.deleteSubTitle'), t('confirm.deleteSubMessage', { label }), () => handleDeleteSubscription(url))
   }, [openConfirm, handleDeleteSubscription, t])
 
+  const authBar = (
+    <TopBar
+      status={status}
+      versionInfo={versionInfo}
+      upgrading={upgrading}
+      checkingVersion={checkingVersion}
+      onUpgradeClick={handleUpgradeClick}
+      onChangePassword={openPassword}
+      onSignOut={signOut}
+      signingOut={signingOut}
+    />
+  )
+
   if (!firstLoadDone) {
-    return <div className="shell"><UpgradeModal upgrade={upgrade} /><VpsModal vps={vps} /><VpsStatus vps={vps} /><div className="onboarding-loading">{t('app.loading')}</div></div>
+    return <div className="shell">{authBar}<UpgradeModal upgrade={upgrade} /><VpsModal vps={vps} /><VpsStatus vps={vps} /><div className="onboarding-loading">{t('app.loading')}</div>{authError && <p className="auth-inline-error" role="alert">{authError}</p>}</div>
   }
 
   if (needsOnboarding) {
     return (
-      <div className="shell"><UpgradeModal upgrade={upgrade} /><VpsModal vps={vps} /><VpsStatus vps={vps} />
+      <div className="shell">{authBar}<UpgradeModal upgrade={upgrade} /><VpsModal vps={vps} /><VpsStatus vps={vps} />
         <OnboardingScreen
           onAddSub={handleAddSubscription}
           loadingAction={loadingAction}
           onOpenAddNode={handleOpenAddNode}
         />
+        {authError && <p className="auth-inline-error" role="alert">{authError}</p>}
         <ToastStack toasts={toasts} />
         <NodeModal
           open={showNodeModal}
@@ -755,15 +771,7 @@ export default function App() {
   const displayedProxyMode = modeSetup || status.mode
 
   return (
-    <div className="shell"><UpgradeModal upgrade={upgrade} /><VpsModal vps={vps} /><VpsStatus vps={vps} />
-      <TopBar
-        status={status}
-        versionInfo={versionInfo}
-        upgrading={upgrading}
-        checkingVersion={checkingVersion}
-        onUpgradeClick={handleUpgradeClick}
-      />
-
+    <div className="shell">{authBar}<UpgradeModal upgrade={upgrade} /><VpsModal vps={vps} /><VpsStatus vps={vps} />
       <main className="workspace">
         <StatusCard 
           status={status} 

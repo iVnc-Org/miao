@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { CircleHelp } from 'lucide-react'
 import { useI18n } from '../i18n.jsx'
 import { setAuthCsrf } from '../authFetch.js'
+import { AuthActionsContext } from '../authActions.js'
 
 export function AuthGate({ children }) {
   const { locale } = useI18n()
@@ -109,7 +111,7 @@ export function AuthGate({ children }) {
     mismatch: text('两次新密码不一致。', 'New passwords do not match.'), change: text('修改失败，请检查当前密码和认证文件权限。', 'Update failed. Check current password and authentication file permissions.'),
   }
   if (!status?.authenticated) return <main className="auth-page"><section className="modal-card auth-card">
-    <h1>Miao {location.protocol === 'http:' && <span className="vps-help" title={text('HTTP 会明文传输密码，建议使用 HTTPS 或 SSH 隧道。', 'HTTP transmits passwords without encryption. HTTPS or an SSH tunnel is recommended.')}><button type="button" className="vps-help-button" aria-label={text('连接说明', 'Connection information')}>?</button></span>}</h1>
+    <h1>Miao {location.protocol === 'http:' && <span className="vps-help" title={text('HTTP 会明文传输密码，建议使用 HTTPS 或 SSH 隧道。', 'HTTP transmits passwords without encryption. HTTPS or an SSH tunnel is recommended.')}><button type="button" className="vps-help-button" aria-label={text('连接说明', 'Connection information')}><CircleHelp size={14} strokeWidth={1.75} /></button></span>}</h1>
     {status === null ? <p role="status">{text('正在检查登录状态…', 'Checking sign-in…')}</p> : status.configured ? <form onSubmit={submit}>
       <label className="field"><span>{text('面板密码', 'Panel password')}</span><input type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} required /></label>
       <button className="btn" disabled={busy || !password}>{text('登录', 'Sign in')}</button>
@@ -121,8 +123,13 @@ export function AuthGate({ children }) {
     </form> : <p>{text('正在等待认证服务恢复…', 'Waiting for authentication service…')}</p>}
     {error && <p role="alert">{errors[error]}</p>}
   </section></main>
-  return <>
-    <div className="auth-toolbar"><button className="btn btn-ghost" onClick={event => { returnFocus.current = event.currentTarget; setChange(true); setError('') }}>{text('修改密码', 'Change password')}</button><button className="btn btn-ghost" disabled={busy} onClick={logout}>{text('退出登录', 'Sign out')}</button>{error && !change && <span role="alert">{errors[error]}</span>}</div>
+  const actions = {
+    openPassword: (trigger) => { returnFocus.current = trigger || null; setChange(true); setError('') },
+    signOut: logout,
+    signingOut: busy,
+    authError: error && !change ? errors[error] : '',
+  }
+  return <AuthActionsContext.Provider value={actions}>
     {children}
     {change && <div className="modal-overlay"><section ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="password-title" className="modal-card auth-card">
       <h2 id="password-title">{text('修改密码', 'Change password')}</h2>
@@ -134,5 +141,5 @@ export function AuthGate({ children }) {
         <div className="modal-actions"><button type="button" className="btn" onClick={clearSecrets}>{text('取消', 'Cancel')}</button><button className="btn btn-primary" disabled={busy}>{text('保存并重新登录', 'Save and sign in again')}</button></div>
       </form>
     </section></div>}
-  </>
+  </AuthActionsContext.Provider>
 }

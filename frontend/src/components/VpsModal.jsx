@@ -1,5 +1,6 @@
 import { createPortal } from 'react-dom'
 import { useEffect, useId, useRef, useState } from 'react'
+import { CircleHelp } from 'lucide-react'
 import { useI18n } from '../i18n.jsx'
 import { Button } from './ui.jsx'
 
@@ -33,7 +34,7 @@ function Help({ label, children }) {
   return <span className="vps-help">
     <button type="button" className="vps-help-button" aria-label={label} aria-describedby={position ? id : undefined}
       onMouseEnter={show} onMouseLeave={hide} onFocus={show} onBlur={() => setPosition(null)} onClick={show}
-      onKeyDown={event => { if (event.key === 'Escape' && position) { event.stopPropagation(); setPosition(null) } }}>?</button>
+      onKeyDown={event => { if (event.key === 'Escape' && position) { event.stopPropagation(); setPosition(null) } }}><CircleHelp size={14} strokeWidth={1.75} /></button>
     {position && createPortal(<span id={id} role="tooltip" className="vps-help-content" style={position} onMouseEnter={() => clearTimeout(hideTimer.current)} onMouseLeave={hide}>{children}</span>, document.body)}
   </span>
 }

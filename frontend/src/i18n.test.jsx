@@ -30,10 +30,14 @@ describe('i18n and theme prefs', () => {
           versionInfo={{ current: 'abc1234', has_update: false }}
           upgrading={false}
           onUpgradeClick={() => {}}
+          onChangePassword={() => {}}
+          onSignOut={() => {}}
         />
       </PrefsProvider>
     )
 
+    expect(screen.getByRole('button', { name: '修改密码' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '退出登录' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '升级' })).toBeInTheDocument()
     expect(screen.getByText('abc1234')).toBeInTheDocument()
 
@@ -45,6 +49,8 @@ describe('i18n and theme prefs', () => {
     expect(document.documentElement.lang).toBe('en')
     expect(window.localStorage.getItem(LOCALE_STORAGE_KEY)).toBe('en')
     expect(screen.getByText('Stopped')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Change password' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Sign out' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Upgrade' })).toBeInTheDocument()
   })
 
@@ -62,6 +68,8 @@ describe('i18n and theme prefs', () => {
           }}
           upgrading={false}
           onUpgradeClick={() => {}}
+          onChangePassword={() => {}}
+          onSignOut={() => {}}
         />
       </PrefsProvider>
     )

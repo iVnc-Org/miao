@@ -1,6 +1,26 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
+import { useAuthActions } from '../authActions.js'
 import { AuthGate } from './AuthGate.jsx'
+import { TopBar } from './TopBar.jsx'
+
+function Panel() {
+  const { openPassword, signOut, signingOut } = useAuthActions()
+  return (
+    <>
+      <TopBar
+        status={{ running: true, initializing: false }}
+        versionInfo={{ current: 'abc1234', has_update: false }}
+        upgrading={false}
+        onUpgradeClick={() => {}}
+        onChangePassword={openPassword}
+        onSignOut={signOut}
+        signingOut={signingOut}
+      />
+      <div>management</div>
+    </>
+  )
+}
 const reply = (data, status = 200) => ({ ok: status === 200, status, json: async () => ({ success: status === 200, data }) })
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers() })
 it('does not mount management UI before login; never stores the password', async () => {
@@ -8,7 +28,7 @@ it('does not mount management UI before login; never stores the password', async
   const fetch = vi.fn().mockResolvedValueOnce(reply({ configured: true, authenticated: false }))
     .mockResolvedValueOnce(reply({ csrf: 'csrf' }))
   vi.stubGlobal('fetch', fetch)
-  render(<AuthGate><div>management</div></AuthGate>)
+  render(<AuthGate><Panel /></AuthGate>)
   expect(screen.queryByText('management')).not.toBeInTheDocument()
   fireEvent.change(await screen.findByLabelText('面板密码'), { target: { value: 'secret-password' } })
   fireEvent.click(screen.getByRole('button', { name: '登录' }))
@@ -23,7 +43,7 @@ it('does not mount management UI before login; never stores the password', async
 it('sets an initial password with confirmation and enters only after setup succeeds', async () => {
   const fetch = vi.fn().mockResolvedValueOnce(reply({ configured: false, authenticated: false })).mockResolvedValueOnce(reply({ csrf: 'initial-csrf' }))
   vi.stubGlobal('fetch', fetch)
-  render(<AuthGate><div>management</div></AuthGate>)
+  render(<AuthGate><Panel /></AuthGate>)
   expect(await screen.findByText('设置初始密码')).toBeInTheDocument()
   expect(screen.queryByText('management')).not.toBeInTheDocument()
   fireEvent.change(screen.getByLabelText('初始密码'), { target: { value: 'initial' } })
@@ -40,7 +60,7 @@ it('sets an initial password with confirmation and enters only after setup succe
 it('returns to login if another browser or CLI has already initialized the password', async () => {
   const fetch = vi.fn().mockResolvedValueOnce(reply({ configured: false, authenticated: false })).mockResolvedValueOnce(reply({}, 409))
   vi.stubGlobal('fetch', fetch)
-  render(<AuthGate><div>management</div></AuthGate>)
+  render(<AuthGate><Panel /></AuthGate>)
   fireEvent.change(await screen.findByLabelText('初始密码'), { target: { value: 'initial' } })
   fireEvent.change(screen.getByLabelText('确认初始密码'), { target: { value: 'initial' } })
   fireEvent.click(screen.getByRole('button', { name: '设置并进入面板' }))
@@ -50,7 +70,7 @@ it('returns to login if another browser or CLI has already initialized the passw
 })
 it('reports wrong login passwords', async () => {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(reply({ configured: true, authenticated: false })).mockResolvedValueOnce(reply({}, 401)))
-  render(<AuthGate><div>management</div></AuthGate>)
+  render(<AuthGate><Panel /></AuthGate>)
   fireEvent.change(await screen.findByLabelText('面板密码'), { target: { value: 'wrong' } })
   fireEvent.click(screen.getByRole('button', { name: '登录' }))
   expect(await screen.findByText('密码错误。')).toBeInTheDocument()
@@ -59,7 +79,7 @@ it('reports wrong login passwords', async () => {
 it('checks new password confirmation, changes password and returns to login', async () => {
   const fetch = vi.fn().mockResolvedValueOnce(reply({ configured: true, authenticated: true, csrf: 'csrf' })).mockResolvedValue(reply({}))
   vi.stubGlobal('fetch', fetch)
-  render(<AuthGate><div>management</div></AuthGate>)
+  render(<AuthGate><Panel /></AuthGate>)
   fireEvent.click(await screen.findByRole('button', { name: '修改密码' }))
   fireEvent.change(screen.getByLabelText('当前密码'), { target: { value: 'old' } })
   fireEvent.change(screen.getByLabelText('新密码'), { target: { value: 'new' } })
@@ -80,7 +100,7 @@ it('ignores a delayed anonymous status response after successful sign-in', async
     .mockImplementationOnce(() => new Promise(resolve => { finishStatus = resolve }))
     .mockResolvedValueOnce(reply({ csrf: 'new-session' }))
   vi.stubGlobal('fetch', fetch)
-  render(<AuthGate><div>management</div></AuthGate>)
+  render(<AuthGate><Panel /></AuthGate>)
   await act(async () => { await vi.advanceTimersByTimeAsync(1) })
   await act(async () => { await vi.advanceTimersByTimeAsync(15000) })
   fireEvent.change(screen.getByLabelText('面板密码'), { target: { value: 'password' } })
