@@ -1,5 +1,7 @@
 # CLI 启动模式与 VPS 引导
 
+[文档目录](README.md)
+
 ## 启动规则
 
 ```bash
@@ -16,12 +18,14 @@ sudo ./miao --no-start              # 仅开面板，保存停止状态
 
 ## 一条命令部署并启用全局代理
 
+将示例 IP 替换为你的 VPS 地址。
+
 ```bash
 # 使用运行 Miao 的账户可访问的默认 SSH 密钥/agent
-sudo ./miao --mode global --vps-host 154.202.118.100
+sudo ./miao --mode global --vps-host 203.0.113.10
 
 # 自定义 SSH 端口，使用 root 密码
-sudo ./miao --mode global --vps-host 154.202.118.100 \
+sudo ./miao --mode global --vps-host 203.0.113.10 \
   --vps-ssh-port 2222 --vps-password 'SSH密码'
 ```
 

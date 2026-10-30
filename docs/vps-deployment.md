@@ -1,10 +1,10 @@
-# VPS 部署 / VPS deployment
+# VPS 部署与恢复
+
+[文档目录](README.md)
 
 在“添加节点 → VPS 部署”填写管理地址和 SSH 凭据，先检查环境，再执行检查结果。支持 root 密码、临时未加密私钥或 Miao 主机已有密钥。SSH 凭据不写入配置、任务记录或浏览器存储；临时文件权限为 0600，关闭弹窗清空 SSH 凭据输入。
 
 CLI 自动部署并启用全局代理、实时终端输出与状态恢复见 [CLI 启动与 VPS 引导](cli-startup.md)。
-
-Install or recover Hysteria2 from **Add node → VPS deployment**. Inspect first, then execute. Root access is required. SSH passwords and private keys are not persisted in configuration, task history or browser storage.
 
 ## 前提与访问控制
 
@@ -16,8 +16,6 @@ Install or recover Hysteria2 from **Add node → VPS deployment**. Inspect first
 - 使用 `miao password set` 设置/重置面板密码，或通过 `miao --password '密码'` 设置并启动。网页右上角可以改密、退出登录。参见 [面板认证](panel-auth.md)。
 - 反向代理保留外部 Host、Origin 和 Cookie。CSRF 凭证由网页自动处理；HTTPS 终止后后端使用 HTTP 受支持，不依赖转发头来授予权限。
 - HTTP 明文传输面板密码和 SSH 凭据。详细提示收纳在 `?` 中，推荐 HTTPS 或 localhost SSH 隧道。
-
-Sign in with the panel password to deploy VPS hosts; no separate VPS token is needed. Configure the password using `miao password set`. HTTP is supported but unencrypted. First SSH contact uses TOFU; changed host keys are rejected.
 
 ## NAT 与端口
 
@@ -33,13 +31,21 @@ Sign in with the panel password to deploy VPS hosts; no separate VPS token is ne
 
 ## 执行与保护规则
 
-- 预检只读，不安装依赖、不启停服务。缺少 Python/PyYAML 时，正式执行先补依赖，再重新检查归属；未知部署仍不覆盖。
+- 预检仅检查环境和服务状态，不安装依赖、不启停服务；会按需创建受限的 Miao 状态目录和部署锁文件，并使用共享锁避免读取并发部署的中间状态。缺少 Python/PyYAML 时，正式执行先补依赖，再重新检查归属；未知部署仍不覆盖。
 - 全新安装固定 Hysteria2 `v2.12.1`，下载官方 binary 和 SHA256 清单，校验后检查可执行版本。不执行网络下载的安装脚本。高级设置可指定 HTTPS 下载代理前缀，直连失败后回退，同样校验。
 - 健康的已有 Miao 节点仅恢复，不重启、不改密码。停止的已有服务可以修复重启。
 - 旧版 Miao 使用 CN-only 证书时，迁移生成含 SAN 的证书、更新内核，保留原认证密码、混淆与其他配置。迁移会重启服务。新节点固定信任证书并验证 `miao-hysteria`，不跳过 TLS 验证。
 - 第三方、归属不明、被修改的托管配置、未知服务覆盖项、符号链接和不安全权限默认阻止。旧部署识别同时检查证书、binary、服务路径和生成配置特征；有歧义时使用手工节点导入。
 - 新服务以 `miao-hysteria` 专用用户运行。systemd 使用权限隔离和日志速率限制；OpenRC 使用日志轮转配置。软件包及新建系统账户不属于文件回滚范围。
 - 远端主机锁覆盖部署事务；配置、binary、服务文件、自启/运行状态和部署元数据纳入备份。保留最近两个完成事务的备份，未解决的事务不自动清理。
+
+## 多台 Miao 复用同一 VPS
+
+部署归属识别针对 Miao 管理的服务，不绑定某台 Miao 实例。B 在 A 完成部署后使用同一 VPS，会读取并导入现有节点，健康服务不会重装、重启或轮换凭据。B 需要自身运行账户具备 SSH 权限，A 的免密权限不会自动转移给 B。
+
+A、B 共用节点密码、证书、出口 IP 和 VPS 资源，本地模式与运行状态分别保存；停止其中一台 Miao 不会停止远程服务。当前没有按客户端限额或单独撤销凭据的能力，修改远端凭据或重启服务会影响所有使用者。
+
+并发检查发现部署锁被占用时，显示“其他 Miao 正在部署”。执行后最多等待 120 秒，取得锁后重新检查，按最新状态恢复节点或执行部署。超时返回 `host_deployment_busy_timeout`，不会中断原任务；待其结束后重试。真实配置变更和未知服务仍会阻止执行。
 
 ## 进度、刷新与失败恢复
 
@@ -69,18 +75,8 @@ vps_ip: "203.0.113.10"
 
 保留原配置，使用同一后台引擎和本机密钥认证，默认 SSH 22、UDP 543。仅当缺少相同服务器、协议和端口的节点时执行，不在 SSH 阶段占用配置更新锁。探测失败不会回退重装；存在未解决任务时需先核查。NAT 或自定义端口请使用网页入口。
 
-## 验证 / Validation
+## 验证与限制
 
-```bash
-cargo test
-npm --prefix frontend test
-npm --prefix frontend run lint
-npm --prefix frontend run build
-python3 -m pip install 'PyYAML==6.0.2'
-MIAO_TEST_SING_BOX="$PWD/embedded/sing-box-amd64" \
-  python3 -m unittest discover -s scripts/tests -p '*_test.py' -v
-```
-
-脚本测试将文件路径和系统命令隔离到临时目录；真实核心测试只访问回环 HTTP 服务，验证 Gecko 转发和错误证书拒绝，不连接订阅节点或真实 VPS。CI 使用仓库声明构建的主机核心重复该测试。
+构建和测试命令见 [构建与验证](development.md)。脚本测试隔离文件与系统命令，支持普通用户运行；真实核心测试仅访问回环服务，不连接订阅节点或真实 VPS。
 
 发行版分支以模拟命令验证；真实 VPS 的 apt/dnf/apk、systemd/OpenRC、amd64/arm64 全矩阵仍需在有授权的隔离主机上验收。同一 sing-box 的回环互通测试不能代替真实 Hysteria2 release 服务端验收。
