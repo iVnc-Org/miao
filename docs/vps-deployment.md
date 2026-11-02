@@ -8,11 +8,11 @@ CLI 自动部署并启用全局代理、实时终端输出与状态恢复见 [CL
 
 ## 前提与访问控制
 
-- Miao 主机安装 OpenSSH 客户端。使用已有密钥时，读取运行 Miao 账户的密钥和 known_hosts；忽略用户 SSH 配置，连接端口以表单为准。
+- Miao 主机安装 OpenSSH 客户端，Debian/Ubuntu 使用 `apt-get install openssh-client`，RHEL/Fedora 使用 `dnf install openssh-clients`，Alpine 使用 `apk add openssh-client-default`；用 `ssh -V` 验证。Docker 部署需安装在运行 Miao 的容器中，iVnc 配套镜像已包含该依赖。使用已有密钥时，读取运行 Miao 账户的密钥和 known_hosts；忽略用户 SSH 配置，连接端口以表单为准。
 - VPS：Linux amd64/arm64、实际运行的 systemd/OpenRC。正式部署按需安装 Python 3.8+、PyYAML、OpenSSL、CA、iproute 等依赖。发行版软件源必须可用；不执行系统升级。
 - 入站：SSH TCP（默认 22），节点 UDP（默认 543）。只开放 TCP 不能使用 Hysteria2。出站需访问软件源、GitHub、DNS 和代理目标。
 - 防火墙、安全组、NAT、sshd 配置均不自动修改。没有公网 IP 时，需私网/VPN 互通或支持 UDP 的端口映射。
-- 面板可监听 `0.0.0.0:6161`，通过服务器 IP 或域名使用 HTTP/HTTPS 访问。所有管理接口（包含 localhost）均需面板密码登录；VPS 部署不再使用 `MIAO_VPS_TOKEN` 或独立令牌。
+- 面板可监听 `0.0.0.0:6161`，通过服务器 IP 或域名使用 HTTP/HTTPS 访问。默认所有管理接口（包含 localhost）均需面板密码登录；显式使用 `--nopasswd` 时网页自动建立会话，iVnc 嵌入启动默认启用。会话、同源与 CSRF 检查仍保留；VPS 部署不再使用 `MIAO_VPS_TOKEN` 或独立令牌。
 - 使用 `miao password set` 设置/重置面板密码，或通过 `miao --password '密码'` 设置并启动。网页右上角可以改密、退出登录。参见 [面板认证](panel-auth.md)。
 - 反向代理保留外部 Host、Origin 和 Cookie。CSRF 凭证由网页自动处理；HTTPS 终止后后端使用 HTTP 受支持，不依赖转发头来授予权限。
 - HTTP 明文传输面板密码和 SSH 凭据。详细提示收纳在 `?` 中，推荐 HTTPS 或 localhost SSH 隧道。

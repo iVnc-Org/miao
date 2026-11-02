@@ -5,7 +5,7 @@ import { AuthGate } from './AuthGate.jsx'
 import { TopBar } from './TopBar.jsx'
 
 function Panel() {
-  const { openPassword, signOut, signingOut } = useAuthActions()
+  const { openPassword, signOut, signingOut, passwordRequired } = useAuthActions()
   return (
     <>
       <TopBar
@@ -16,6 +16,7 @@ function Panel() {
         onChangePassword={openPassword}
         onSignOut={signOut}
         signingOut={signingOut}
+        passwordRequired={passwordRequired}
       />
       <div>management</div>
     </>
@@ -23,6 +24,38 @@ function Panel() {
 }
 const reply = (data, status = 200) => ({ ok: status === 200, status, json: async () => ({ success: status === 200, data }) })
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers() })
+it('enters passwordless mode automatically and hides password and sign-out actions', async () => {
+  const fetch = vi.fn()
+    .mockResolvedValueOnce(reply({ configured: false, authenticated: false, password_required: false }))
+    .mockResolvedValueOnce(reply({ csrf: 'automatic-session' }))
+  vi.stubGlobal('fetch', fetch)
+  render(<AuthGate><Panel /></AuthGate>)
+  expect(screen.queryByText('management')).not.toBeInTheDocument()
+  expect(await screen.findByText('management')).toBeInTheDocument()
+  expect(fetch.mock.calls[1][0]).toBe('/api/auth/login')
+  expect(fetch.mock.calls[1][1]).toMatchObject({ method: 'POST', body: '{}' })
+  expect(screen.queryByLabelText('面板密码')).not.toBeInTheDocument()
+  expect(screen.queryByText('设置初始密码')).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: '修改密码' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: '退出登录' })).not.toBeInTheDocument()
+})
+it('reuses an existing passwordless session', async () => {
+  const fetch = vi.fn().mockResolvedValue(reply({ configured: false, authenticated: true, password_required: false, csrf: 'existing-session' }))
+  vi.stubGlobal('fetch', fetch)
+  render(<AuthGate><Panel /></AuthGate>)
+  expect(await screen.findByText('management')).toBeInTheDocument()
+  expect(fetch).toHaveBeenCalledTimes(1)
+})
+it('keeps management closed if automatic session creation fails', async () => {
+  const fetch = vi.fn()
+    .mockResolvedValueOnce(reply({ configured: false, authenticated: false, password_required: false }))
+    .mockResolvedValueOnce(reply({}, 403))
+  vi.stubGlobal('fetch', fetch)
+  render(<AuthGate><Panel /></AuthGate>)
+  expect(await screen.findByRole('alert')).toBeInTheDocument()
+  expect(screen.queryByText('management')).not.toBeInTheDocument()
+  expect(screen.queryByLabelText('初始密码')).not.toBeInTheDocument()
+})
 it('does not mount management UI before login; never stores the password', async () => {
   sessionStorage.setItem('miao-vps-token', 'legacy')
   const fetch = vi.fn().mockResolvedValueOnce(reply({ configured: true, authenticated: false }))

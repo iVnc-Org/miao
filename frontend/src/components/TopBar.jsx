@@ -49,7 +49,7 @@ export function CommitBadge({ versionInfo }) {
   )
 }
 
-export function TopBar({ status, versionInfo, upgrading, checkingVersion = false, onUpgradeClick, onChangePassword, onSignOut, signingOut = false }) {
+export function TopBar({ status, versionInfo, upgrading, checkingVersion = false, onUpgradeClick, onChangePassword, onSignOut, signingOut = false, passwordRequired = true }) {
   const { t, theme, locale, setTheme, setLocale } = useI18n()
   const nextTheme = theme === 'dark' ? 'light' : 'dark'
   const nextLocale = locale === 'zh' ? 'en' : 'zh'
@@ -85,7 +85,7 @@ export function TopBar({ status, versionInfo, upgrading, checkingVersion = false
             <Languages size={13} />
             <span>{locale === 'zh' ? t('prefs.en') : t('prefs.zh')}</span>
           </button>
-          <button
+          {passwordRequired && <><button
             type="button"
             className="pref-chip"
             onClick={(event) => onChangePassword?.(event.currentTarget)}
@@ -105,7 +105,7 @@ export function TopBar({ status, versionInfo, upgrading, checkingVersion = false
           >
             <LogOut size={13} />
             <span>{t('prefs.signOut')}</span>
-          </button>
+          </button></>}
         </div>
         <div className={classNames('run-badge', status.running ? 'running' : 'stopped')}>
           <span className="run-dot" />

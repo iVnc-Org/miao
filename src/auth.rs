@@ -25,6 +25,7 @@ use std::{
 };
 
 const TTL: Duration = Duration::from_secs(7 * 24 * 3600);
+const PASSWORDLESS_REVISION: &str = "nopasswd";
 #[derive(Default)]
 pub struct Auth {
     sessions: Mutex<HashMap<String, Session>>,
@@ -287,9 +288,13 @@ fn cookie<'a>(state: &AppState, headers: &'a HeaderMap) -> Option<&'a str> {
 }
 pub fn session(state: &AppState, headers: &HeaderMap) -> Option<Session> {
     let id = cookie(state, headers)?;
-    let credentials = read(&state.config_path).ok()??;
+    let revision = if state.no_password {
+        PASSWORDLESS_REVISION.to_owned()
+    } else {
+        read(&state.config_path).ok()??.revision
+    };
     let mut sessions = state.auth.sessions.lock().unwrap();
-    sessions.retain(|_, s| s.expires > Instant::now() && s.revision == credentials.revision);
+    sessions.retain(|_, s| s.expires > Instant::now() && s.revision == revision);
     sessions.get(id).cloned()
 }
 pub fn valid_session(state: &AppState, id: &str) -> bool {
@@ -387,7 +392,11 @@ pub async fn guard(State(state): State<Arc<AppState>>, request: Request, next: N
     response
 }
 pub async fn status(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    let credentials = match read(&state.config_path) {
+    let credentials = match if state.no_password {
+        Ok(None)
+    } else {
+        read(&state.config_path)
+    } {
         Ok(c) => c,
         Err(_) => {
             return error(
@@ -409,6 +418,7 @@ pub async fn status(State(state): State<Arc<AppState>>, headers: HeaderMap) -> R
     let proxy_running = crate::services::singbox::sing_box_is_running(&state).await;
     Json(serde_json::json!({"success":true,"data":{
         "configured":credentials.is_some(), "authenticated":s.is_some(), "csrf":s.map(|s|s.csrf),
+        "password_required":!state.no_password,
         "service":"miao", "service_pid":std::process::id(), "embedded":state.embedded,
         "integration_version":crate::embedding::INTEGRATION_VERSION,
         "initializing":state.initializing.load(std::sync::atomic::Ordering::Relaxed),
@@ -418,6 +428,7 @@ pub async fn status(State(state): State<Arc<AppState>>, headers: HeaderMap) -> R
 }
 #[derive(Deserialize)]
 pub struct Login {
+    #[serde(default)]
     password: String,
 }
 pub async fn login(
@@ -428,6 +439,15 @@ pub async fn login(
 ) -> Response {
     if !same_origin(&headers) {
         return error(StatusCode::FORBIDDEN, "Cross-site request denied");
+    }
+    if state.no_password {
+        // Bootstrap a browser session without reading or changing saved credentials.
+        // Keep the read-only health endpoint free of cookie/session side effects.
+        if let Some(session) = session(&state, &headers) {
+            return Json(serde_json::json!({"success":true,"data":{"csrf":session.csrf}}))
+                .into_response();
+        }
+        return issue_session(&state, &headers, PASSWORDLESS_REVISION.to_owned());
     }
     let ip = peer
         .map(|p| p.0 .0.ip())
@@ -463,16 +483,16 @@ pub async fn login(
         return error(StatusCode::UNAUTHORIZED, "Incorrect password");
     }
     state.auth.attempts.lock().unwrap().remove(&ip);
-    issue_session(&state, &headers, credentials)
+    issue_session(&state, &headers, credentials.revision)
 }
-fn issue_session(state: &AppState, headers: &HeaderMap, credentials: Credentials) -> Response {
+fn issue_session(state: &AppState, headers: &HeaderMap, revision: String) -> Response {
     let (Ok(id), Ok(csrf)) = (random(), random()) else {
         return error(StatusCode::INTERNAL_SERVER_ERROR, "Cannot create session");
     };
     let s = Session {
         id: id.clone(),
         csrf: csrf.clone(),
-        revision: credentials.revision,
+        revision,
         expires: Instant::now() + TTL,
     };
     {
@@ -514,6 +534,12 @@ pub async fn setup(
     headers: HeaderMap,
     Json(body): Json<InitialPassword>,
 ) -> Response {
+    if state.no_password {
+        return error(
+            StatusCode::FORBIDDEN,
+            "Panel passwords are disabled for this run (--nopasswd)",
+        );
+    }
     if !same_origin(&headers) {
         return error(StatusCode::FORBIDDEN, "Cross-site request denied");
     }
@@ -533,7 +559,7 @@ pub async fn setup(
             // session for credentials different from those submitted here.
             match read(&state.config_path) {
                 Ok(Some(credentials)) if equal(&credentials.password, &body.password) => {
-                    issue_session(&state, &headers, credentials)
+                    issue_session(&state, &headers, credentials.revision)
                 }
                 _ => error(
                     StatusCode::CONFLICT,
@@ -575,6 +601,12 @@ pub async fn change_password(
     State(state): State<Arc<AppState>>,
     Json(body): Json<PasswordChange>,
 ) -> Response {
+    if state.no_password {
+        return error(
+            StatusCode::FORBIDDEN,
+            "Panel passwords are disabled for this run (--nopasswd)",
+        );
+    }
     let path = state.config_path.clone();
     let result = tokio::task::spawn_blocking(move || {
         set_password(&path, &body.new_password, Some(&body.current_password))
@@ -645,6 +677,223 @@ mod tests {
             .contains("HttpOnly"));
         let value = crate::test_support::response_json(response).await;
         (cookie, value["data"]["csrf"].as_str().unwrap().into())
+    }
+
+    #[tokio::test]
+    async fn passwordless_sessions_preserve_saved_password_and_request_protections() {
+        let path = std::env::temp_dir()
+            .join(format!("miao-nopasswd-{}", random().unwrap()))
+            .join("config.yaml");
+        set_password(&path, "saved-password", None).unwrap();
+        let saved = fs::read(auth_path(&path)).unwrap();
+        let mut raw = AppState::with_embedding(Default::default(), path.clone(), true).unwrap();
+        raw.no_password = true;
+        let state = Arc::new(raw);
+        let app = crate::router::build_router(state.clone());
+        let response = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/api/auth/status",
+                None,
+                None,
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert!(!response.headers().contains_key("set-cookie"));
+        let value = crate::test_support::response_json(response).await;
+        assert_eq!(value["data"]["password_required"], false);
+        assert_eq!(value["data"]["authenticated"], false);
+        assert!(state.auth.sessions.lock().unwrap().is_empty());
+        let mut foreign = req("POST", "/api/auth/login", None, None, serde_json::json!({}));
+        foreign
+            .headers_mut()
+            .insert("origin", "https://foreign.example".parse().unwrap());
+        assert_eq!(
+            app.clone().oneshot(foreign).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        let response = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/api/auth/login",
+                None,
+                None,
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookie = response.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let value = crate::test_support::response_json(response).await;
+        let csrf = value["data"]["csrf"].as_str().unwrap();
+        assert_eq!(
+            app.clone()
+                .oneshot(req(
+                    "GET",
+                    "/api/status",
+                    Some(&cookie),
+                    None,
+                    serde_json::json!({})
+                ))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(req(
+                    "POST",
+                    "/api/auth/logout",
+                    Some(&cookie),
+                    None,
+                    serde_json::json!({})
+                ))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        let mut foreign = req(
+            "POST",
+            "/api/auth/logout",
+            Some(&cookie),
+            Some(csrf),
+            serde_json::json!({}),
+        );
+        foreign
+            .headers_mut()
+            .insert("origin", "https://foreign.example".parse().unwrap());
+        assert_eq!(
+            app.clone().oneshot(foreign).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(req(
+                    "POST",
+                    "/api/auth/setup",
+                    None,
+                    None,
+                    serde_json::json!({"password":"replacement", "confirm_password":"replacement"})
+                ))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        let response = app
+            .clone()
+            .oneshot(req(
+                "PUT",
+                "/api/auth/password",
+                Some(&cookie),
+                Some(csrf),
+                serde_json::json!({
+                    "current_password":"saved-password",
+                    "new_password":"replacement"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let response = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/api/auth/login",
+                Some(&cookie),
+                None,
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert!(!response.headers().contains_key("set-cookie"));
+        assert_eq!(state.auth.sessions.lock().unwrap().len(), 1);
+        assert_eq!(fs::read(auth_path(&path)).unwrap(), saved);
+        let protected = crate::router::build_router(Arc::new(
+            AppState::with_embedding(Default::default(), path.clone(), true).unwrap(),
+        ));
+        assert_eq!(
+            protected
+                .clone()
+                .oneshot(req(
+                    "GET",
+                    "/api/status",
+                    Some(&cookie),
+                    None,
+                    serde_json::json!({})
+                ))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        sign_in(&protected, "saved-password").await;
+        assert_eq!(fs::read(auth_path(&path)).unwrap(), saved);
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn passwordless_startup_does_not_require_or_repair_an_auth_file() {
+        let path = std::env::temp_dir()
+            .join(format!("miao-nopasswd-files-{}", random().unwrap()))
+            .join("config.yaml");
+        let mut raw = AppState::with_config_path(Default::default(), path.clone()).unwrap();
+        raw.no_password = true;
+        let app = crate::router::build_router(Arc::new(raw));
+        for content in [None, Some("invalid auth file")] {
+            if let Some(content) = content {
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(auth_path(&path), content).unwrap();
+            }
+            let response = app
+                .clone()
+                .oneshot(req(
+                    "GET",
+                    "/api/auth/status",
+                    None,
+                    None,
+                    serde_json::json!({}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let response = app
+                .clone()
+                .oneshot(req(
+                    "POST",
+                    "/api/auth/login",
+                    None,
+                    None,
+                    serde_json::json!({}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                fs::read_to_string(auth_path(&path)).ok().as_deref(),
+                content
+            );
+        }
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn internal_restart_keeps_passwordless_mode() {
+        assert_eq!(
+            restart_args(["miao", "--nopasswd", "--no-start"].map(String::from)),
+            vec!["--nopasswd"]
+        );
     }
     #[tokio::test]
     async fn embedded_identity_frames_and_authentication_remain_consistent() {
@@ -768,7 +1017,9 @@ mod tests {
         )
         .await;
         assert_eq!(status["data"]["configured"], false);
-        assert!(status.to_string().find("password").is_none());
+        assert_eq!(status["data"]["password_required"], true);
+        assert!(status["data"].get("password").is_none());
+        assert!(status["data"].get("revision").is_none());
         set_password(&state.config_path, "first-password", None).unwrap();
         let (cookie, csrf) = sign_in(&app, "first-password").await;
         let r = app

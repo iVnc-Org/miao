@@ -12,6 +12,7 @@ use crate::models::{Config, GitHubRelease, SubStatus};
 /// 通过依赖注入传递，避免全局静态变量
 pub struct AppState {
     pub embedded: bool,
+    pub no_password: bool,
     pub auth: crate::auth::Auth,
     pub config: RwLock<Config>, // 使用 RwLock 支持并发读
     pub config_path: PathBuf,
@@ -56,6 +57,7 @@ impl AppState {
 
         Ok(Self {
             embedded,
+            no_password: false,
             auth: crate::auth::Auth::default(),
             config: RwLock::new(config),
             config_path,

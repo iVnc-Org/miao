@@ -66,7 +66,7 @@ function hasProcessMatch(config) {
 }
 
 export default function App() {
-  const { openPassword, signOut, signingOut, authError } = useAuthActions()
+  const { openPassword, signOut, signingOut, authError, passwordRequired } = useAuthActions()
   const { t } = useI18n()
   const [firstLoadDone, setFirstLoadDone] = useState(false)
   const [loadingAction, setLoadingAction] = useState('')
@@ -743,6 +743,7 @@ export default function App() {
       onChangePassword={openPassword}
       onSignOut={signOut}
       signingOut={signingOut}
+      passwordRequired={passwordRequired}
     />
   )
 

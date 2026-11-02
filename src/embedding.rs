@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use crate::error::{AppError, AppResult};
 
-pub const INTEGRATION_VERSION: u32 = 1;
+pub const INTEGRATION_VERSION: u32 = 2;
 
 pub fn enabled() -> bool {
     std::env::var("MIAO_EMBEDDED").as_deref() == Ok("ivnc")

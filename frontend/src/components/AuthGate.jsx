@@ -34,9 +34,20 @@ export function AuthGate({ children }) {
         const payload = await response.json()
         if (stopped || version !== epoch.current) return
         if (!response.ok || !payload.success) throw new Error('Authentication unavailable')
-        setAuthCsrf(payload.data.csrf)
-        setStatus(payload.data)
-        if (!payload.data.authenticated) { setCurrent(''); setNext(''); setConfirm(''); setChange(false) }
+        let data = payload.data
+        if (data.password_required === false && !data.authenticated) {
+          const login = await fetch('/api/auth/login', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: '{}', signal: controller.signal,
+          })
+          const session = await login.json()
+          if (!login.ok || !session.success || !session.data?.csrf) throw new Error('Session unavailable')
+          data = { ...data, authenticated: true, csrf: session.data.csrf }
+        }
+        if (stopped || version !== epoch.current) return
+        setAuthCsrf(data.csrf)
+        setStatus(data)
+        if (!data.authenticated) { setCurrent(''); setNext(''); setConfirm(''); setChange(false) }
         setError('')
       } catch {
         if (!stopped && version === epoch.current) { expire(); setError('unavailable') }
@@ -112,7 +123,7 @@ export function AuthGate({ children }) {
   }
   if (!status?.authenticated) return <main className="auth-page"><section className="modal-card auth-card">
     <h1>Miao {location.protocol === 'http:' && <span className="vps-help" title={text('HTTP 会明文传输密码，建议使用 HTTPS 或 SSH 隧道。', 'HTTP transmits passwords without encryption. HTTPS or an SSH tunnel is recommended.')}><button type="button" className="vps-help-button" aria-label={text('连接说明', 'Connection information')}><CircleHelp size={14} strokeWidth={1.75} /></button></span>}</h1>
-    {status === null ? <p role="status">{text('正在检查登录状态…', 'Checking sign-in…')}</p> : status.configured ? <form onSubmit={submit}>
+    {status === null || status.password_required === false ? <p role="status">{text('正在检查登录状态…', 'Checking sign-in…')}</p> : status.configured ? <form onSubmit={submit}>
       <label className="field"><span>{text('面板密码', 'Panel password')}</span><input type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} required /></label>
       <button className="btn" disabled={busy || !password}>{text('登录', 'Sign in')}</button>
     </form> : status.configured === false ? <form onSubmit={submit}>
@@ -124,6 +135,7 @@ export function AuthGate({ children }) {
     {error && <p role="alert">{errors[error]}</p>}
   </section></main>
   const actions = {
+    passwordRequired: status.password_required !== false,
     openPassword: (trigger) => { returnFocus.current = trigger || null; setChange(true); setError('') },
     signOut: logout,
     signingOut: busy,

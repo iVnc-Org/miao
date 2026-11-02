@@ -36,6 +36,7 @@ use state::AppState;
 #[derive(Default, PartialEq, Eq)]
 struct CliOptions {
     password: Option<String>,
+    no_password: bool,
     config_path: Option<std::path::PathBuf>,
     password_command: bool,
     show_help: bool,
@@ -74,6 +75,7 @@ Options:
   -V, --version                 Show version information
       --config <PATH>           Configuration file path
       --password <PASSWORD>     Set persistent panel password and start
+      --nopasswd                Enter the panel without a password for this run
       --mode <MODE>             Start proxy: global, process, pool
       --no-start                Start panel only; persist stopped state
       --vps-host <HOST>         Deploy/recover VPS and select it (--mode global)
@@ -88,6 +90,7 @@ Examples:
   miao --mode global --vps-host 154.202.118.100
   miao --mode global --vps-host 154.202.118.100 --vps-ssh-port 22 --vps-password 'secret'
   miao --no-start
+  miao --nopasswd --no-start
   miao --socks-listen 0.0.0.0 --socks-port 1080
   miao --socks-listen=0.0.0.0 --socks-port=1080
 "#
@@ -154,6 +157,12 @@ where
             continue;
         }
         match arg.as_str() {
+            "--nopasswd" => {
+                if options.no_password {
+                    return Err(AppError::message("--nopasswd specified more than once"));
+                }
+                options.no_password = true;
+            }
             "--no-start" => {
                 if options.no_start {
                     return Err(AppError::message("--no-start specified more than once"));
@@ -226,6 +235,11 @@ where
         }
     }
 
+    if options.no_password && (options.password.is_some() || options.password_command) {
+        return Err(AppError::message(
+            "--nopasswd cannot be combined with --password or password set",
+        ));
+    }
     if options.no_start && (options.mode.is_some() || options.vps_host.is_some()) {
         return Err(AppError::message(
             "--no-start cannot be combined with --mode or VPS deployment",
@@ -530,10 +544,10 @@ async fn main() -> AppResult<()> {
     let _ = extract_sing_box()?;
 
     // 初始化应用状态
-    let app_state = Arc::new(
-        AppState::with_embedding(config.clone(), config_path, embedding::enabled())
-            .map_err(|e| AppError::context("Failed to create HTTP client", e))?,
-    );
+    let mut app_state = AppState::with_embedding(config.clone(), config_path, embedding::enabled())
+        .map_err(|e| AppError::context("Failed to create HTTP client", e))?;
+    app_state.no_password = cli_options.no_password;
+    let app_state = Arc::new(app_state);
     *app_state.config_warning.lock().await = migration_warning.clone();
     let state_for_init = app_state.clone();
     services::version::watch_upgrade_recovery(app_state.clone());
@@ -812,6 +826,23 @@ mod tests {
         ] {
             let error = parse_cli_args(std::iter::once("miao").chain(args)).unwrap_err();
             assert!(!error.to_string().contains("topsecret"));
+        }
+    }
+
+    #[test]
+    fn passwordless_startup_is_explicit_and_cannot_reset_saved_credentials() {
+        let options = parse_cli_args(["miao", "--nopasswd", "--no-start"]).unwrap();
+        assert!(options.no_password);
+        assert!(options.no_start);
+        assert!(!parse_cli_args(["miao"]).unwrap().no_password);
+        for args in [
+            vec!["miao", "--nopasswd", "--nopasswd"],
+            vec!["miao", "--nopasswd", "--password", "private-password"],
+            vec!["miao", "--password=private-password", "--nopasswd"],
+            vec!["miao", "password", "set", "private-password", "--nopasswd"],
+        ] {
+            let error = parse_cli_args(args).unwrap_err();
+            assert!(!error.to_string().contains("private-password"));
         }
     }
 

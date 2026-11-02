@@ -185,7 +185,11 @@ async fn execute(
 ) -> AppResult<Vec<u8>> {
     let mut child = command
         .spawn()
-        .map_err(|_| AppError::message("SSH client unavailable"))?;
+        .map_err(|error| AppError::message(match error.kind() {
+            std::io::ErrorKind::NotFound => "OpenSSH client is missing on the Miao host; install openssh-client (Debian/Ubuntu), openssh-clients (RHEL/Fedora), or openssh-client-default (Alpine)",
+            std::io::ErrorKind::PermissionDenied => "SSH client cannot be executed; check executable permissions on the Miao host",
+            _ => "SSH client could not be started on the Miao host",
+        }))?;
     let mut stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
@@ -285,6 +289,15 @@ mod tests {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         command
+    }
+
+    #[tokio::test]
+    async fn missing_ssh_client_reports_the_local_package_dependency() {
+        let mut command = Command::new(format!("/nonexistent/miao-ssh-{}", random_id().unwrap()));
+        let error = execute(&mut command, "", Duration::from_secs(1), Operation::Inspect)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("install openssh-client"));
     }
 
     #[tokio::test]
