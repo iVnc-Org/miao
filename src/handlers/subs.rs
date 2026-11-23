@@ -53,7 +53,10 @@ pub async fn add_sub(
         return Err(status_error(StatusCode::BAD_REQUEST, e));
     }
 
+    let epoch = crate::services::routing::supersede(&state);
     let _config_update = state.config_update.lock().await;
+    crate::services::routing::check_current(&state, epoch)
+        .map_err(|e| status_error(StatusCode::CONFLICT, e))?;
     let old_config = state.config.read().await.clone();
     let mut new_config = old_config.clone();
 
@@ -137,7 +140,10 @@ pub async fn add_sub_content(
         .collect();
     let node_count = nodes.len();
 
+    let epoch = crate::services::routing::supersede(&state);
     let _config_update = state.config_update.lock().await;
+    crate::services::routing::check_current(&state, epoch)
+        .map_err(|e| status_error(StatusCode::CONFLICT, e))?;
     let old_config = state.config.read().await.clone();
     if old_config.subs.contains(&source) {
         return Err(status_error(
@@ -148,7 +154,9 @@ pub async fn add_sub_content(
 
     let previous_store = load_sub_nodes().await;
     if old_config.subs.iter().any(|url| {
-        previous_store.subs.get(url)
+        previous_store
+            .subs
+            .get(url)
             .is_some_and(|entry| entry.content.as_deref() == Some(content.as_str()))
     }) {
         return Err(status_error(
@@ -205,7 +213,10 @@ pub async fn delete_sub(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SubRequest>,
 ) -> HandlerResult {
+    let epoch = crate::services::routing::supersede(&state);
     let _config_update = state.config_update.lock().await;
+    crate::services::routing::check_current(&state, epoch)
+        .map_err(|e| status_error(StatusCode::CONFLICT, e))?;
     let old_config = state.config.read().await.clone();
     let mut new_config = old_config.clone();
 
@@ -245,7 +256,10 @@ pub async fn replace_sub(
         ));
     }
 
+    let epoch = crate::services::routing::supersede(&state);
     let _config_update = state.config_update.lock().await;
+    crate::services::routing::check_current(&state, epoch)
+        .map_err(|e| status_error(StatusCode::CONFLICT, e))?;
     let old_config = state.config.read().await.clone();
     let Some(index) = old_config.subs.iter().position(|url| url == &req.old_url) else {
         return Err(status_error(
@@ -317,7 +331,10 @@ pub async fn replace_sub(
 }
 
 pub async fn refresh_subs(State(state): State<Arc<AppState>>) -> HandlerResult {
+    let epoch = crate::services::routing::supersede(&state);
     let _config_update = state.config_update.lock().await;
+    crate::services::routing::check_current(&state, epoch)
+        .map_err(|e| status_error(StatusCode::CONFLICT, e))?;
     let config = state.config.read().await;
     let config_clone = config.clone();
     drop(config);

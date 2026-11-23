@@ -18,6 +18,7 @@ pub struct AppState {
     pub config_path: PathBuf,
     pub config_update: Mutex<()>,
     pub sing_process: Mutex<Option<SingBoxProcess>>,
+    pub sing_lifecycle: Mutex<()>,
     pub sub_status: Mutex<HashMap<String, SubStatus>>,
     pub config_warning: Mutex<Option<String>>,
     pub config_source: Mutex<Option<String>>,
@@ -28,6 +29,9 @@ pub struct AppState {
     pub vps_active: AtomicBool,
     /// A web action supersedes this process's one-time CLI startup intent.
     pub startup_cancelled: AtomicBool,
+    /// Superseding requests cancel pending preparation/activation without waiting for I/O locks.
+    pub runtime_epoch: AtomicU64,
+    pub runtime_status: StdMutex<crate::services::routing::RuntimeStatus>,
     pub vps_progress: tokio::sync::broadcast::Sender<crate::services::vps::Job>,
     pub upgrading: AtomicBool, // 防止并发升级
     pub upgrade_attempt: AtomicU64,
@@ -63,6 +67,7 @@ impl AppState {
             config_path,
             config_update: Mutex::new(()),
             sing_process: Mutex::new(None),
+            sing_lifecycle: Mutex::new(()),
             sub_status: Mutex::new(HashMap::new()),
             config_warning: Mutex::new(None),
             config_source: Mutex::new(None),
@@ -75,6 +80,8 @@ impl AppState {
             shutting_down: AtomicBool::new(false),
             vps_active: AtomicBool::new(false),
             startup_cancelled: AtomicBool::new(false),
+            runtime_epoch: AtomicU64::new(0),
+            runtime_status: StdMutex::new(crate::services::routing::RuntimeStatus::default()),
             vps_progress: tokio::sync::broadcast::channel(128).0,
             upgrading: AtomicBool::new(false),
             upgrade_attempt: AtomicU64::new(0),
@@ -84,8 +91,12 @@ impl AppState {
 }
 
 pub struct SingBoxProcess {
+    pub pid: u32,
     pub child: tokio::process::Child,
     pub started_at: Instant,
+    pub firewall: Option<Arc<crate::services::firewall::Fw3Rules>>,
+    pub routes: Option<Arc<crate::services::route_cleanup::RouteOwnership>>,
+    pub output: Arc<crate::services::singbox::ChildOutput>,
 }
 
 /// 版本信息缓存

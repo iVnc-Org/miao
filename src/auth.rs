@@ -415,7 +415,13 @@ pub async fn status(State(state): State<Arc<AppState>>, headers: HeaderMap) -> R
         .socks_port
         .unwrap_or(crate::models::DEFAULT_SOCKS_PORT);
     drop(config);
-    let proxy_running = crate::services::singbox::sing_box_is_running(&state).await;
+    let proxy_running = crate::services::singbox::sing_box_is_running(&state).await
+        && state
+            .runtime_status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .phase
+            == crate::services::routing::RuntimePhase::Ready;
     Json(serde_json::json!({"success":true,"data":{
         "configured":credentials.is_some(), "authenticated":s.is_some(), "csrf":s.map(|s|s.csrf),
         "password_required":!state.no_password,

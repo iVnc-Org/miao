@@ -55,8 +55,10 @@ export function useToast() {
 
 export function useApi(loadingState) {
   const { loadingAction, setLoadingAction } = loadingState
+  const requestId = useRef(0)
 
   const apiCall = useCallback(async (endpoint, options = {}, action = '') => {
+    const id = ++requestId.current
     setLoadingAction(action)
     try {
       const response = await fetch(`/api/${endpoint}`, { headers: API_HEADERS, ...options })
@@ -64,7 +66,7 @@ export function useApi(loadingState) {
       if (!response.ok || !payload.success) throw new Error(payload.message || 'Request failed')
       return payload
     } finally {
-      setLoadingAction('')
+      if (requestId.current === id) setLoadingAction('')
     }
   }, [setLoadingAction])
 

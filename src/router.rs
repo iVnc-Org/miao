@@ -29,6 +29,10 @@ pub fn build_router(app_state: Arc<AppState>) -> Router {
         .route("/favicon.svg", get(serve_favicon))
         .route("/api/status", get(get_status))
         .route(
+            "/api/tun",
+            get(crate::handlers::tun::get).put(crate::handlers::tun::set),
+        )
+        .route(
             "/api/vps/preflight",
             post(crate::handlers::vps::preflight)
                 .layer(axum::middleware::from_fn(crate::handlers::vps::no_store)),
@@ -91,6 +95,27 @@ mod tests {
     use axum::http::{header::CONTENT_TYPE, StatusCode};
     use serde_json::json;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn routing_preferences_are_readable_and_invalid_interfaces_are_rejected() {
+        let app = crate::test_support::test_app(crate::models::Config::default()).await;
+        let response = app
+            .clone()
+            .oneshot(crate::test_support::empty_request("GET", "/api/tun"))
+            .await
+            .unwrap();
+        let value = crate::test_support::response_json(response).await;
+        assert_eq!(value["data"]["routing"], "auto");
+        let response = app
+            .oneshot(crate::test_support::json_request(
+                "PUT",
+                "/api/tun",
+                serde_json::json!({"routing":"policy_route", "lan_interfaces":["../wan"]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
 
     use crate::{
         models::Config,

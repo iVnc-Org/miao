@@ -5,6 +5,7 @@ pub mod service;
 pub mod share;
 pub mod static_assets;
 pub mod subs;
+pub mod tun;
 pub mod tun_process;
 pub mod version;
 pub mod vps;
@@ -38,7 +39,13 @@ pub(crate) async fn apply_config_section<T>(
 where
     T: PartialEq,
 {
+    if current(&*state.config.read().await) == &section {
+        return Ok(success_no_data(format!("{label} unchanged")));
+    }
+    let epoch = crate::services::routing::supersede(state);
     let _config_update = state.config_update.lock().await;
+    crate::services::routing::check_current(state, epoch)
+        .map_err(|e| status_error(StatusCode::CONFLICT, e))?;
     let was_running = sing_box_is_running(state).await;
     let old_config = state.config.read().await.clone();
 

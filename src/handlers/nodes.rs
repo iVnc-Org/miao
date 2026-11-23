@@ -301,8 +301,7 @@ fn find_duplicate_tag(
         .find_map(|(_, node_str)| {
             let value = serde_json::from_str::<JsonValue>(node_str).ok()?;
             let existing_tag = value.get("tag").and_then(JsonValue::as_str)?;
-            (existing_tag.to_lowercase() == requested_tag_lower)
-                .then(|| existing_tag.to_string())
+            (existing_tag.to_lowercase() == requested_tag_lower).then(|| existing_tag.to_string())
         })
 }
 
@@ -373,7 +372,10 @@ pub async fn add_node(
     let node_type = requested_node_type(&req)
         .map_err(|message| status_error(StatusCode::BAD_REQUEST, message))?;
 
+    let epoch = crate::services::routing::supersede(&state);
     let _config_update = state.config_update.lock().await;
+    crate::services::routing::check_current(&state, epoch)
+        .map_err(|e| status_error(StatusCode::CONFLICT, e))?;
     let was_running = sing_box_is_running(&state).await;
     let old_config = state.config.read().await.clone();
     let mut new_config = old_config.clone();
@@ -444,7 +446,10 @@ pub async fn update_node(
         .map_err(|message| status_error(StatusCode::BAD_REQUEST, message))?;
     let mut node_value = build_node_value(&req.node, node_type);
 
+    let epoch = crate::services::routing::supersede(&state);
     let _config_update = state.config_update.lock().await;
+    crate::services::routing::check_current(&state, epoch)
+        .map_err(|e| status_error(StatusCode::CONFLICT, e))?;
     let was_running = sing_box_is_running(&state).await;
     let old_config = state.config.read().await.clone();
     let mut new_config = old_config.clone();
@@ -491,7 +496,10 @@ pub async fn delete_node(
     State(state): State<Arc<AppState>>,
     Json(req): Json<DeleteNodeRequest>,
 ) -> HandlerResult {
+    let epoch = crate::services::routing::supersede(&state);
     let _config_update = state.config_update.lock().await;
+    crate::services::routing::check_current(&state, epoch)
+        .map_err(|e| status_error(StatusCode::CONFLICT, e))?;
     let was_running = sing_box_is_running(&state).await;
     let old_config = state.config.read().await.clone();
     let mut new_config = old_config.clone();
@@ -560,8 +568,7 @@ mod tests {
     #[test]
     fn update_helpers_find_original_and_skip_its_tag_for_duplicates() {
         let nodes = vec![
-            r#"{"type":"socks","tag":"First","server":"127.0.0.1","server_port":1080}"#
-                .to_string(),
+            r#"{"type":"socks","tag":"First","server":"127.0.0.1","server_port":1080}"#.to_string(),
             r#"{"type":"socks","tag":"Second","server":"127.0.0.1","server_port":1081}"#
                 .to_string(),
         ];
@@ -797,7 +804,8 @@ mod vps_trust_tests {
     #[test]
     fn editing_a_deployed_node_retains_its_trust_certificate() {
         let old = json!({"type":"hysteria2","tls":{"enabled":true,"certificate":["trusted-pem"]}});
-        let mut renamed = json!({"type":"hysteria2","tag":"renamed","tls":{"enabled":true,"insecure":false}});
+        let mut renamed =
+            json!({"type":"hysteria2","tag":"renamed","tls":{"enabled":true,"insecure":false}});
         preserve_inline_trust(&old, &mut renamed);
         assert_eq!(renamed["tls"]["certificate"], json!(["trusted-pem"]));
         let mut different = json!({"type":"http","tls":{"enabled":true}});

@@ -51,6 +51,7 @@ sudo ./miao --mode global --vps-host 203.0.113.10
 | 启动模式、状态恢复、CLI 自动部署 | [CLI 启动](docs/cli-startup.md) |
 | 登录、改密、会话有效期与认证文件 | [面板认证](docs/panel-auth.md) |
 | 配置路径、进程名单、代理池与持久化 | [配置与代理模式](docs/configuration.md) |
+| OpenWrt 接管、fw3 兼容及内核依赖 | [OpenWrt 接管与排障](docs/openwrt.md) |
 | 订阅格式、URI 支持与解析提示 | [订阅与节点导入](docs/subscriptions.md) |
 | VPS 前提、端口、节点复用与失败恢复 | [VPS 部署](docs/vps-deployment.md) |
 | 网页升级、备份迁移与常见问题 | [升级与维护](docs/maintenance.md) |

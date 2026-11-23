@@ -507,9 +507,17 @@ async fn run_job(
                     )
                 })?;
                 job.tag = Some(tag);
-                if req.start_on_commit {
+                if req.start_on_commit
+                    && crate::services::runtime::load_runtime_state().await.running
+                    && !crate::services::singbox::sing_box_is_running(state).await
+                {
+                    let epoch = state.runtime_epoch.load(Ordering::SeqCst);
+                    let mode = state.config.read().await.mode;
+                    let prepared = crate::services::routing::prepare_host(state, mode, epoch).await;
                     let _lock = state.config_update.lock().await;
-                    if !state.shutting_down.load(Ordering::SeqCst)
+                    if prepared.is_ok()
+                        && crate::services::routing::is_current(state, epoch)
+                        && !state.shutting_down.load(Ordering::SeqCst)
                         && crate::services::runtime::load_runtime_state().await.running
                         && !crate::services::singbox::sing_box_is_running(state).await
                     {

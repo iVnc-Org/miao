@@ -269,7 +269,7 @@ export default function App() {
 
   const handleToggleService = useCallback(async () => {
     try {
-      if (status.running) {
+      if (status.running || loadingAction === 'start' || ['preparing', 'starting'].includes(status.runtime?.phase)) {
         await apiCall('service/stop', { method: 'POST' }, 'stop')
         showToast(t('toast.serviceStopped'), 'success')
       } else {
@@ -281,10 +281,13 @@ export default function App() {
       if (nextStatus?.running) tasks.push(fetchProxies())
       await Promise.all(tasks)
     } catch (error) {
-      showToast(error.message, 'error')
+      if (error.message.includes('START_CANCELLED')) showToast(t('status.startCancelled'), 'info')
+      else showToast(error.message, 'error')
     }
   }, [
     status.running,
+    status.runtime?.phase,
+    loadingAction,
     status.mode,
     apiCall,
     fetchStatus,
@@ -294,6 +297,17 @@ export default function App() {
     showToast,
     t,
   ])
+
+  const handleSetTunRouting = useCallback(async (routing) => {
+    try {
+      await apiCall('tun', { method: 'PUT', body: JSON.stringify({ ...status.tun, routing }) }, 'tunRouting')
+      await Promise.all([fetchStatus(), refreshProxyViews()])
+      showToast(t('routing.saved'), 'success')
+    } catch (error) {
+      showToast(error.message, 'error')
+      await fetchStatus()
+    }
+  }, [apiCall, status.tun, fetchStatus, refreshProxyViews, showToast, t])
 
   const applyProxyMode = useCallback(async (nextMode) => {
     try {
@@ -788,6 +802,7 @@ export default function App() {
           loadingAction={loadingAction} 
           onToggleService={handleToggleService} 
           onSetMode={handleSetMode}
+          onSetTunRouting={handleSetTunRouting}
           onOpenConnections={handleOpenConnections}
         />
 

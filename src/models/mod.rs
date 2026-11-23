@@ -10,7 +10,7 @@ pub use api::{
 };
 pub use config::{
     BypassAction, Config, PoolConfig, ProcessListMode, ProcessMatch, ProcessProxyConfig, ProxyMode,
-    DEFAULT_PORT, DEFAULT_SOCKS_LISTEN, DEFAULT_SOCKS_PORT,
+    TunConfig, TunRouting, DEFAULT_PORT, DEFAULT_SOCKS_LISTEN, DEFAULT_SOCKS_PORT,
 };
 pub use node::{
     DeleteNodeRequest, ManualNodeInfo, NodeInfo, NodeInventory, NodeRequest, UpdateNodeRequest,

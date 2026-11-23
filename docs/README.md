@@ -9,6 +9,7 @@
 | [CLI 启动](cli-startup.md) | 指定模式、恢复状态、一条命令部署 VPS |
 | [面板认证](panel-auth.md) | 初始密码、网页改密、CLI 重置、7 天会话 |
 | [配置与代理模式](configuration.md) | 配置路径、进程名单、代理池端口、缓存 |
+| [OpenWrt 接管与排障](openwrt.md) | fw3/fw4、接管策略、依赖、内核 ABI 与诊断 |
 | [订阅与节点导入](subscriptions.md) | 支持格式、HTTP 代理自动识别、解析详情 |
 | [VPS 部署](vps-deployment.md) | 环境与端口要求、SSH、NAT、共享节点、失败恢复 |
 | [升级与维护](maintenance.md) | 下载代理回退、升级进度、备份、常见问题 |
@@ -22,4 +23,5 @@
 
 - [CLI 启动 review](cli-startup-review.md)
 - [面板认证 review](panel-auth-review.md)
+- [OpenWrt 修复 review](openwrt-review.md)
 - [VPS 部署 review](vps-review.md)

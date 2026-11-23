@@ -36,12 +36,14 @@ use crate::state::AppState;
 
 const CONFIG_CACHE_FILE: &str = "config.json";
 const CONFIG_CACHE_META_FILE: &str = "config.meta.json";
-const CONFIG_CACHE_SCHEMA_VERSION: u32 = 8;
+const CONFIG_CACHE_SCHEMA_VERSION: u32 = 10;
 const MAX_CONCURRENT_SUBS: usize = 5;
 
 #[derive(Serialize, Deserialize)]
 struct ConfigCacheMeta {
     fingerprint: String,
+    #[serde(default)]
+    effective_routing: Option<super::routing::EffectiveRouting>,
 }
 
 pub fn get_config_cache_path() -> PathBuf {
@@ -64,6 +66,8 @@ fn config_cache_fingerprint(config: &Config) -> AppResult<String> {
         "custom_rules": &config.custom_rules,
         "tun_process": &config.tun_process,
         "share": &config.share,
+        "tun": &config.tun,
+        "core_revision": env!("SING_BOX_REVISION"),
     });
     let bytes = serde_json::to_vec(&value)?;
     let mut hasher = Sha256::new();
@@ -72,10 +76,25 @@ fn config_cache_fingerprint(config: &Config) -> AppResult<String> {
 }
 
 fn normalize_cached_sing_box_config(mut config: serde_json::Value) -> serde_json::Value {
+    normalize_runtime_dns(&mut config);
+    config
+}
+
+fn normalize_runtime_dns(config: &mut serde_json::Value) {
     if config["route"]["default_domain_resolver"] == "cfdns" {
         config["route"]["default_domain_resolver"] = serde_json::Value::String("local".to_string());
     }
-    config
+    if let Some(servers) = config["dns"]["servers"].as_array_mut() {
+        for server in servers {
+            if server["tag"] == "cfdns"
+                && server["type"] == "udp"
+                && server["server"] == "1.1.1.1"
+                && server["detour"] == "proxy"
+            {
+                server["type"] = "tcp".into();
+            }
+        }
+    }
 }
 
 pub async fn save_config_to(path: &Path, config: &Config) -> AppResult<()> {
@@ -91,6 +110,13 @@ pub async fn save_config_to(path: &Path, config: &Config) -> AppResult<()> {
 }
 
 pub async fn save_config_cache(config: &Config) {
+    let (_, plan, _) = match super::routing::read_plan().await {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            error!(%error, "Refusing to cache unprepared runtime config");
+            return;
+        }
+    };
     let config_path = get_sing_box_home().join("config.json");
     let cache_path = get_config_cache_path();
     let meta_path = get_config_cache_meta_path();
@@ -106,7 +132,10 @@ pub async fn save_config_cache(config: &Config) {
     }
 
     let meta = match config_cache_fingerprint(config)
-        .map(|fingerprint| ConfigCacheMeta { fingerprint })
+        .map(|fingerprint| ConfigCacheMeta {
+            fingerprint,
+            effective_routing: Some(plan.effective),
+        })
         .and_then(|meta| serde_json::to_string(&meta).map_err(AppError::from))
     {
         Ok(meta) => meta,
@@ -127,6 +156,7 @@ pub async fn save_config_cache(config: &Config) {
 async fn clear_generated_config_state() {
     for path in [
         get_sing_box_home().join("config.json"),
+        get_sing_box_home().join("routing.json"),
         get_config_cache_path(),
         get_config_cache_meta_path(),
     ] {
@@ -184,7 +214,10 @@ async fn apply_no_node_config(
     Ok(())
 }
 
-pub async fn restore_config_from_cache(config: &Config) -> AppResult<()> {
+pub async fn restore_config_from_cache(config: &Config, state: &Arc<AppState>) -> AppResult<()> {
+    let epoch = state
+        .runtime_epoch
+        .load(std::sync::atomic::Ordering::SeqCst);
     let cache = get_config_cache_path();
     if !cache.exists() {
         return Err(AppError::message("No cached config available"));
@@ -202,25 +235,32 @@ pub async fn restore_config_from_cache(config: &Config) -> AppResult<()> {
             "Cached config does not match current configuration",
         ));
     }
+    let plan = super::routing::resolve(config).await?;
+    if meta.effective_routing != Some(plan.effective) {
+        return Err(AppError::message(
+            "Cached routing strategy differs from host capabilities; regenerate using cached nodes",
+        ));
+    }
 
     let cached_config = tokio::fs::read_to_string(&cache)
         .await
         .map_err(|e| AppError::context("Failed to read cached config", e))?;
     let cached_config: serde_json::Value = serde_json::from_str(&cached_config)
         .map_err(|e| AppError::context("Failed to parse cached config", e))?;
-    let cached_config = normalize_cached_sing_box_config(cached_config);
-    let cached_config = serde_json::to_string(&cached_config)?;
-
-    let config_path = get_sing_box_home().join("config.json");
-    write_file_atomic(&config_path, &cached_config, "sing-box config")
-        .await
-        .map_err(|e| AppError::context("Failed to restore config from cache", e))?;
+    let mut cached_config = normalize_cached_sing_box_config(cached_config);
+    apply_runtime_routing(config, &mut cached_config, &plan)?;
+    super::routing::check_current(state, epoch)?;
+    super::routing::write_config(&cached_config, &plan, epoch).await?;
     validate_sing_box_config()
         .await
         .map_err(|e| AppError::context("Cached config validation failed", e))?;
-    write_file_atomic(&cache, &cached_config, "config cache")
-        .await
-        .map_err(|e| AppError::context("Failed to update normalized config cache", e))?;
+    write_file_atomic(
+        &cache,
+        &serde_json::to_string(&cached_config)?,
+        "config cache",
+    )
+    .await
+    .map_err(|e| AppError::context("Failed to update normalized config cache", e))?;
     info!(cache = ?cache, "Restored config from cache");
     Ok(())
 }
@@ -230,12 +270,15 @@ pub async fn regenerate_and_restart_runtime(
     state: &Arc<AppState>,
     policy: SubFetchPolicy,
 ) -> AppResult<GenOutcome> {
+    let epoch = state
+        .runtime_epoch
+        .load(std::sync::atomic::Ordering::SeqCst);
     let outcome = gen_config(config, state, policy)
         .await
         .map_err(|e| AppError::context("Failed to regenerate config", e))?;
     info!("Config regenerated successfully");
 
-    validate_sing_box_config()
+    super::routing::cancellable(state, epoch, validate_sing_box_config())
         .await
         .map_err(|e| AppError::context("Config validation failed, not restarting", e))?;
 
@@ -362,6 +405,9 @@ pub async fn apply_config_change(
     new_config: &Config,
     policy: SubFetchPolicy,
 ) -> AppResult<()> {
+    let epoch = state
+        .runtime_epoch
+        .load(std::sync::atomic::Ordering::SeqCst);
     let persisted_new_config = new_config.clone();
     let previous_sub_nodes = load_sub_nodes().await;
 
@@ -389,6 +435,15 @@ pub async fn apply_config_change(
                     .await
                     .err()
                     .map(|error| error.to_string());
+                if !super::routing::is_current(state, epoch) {
+                    for name in ["config.json", "routing.json"] {
+                        let _ = tokio::fs::remove_file(get_sing_box_home().join(name)).await;
+                    }
+                    return Err(AppError::context(
+                        "Configuration persistence superseded",
+                        save_err,
+                    ));
+                }
                 match restart_with_previous_config(old_config, state).await {
                     Ok(()) if store_restore_error.is_none() => Err(AppError::context(
                         "Failed to persist config change; restored previous runtime config",
@@ -416,6 +471,17 @@ pub async fn apply_config_change(
                 .await
                 .err()
                 .map(|error| error.to_string());
+            if !super::routing::is_current(state, epoch) {
+                // The next request owns activation. Do not undo an explicit Stop by
+                // restarting the old core, or leave the cancelled candidate reusable.
+                for name in ["config.json", "routing.json"] {
+                    let _ = tokio::fs::remove_file(get_sing_box_home().join(name)).await;
+                }
+                return Err(AppError::context(
+                    "Configuration activation superseded",
+                    apply_err,
+                ));
+            }
             match restore_previous_running_config(old_config, state).await {
                 Ok(()) if store_restore_error.is_none() => Err(AppError::context(
                     "Failed to apply config change; restored previous runtime config",
@@ -521,7 +587,7 @@ async fn restore_previous_running_config(
     }
 
     if sing_box_is_running(state).await {
-        match restore_config_from_cache(old_config).await {
+        match restore_config_from_cache(old_config, state).await {
             Ok(()) => {}
             Err(cache_err) => {
                 warn!(error = %cache_err, "Failed to restore runtime config from cache while previous sing-box process is still running");
@@ -549,7 +615,7 @@ async fn restart_with_previous_config(old_config: &Config, state: &Arc<AppState>
         return Ok(());
     }
 
-    if let Err(cache_err) = restore_config_from_cache(old_config).await {
+    if let Err(cache_err) = restore_config_from_cache(old_config, state).await {
         warn!(error = %cache_err, "Failed to restore runtime config from cache for rollback; regenerating previous config");
     } else {
         match start_sing_internal(state).await {
@@ -784,7 +850,10 @@ fn extract_legacy_subscription_nodes(
     config: &Config,
     sing_box_config: &serde_json::Value,
 ) -> Vec<StoredNode> {
-    let Some(outbounds) = sing_box_config.get("outbounds").and_then(|value| value.as_array()) else {
+    let Some(outbounds) = sing_box_config
+        .get("outbounds")
+        .and_then(|value| value.as_array())
+    else {
         return Vec::new();
     };
     let Some(selector) = outbounds.iter().find(|outbound| {
@@ -799,7 +868,10 @@ fn extract_legacy_subscription_nodes(
 
     let (manual_outbounds, manual_names) = collect_manual_outbounds(config);
     let (manual_names, _) = normalize_outbound_tags(manual_names, manual_outbounds);
-    let selector_names: Vec<&str> = selector_tags.iter().filter_map(|tag| tag.as_str()).collect();
+    let selector_names: Vec<&str> = selector_tags
+        .iter()
+        .filter_map(|tag| tag.as_str())
+        .collect();
     if selector_names.len() < manual_names.len()
         || selector_names[..manual_names.len()]
             .iter()
@@ -869,6 +941,11 @@ pub async fn gen_config(
     state: &Arc<AppState>,
     policy: SubFetchPolicy,
 ) -> AppResult<GenOutcome> {
+    let epoch = state
+        .runtime_epoch
+        .load(std::sync::atomic::Ordering::SeqCst);
+    let routing_plan =
+        super::routing::cancellable(state, epoch, super::routing::resolve(config)).await?;
     let (my_outbounds, my_names) = collect_manual_outbounds(config);
 
     migrate_legacy_subscription_nodes(config).await?;
@@ -895,7 +972,10 @@ pub async fn gen_config(
     let mut node_list_is_complete = true;
     let mut fetch_errors: std::collections::HashMap<String, Option<String>> = Default::default();
 
-    let results = fetch_subscriptions(&to_fetch, &store, state).await;
+    let results = super::routing::cancellable(state, epoch, async {
+        Ok(fetch_subscriptions(&to_fetch, &store, state).await)
+    })
+    .await?;
     for (url, result) in results {
         match result {
             Ok(fetch_result) => {
@@ -982,7 +1062,7 @@ pub async fn gen_config(
     };
     let share_map_before = share_map.clone();
 
-    let sing_box_config = build_sing_box_config(
+    let mut sing_box_config = build_sing_box_config(
         config,
         my_names,
         my_outbounds,
@@ -993,14 +1073,9 @@ pub async fn gen_config(
         node_list_is_complete,
     )?;
 
-    let sing_box_home = get_sing_box_home();
-    let config_output_loc = sing_box_home.join("config.json");
-    write_file_atomic(
-        &config_output_loc,
-        &serde_json::to_string(&sing_box_config)?,
-        "sing-box config",
-    )
-    .await?;
+    super::routing::apply(&mut sing_box_config, &routing_plan)?;
+    super::routing::check_current(state, epoch)?;
+    super::routing::write_config(&sing_box_config, &routing_plan, epoch).await?;
 
     if config.mode == ProxyMode::Pool && share_map != share_map_before {
         save_share_port_map(&share_map).await?;
@@ -1192,10 +1267,7 @@ fn build_sing_box_config(
         my_outbounds.into_iter().chain(final_outbounds).collect(),
     );
 
-    let process_proxy = config
-        .tun_process
-        .normalized()
-        .map_err(AppError::message)?;
+    let process_proxy = config.tun_process.normalized().map_err(AppError::message)?;
     let pool = config.share.normalized().map_err(AppError::message)?;
     if config.mode == ProxyMode::Process {
         process_proxy.validate_active().map_err(AppError::message)?;
@@ -1368,9 +1440,11 @@ fn bypass_or_direct_rule(
 ) -> serde_json::Value {
     let extras = match (bypass_action, protocol) {
         (BypassAction::Bypass, Some(protocol)) => {
-            serde_json::json!({"protocol": protocol, "action": "bypass"})
+            serde_json::json!({"protocol": protocol, "action": "bypass", "outbound": "direct"})
         }
-        (BypassAction::Bypass, None) => serde_json::json!({"action": "bypass"}),
+        (BypassAction::Bypass, None) => {
+            serde_json::json!({"action": "bypass", "outbound": "direct"})
+        }
         (BypassAction::Direct, Some(protocol)) => serde_json::json!({
             "protocol": protocol,
             "action": "route",
@@ -1508,6 +1582,33 @@ fn build_route_rules(
     }
 }
 
+/// Re-render actions from user intent: a previous policy-route render may have
+/// converted bypass into direct, and cannot be used as the source of that intent.
+pub fn apply_runtime_routing(
+    config: &Config,
+    value: &mut serde_json::Value,
+    plan: &super::routing::RoutingPlan,
+) -> AppResult<()> {
+    let process = config.tun_process.normalized().map_err(AppError::message)?;
+    if config.mode == ProxyMode::Process {
+        process.validate_active().map_err(AppError::message)?;
+    }
+    let shares = if config.mode == ProxyMode::Pool {
+        extract_share_bindings_from_sing_box(value)
+    } else {
+        Vec::new()
+    };
+    value["route"]["rules"] = serde_json::to_value(build_route_rules(
+        config.mode,
+        &process,
+        &config.custom_rules,
+        &shares,
+    )?)?;
+    value["route"]["final"] = route_final(config.mode, &process).into();
+    normalize_runtime_dns(value);
+    super::routing::apply(value, plan)
+}
+
 fn get_config_template(
     mode: ProxyMode,
     process_proxy: &ProcessProxyConfig,
@@ -1542,7 +1643,7 @@ fn get_config_template(
             "strategy": "ipv4_only",
             "disable_cache": false,
             "servers": [
-                {"type": "udp", "tag": "cfdns", "server": "1.1.1.1", "detour": "proxy"},
+                {"type": "tcp", "tag": "cfdns", "server": "1.1.1.1", "detour": "proxy"},
                 {"tag": "local", "type": "udp", "server": "223.5.5.5"}
             ],
             "rules": dns_rules
@@ -1580,6 +1681,53 @@ mod tests {
     use crate::services::sub_nodes::{SubNodeStore, LOCAL_SUBSCRIPTION_PREFIX};
     use crate::test_support::app_state;
     use serde_json::json;
+
+    #[test]
+    fn cache_fingerprint_includes_routing_and_lan_scope() {
+        let original = Config::default();
+        let mut changed = original.clone();
+        changed.tun.routing = crate::models::TunRouting::PolicyRoute;
+        assert_ne!(
+            config_cache_fingerprint(&original).unwrap(),
+            config_cache_fingerprint(&changed).unwrap()
+        );
+        changed.tun = crate::models::TunConfig {
+            lan_interfaces: vec!["br-lan".into()],
+            ..Default::default()
+        };
+        assert_ne!(
+            config_cache_fingerprint(&original).unwrap(),
+            config_cache_fingerprint(&changed).unwrap()
+        );
+    }
+
+    #[test]
+    fn changing_back_to_enhanced_routing_restores_bypass_from_user_intent() {
+        let config = Config {
+            mode: ProxyMode::Process,
+            tun_process: process_proxy(ProcessListMode::Blacklist),
+            ..Default::default()
+        };
+        let mut value =
+            super::get_config_template(config.mode, &config.tun_process, &[], &[]).unwrap();
+        let policy = crate::services::routing::resolve_with(
+            &config,
+            crate::services::routing::NftCapability::Unsupported(22),
+            false,
+        )
+        .unwrap();
+        super::apply_runtime_routing(&config, &mut value, &policy).unwrap();
+        assert_eq!(value["route"]["rules"][2]["action"], "route");
+        let enhanced = crate::services::routing::resolve_with(
+            &config,
+            crate::services::routing::NftCapability::Available,
+            false,
+        )
+        .unwrap();
+        super::apply_runtime_routing(&config, &mut value, &enhanced).unwrap();
+        assert_eq!(value["route"]["rules"][2]["action"], "bypass");
+        assert_eq!(value["route"]["rules"][2]["outbound"], "direct");
+    }
 
     #[test]
     fn cache_only_never_fetches() {
@@ -1744,25 +1892,33 @@ mod tests {
                     .join("embedded")
                     .join(filename));
             }
-            let mut child = Command::new(std::env::var("MIAO_TEST_SING_BOX").unwrap())
-                .args(["check", "-c", "/dev/stdin"])
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .unwrap();
-            child
-                .stdin
-                .take()
-                .unwrap()
-                .write_all(built.to_string().as_bytes())
-                .unwrap();
-            let result = child.wait_with_output().unwrap();
-            assert!(
-                result.status.success(),
-                "Target core rejected mode {mode:?}: {}",
-                String::from_utf8_lossy(&result.stderr)
-            );
+            for capability in [
+                super::super::routing::NftCapability::Available,
+                super::super::routing::NftCapability::Unsupported(22),
+            ] {
+                let plan = super::super::routing::resolve_with(&config, capability, false).unwrap();
+                let mut variant = built.clone();
+                super::super::routing::apply(&mut variant, &plan).unwrap();
+                let mut child = Command::new(std::env::var("MIAO_TEST_SING_BOX").unwrap())
+                    .args(["check", "-c", "/dev/stdin"])
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(variant.to_string().as_bytes())
+                    .unwrap();
+                let result = child.wait_with_output().unwrap();
+                assert!(
+                    result.status.success(),
+                    "Target core rejected mode {mode:?}: {}",
+                    String::from_utf8_lossy(&result.stderr)
+                );
+            }
         }
     }
 
@@ -1789,7 +1945,10 @@ mod tests {
         let imported = extract_legacy_subscription_nodes(&config, &cached);
 
         assert_eq!(
-            imported.iter().map(|node| node.name.as_str()).collect::<Vec<_>>(),
+            imported
+                .iter()
+                .map(|node| node.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["sub-a", "sub-b"]
         );
         assert_eq!(imported[0].outbound["server"], "a.example.com");
@@ -2469,6 +2628,27 @@ mod tests {
         let normalized = normalize_cached_sing_box_config(config);
 
         assert_eq!(normalized["route"]["default_domain_resolver"], "local");
+    }
+
+    #[test]
+    fn remote_dns_works_with_stream_proxies_and_migrates_cached_udp_transport() {
+        let config = Config::default();
+        let mut runtime =
+            super::get_config_template(config.mode, &config.tun_process, &[], &[]).unwrap();
+        assert_eq!(runtime["dns"]["servers"][0]["type"], "tcp");
+        assert_eq!(runtime["dns"]["servers"][1]["type"], "udp");
+        runtime["dns"]["servers"][0]["type"] = "udp".into();
+        let cached = normalize_cached_sing_box_config(runtime.clone());
+        assert_eq!(cached["dns"]["servers"][0]["type"], "tcp");
+        let plan = crate::services::routing::resolve_with(
+            &config,
+            crate::services::routing::NftCapability::Unsupported(22),
+            false,
+        )
+        .unwrap();
+        super::apply_runtime_routing(&config, &mut runtime, &plan).unwrap();
+        assert_eq!(runtime["dns"]["servers"][0]["type"], "tcp");
+        assert_eq!(runtime["dns"]["servers"][1]["type"], "udp");
     }
 
     #[test]

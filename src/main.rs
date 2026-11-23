@@ -25,7 +25,6 @@ use services::{
         gen_config, migrate_legacy_subscription_nodes, restore_config_from_cache,
         save_config_cache, save_config_to, SubFetchPolicy,
     },
-    openwrt::check_and_install_openwrt_dependencies,
     proxy::restore_last_proxy,
     runtime::{load_runtime_state_report, save_running_state},
     singbox::{extract_sing_box, start_sing_internal, stop_sing_internal},
@@ -608,7 +607,18 @@ async fn main() -> AppResult<()> {
                 services::startup::run(state_for_init.clone(), mode, startup_request).await
             {
                 eprintln!("[失败] {error}\n[面板] 服务继续运行，可在 Web 查看节点和 VPS 任务");
-                *state_for_init.config_warning.lock().await = Some(error.to_string());
+                if !state_for_init
+                    .startup_cancelled
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    services::routing::status(
+                        &state_for_init,
+                        services::routing::RuntimePhase::Failed,
+                        None,
+                        Some(error.to_string()),
+                    );
+                    *state_for_init.config_warning.lock().await = Some(error.to_string());
+                }
             }
             state_for_init
                 .initializing
@@ -632,8 +642,45 @@ async fn main() -> AppResult<()> {
             return;
         }
 
+        drop(config_update);
+        if state_for_init
+            .startup_cancelled
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            state_for_init
+                .initializing
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            return;
+        }
+        let epoch = state_for_init
+            .runtime_epoch
+            .load(std::sync::atomic::Ordering::SeqCst);
+        if let Err(error) =
+            services::routing::prepare_host(&state_for_init, config.mode, epoch).await
+        {
+            if services::routing::is_current(&state_for_init, epoch) {
+                services::routing::status(
+                    &state_for_init,
+                    services::routing::RuntimePhase::Failed,
+                    None,
+                    Some(error.to_string()),
+                );
+            }
+            state_for_init
+                .initializing
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            return;
+        }
+        let config_update = state_for_init.config_update.lock().await;
+        if services::routing::check_current(&state_for_init, epoch).is_err() {
+            state_for_init
+                .initializing
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            return;
+        }
+        let config = state_for_init.config.read().await.clone();
         info!("Preparing initial sing-box config...");
-        match restore_config_from_cache(&config).await {
+        match restore_config_from_cache(&config, &state_for_init).await {
             Ok(_) => {
                 info!("Using cached config for initial startup");
                 *state_for_init.config_source.lock().await = Some("cache".to_string());
@@ -659,6 +706,14 @@ async fn main() -> AppResult<()> {
                     }
                     Err(e) => {
                         error!(error = %e, "Failed to generate config");
+                        if services::routing::is_current(&state_for_init, epoch) {
+                            services::routing::status(
+                                &state_for_init,
+                                services::routing::RuntimePhase::Failed,
+                                None,
+                                Some(e.to_string()),
+                            );
+                        }
                         *state_for_init.config_warning.lock().await =
                             Some("无法生成配置且无匹配缓存，请添加有效订阅或手动节点".to_string());
                         state_for_init
@@ -669,20 +724,6 @@ async fn main() -> AppResult<()> {
                 }
             }
         }
-
-        // 依赖安装会跑 opkg/apk 且没有超时，软件源不可达时会一直卡着，
-        // 所以先放锁，别让整个面板的配置类接口陪着一起卡死。
-        drop(config_update);
-
-        info!("Checking dependencies...");
-        if let Err(e) = check_and_install_openwrt_dependencies().await {
-            error!("Failed to check or install OpenWrt dependencies: {}", e);
-        }
-
-        // 重新拿锁：下面还要写 runtime.json 和配置缓存，这两个都是从配置派生的持久状态。
-        // 放锁期间用户可能已经改过模式或订阅，所以快照也要重新取。
-        let config_update = state_for_init.config_update.lock().await;
-        let config = state_for_init.config.read().await.clone();
 
         if state_for_init
             .startup_cancelled
@@ -751,6 +792,8 @@ async fn shutdown_signal(state: Arc<AppState>) {
     state
         .shutting_down
         .store(true, std::sync::atomic::Ordering::SeqCst);
+    stop_sing_internal(&state).await;
+    services::openwrt::finish_preparation().await;
     if let Ok(jobs) = services::vps::jobs(&state).await {
         for job in jobs.iter().filter(|job| job.active) {
             eprintln!("[VPS] 本机退出不保证远程任务终止；任务 {}，目标 {}:{}。重启后请核查原任务，勿重复部署。", job.id, job.host, job.ssh_port);

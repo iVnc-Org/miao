@@ -46,3 +46,14 @@ MIAO_TEST_SUBSCRIPTION=/tmp/sub.txt MIAO_TEST_SING_BOX="$PWD/embedded/sing-box-a
 ```
 
 arm64 主机请将上述 `sing-box-amd64` 替换为 `sing-box-arm64`。真实 VPS 的发行版、初始化系统与架构组合仍需独立验收，回环测试不能代替 release 服务端验收。
+
+透明代理验收需要 root、iproute2、iptables、curl 和 mount/network namespace 支持，直接测试构建出的二进制：
+
+```bash
+sudo python3 scripts/tests/openwrt_runtime_test.py --simulate-fw3 \
+  --binary "$PWD/target/x86_64-unknown-linux-musl/release/miao-rust"
+```
+
+测试将路由器、WAN SOCKS/DNS 服务端和 LAN 客户端放进独立命名空间，并通过私有挂载隔离账户数据。验证首次网页启动、两种接管策略、本机/LAN TCP/UDP/DNS（含 TCP DNS）、进程名单、fw3 规则恢复、失败回滚、代理池、缓存迁移、状态恢复与取消，以及内核和管理器被强制结束后的资源回收。所有服务端均为本地夹具，不访问公网；前后比较宿主路由和防火墙。OpenWrt 真机运行时可省略 `--simulate-fw3`，使用实际 fw3 程序。
+
+Node 25/26 开启实验性全局 Web Storage 时，部分测试环境需要 `NODE_OPTIONS=--no-experimental-webstorage npm --prefix frontend test`；CI 的 Node 20 不需要此参数。

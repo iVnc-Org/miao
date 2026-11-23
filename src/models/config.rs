@@ -13,6 +13,51 @@ pub enum ProxyMode {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum TunRouting {
+    #[default]
+    Auto,
+    Nftables,
+    PolicyRoute,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TunConfig {
+    #[serde(default)]
+    pub routing: TunRouting,
+    /// Trusted LAN devices for the fw3 forwarding rules. Empty discovers the LAN zone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lan_interfaces: Vec<String>,
+}
+
+impl TunConfig {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+
+    pub fn normalized(&self) -> Result<Self, String> {
+        let mut interfaces = BTreeSet::new();
+        for interface in &self.lan_interfaces {
+            let interface = interface.trim();
+            if interface.is_empty()
+                || interface.len() > 15
+                || interface.starts_with('-')
+                || !interface
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"_.:-".contains(&c))
+            {
+                return Err(format!("Invalid LAN interface: {interface}"));
+            }
+            interfaces.insert(interface.to_string());
+        }
+        Ok(Self {
+            routing: self.routing,
+            lan_interfaces: interfaces.into_iter().collect(),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProcessListMode {
     #[default]
     #[serde(alias = "global_bypass")]
@@ -249,6 +294,8 @@ pub struct Config {
     pub custom_rules: Vec<String>,
     #[serde(default)]
     pub mode: ProxyMode,
+    #[serde(default, skip_serializing_if = "TunConfig::is_default")]
+    pub tun: TunConfig,
     #[serde(default, skip_serializing_if = "ProcessProxyConfig::is_default")]
     pub tun_process: ProcessProxyConfig,
     #[serde(default, skip_serializing_if = "PoolConfig::is_default")]
@@ -262,6 +309,27 @@ pub const DEFAULT_SOCKS_PORT: u16 = 1080;
 #[cfg(test)]
 mod tests {
     use super::{Config, PoolConfig, ProcessListMode, ProcessMatch, ProcessProxyConfig, ProxyMode};
+
+    #[test]
+    fn tun_routing_is_backward_compatible_and_validates_trusted_interfaces() {
+        let old: Config = serde_yaml::from_str("mode: global\nnodes: []\n").unwrap();
+        assert_eq!(old.tun.routing, super::TunRouting::Auto);
+        assert!(!serde_yaml::to_string(&old).unwrap().contains("tun:"));
+        let config: Config = serde_yaml::from_str(
+            "tun:\n  routing: policy_route\n  lan_interfaces: [br-lan, br-lan]\n",
+        )
+        .unwrap();
+        assert_eq!(config.tun.normalized().unwrap().lan_interfaces, ["br-lan"]);
+        assert!(serde_yaml::from_str::<Config>("tun:\n  routing: invalid\n").is_err());
+        for invalid in ["-i", "a;cmd", "../lan", "", "interface-name-too-long"] {
+            assert!(super::TunConfig {
+                lan_interfaces: vec![invalid.into()],
+                ..Default::default()
+            }
+            .normalized()
+            .is_err());
+        }
+    }
 
     #[test]
     fn config_persists_mode() {
@@ -316,7 +384,10 @@ mod tests {
         let yaml = serde_yaml::to_string(&config).unwrap();
         assert!(yaml.contains("share"));
         assert!(yaml.contains("192.168.1.10"));
-        assert_eq!(serde_yaml::from_str::<Config>(&yaml).unwrap().share, config.share);
+        assert_eq!(
+            serde_yaml::from_str::<Config>(&yaml).unwrap().share,
+            config.share
+        );
     }
 
     #[test]

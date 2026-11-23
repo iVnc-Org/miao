@@ -41,6 +41,8 @@ pub struct StatusData {
     pub running: bool,
     pub initializing: bool,
     pub mode: ProxyMode,
+    pub tun: super::config::TunConfig,
+    pub runtime: crate::services::routing::RuntimeStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]

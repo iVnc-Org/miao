@@ -16,6 +16,7 @@ export function StatusCard({
   loadingAction,
   onToggleService,
   onSetMode,
+  onSetTunRouting,
   onOpenConnections
 }) {
   const { t } = useI18n()
@@ -36,13 +37,14 @@ export function StatusCard({
     })
   const currentMode = status.mode || 'global'
   const modeSwitching = loadingAction === 'mode'
-  const modeControlDisabled = modeSwitching || status.initializing
+  const starting = loadingAction === 'start' || ['preparing', 'starting'].includes(status.runtime?.phase)
+  const modeControlDisabled = modeSwitching || status.initializing || starting
   const modes = [
     { value: 'global', label: t('mode.global'), icon: Globe2 },
     { value: 'process', label: t('mode.process'), icon: ListFilter },
     { value: 'pool', label: t('mode.pool'), icon: Share2 },
   ]
-  const stateLabel = status.initializing
+  const stateLabel = status.initializing || starting
     ? t('status.initializing')
     : status.running
       ? t('status.running')
@@ -63,6 +65,22 @@ export function StatusCard({
                 ? t('status.preparing')
                 : t('status.waitStart')}
           </div>
+          {status.mode !== 'pool' && onSetTunRouting && (
+            <label className="routing-control">
+              <span>{t('routing.label')}</span>
+              <select aria-label={t('routing.label')} value={status.tun?.routing || 'auto'}
+                disabled={modeControlDisabled || Boolean(loadingAction)} onChange={(event) => onSetTunRouting(event.target.value)}>
+                <option value="auto">{t('routing.auto')}</option>
+                <option value="nftables">{t('routing.nftables')}</option>
+                <option value="policy_route">{t('routing.policy_route')}</option>
+              </select>
+              {status.runtime?.routing?.effective && status.runtime.routing.effective !== 'none' && (
+                <span>{t('routing.effective', { mode: t(`routing.${status.runtime.routing.effective}`) })}</span>
+              )}
+            </label>
+          )}
+          {status.runtime?.routing?.reason && <div className="routing-note" role="status">{status.runtime.routing.reason}</div>}
+          {status.runtime?.error && <div className="routing-error" role="alert">{status.runtime.error}</div>}
         </div>
       </div>
 
@@ -94,13 +112,13 @@ export function StatusCard({
         ))}
       </div>
       <Button
-        tone={status.running ? 'danger' : 'success'}
+        tone={status.running || starting ? 'danger' : 'success'}
         icon={<Power size={14} />}
-        loading={loadingAction === 'start' || loadingAction === 'stop' || status.initializing}
-        disabled={loadingAction === 'start' || loadingAction === 'stop' || status.initializing}
+        loading={loadingAction === 'stop' || (status.initializing && !starting)}
+        disabled={loadingAction === 'stop' || (status.initializing && !starting)}
         onClick={onToggleService}
       >
-        {status.running ? t('status.stop') : t('status.start')}
+        {starting ? t('status.cancelStart') : status.running ? t('status.stop') : t('status.start')}
       </Button>
     </SectionCard>
   )

@@ -15,25 +15,40 @@ use crate::services::{
         SubFetchPolicy,
     },
     proxy::restore_last_proxy,
+    routing::{self, RuntimePhase},
     runtime::save_running_state,
     singbox::{get_sing_box_home, sing_box_is_running, start_sing_internal, stop_sing_internal},
 };
 use crate::state::AppState;
 
 pub async fn get_status(State(state): State<Arc<AppState>>) -> Json<ApiResponse<StatusData>> {
-    // 快速获取进程状态并立即释放锁
+    let alive = sing_box_is_running(&state).await;
+    let mut runtime = state
+        .runtime_status
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    // Keep the process handle until lifecycle cleanup has removed its owned rules.
     let (running, pid, uptime_secs) = {
         let mut lock = state.sing_process.lock().await;
 
         if let Some(ref mut proc) = *lock {
+            if let Some(error) = proc
+                .firewall
+                .as_ref()
+                .and_then(|firewall| firewall.diagnostic())
+            {
+                runtime.error = Some(error);
+            }
             match proc.child.try_wait() {
-                Ok(Some(_)) => {
-                    *lock = None;
-                    (false, None, None)
-                }
+                Ok(Some(_)) => (false, None, None),
                 Ok(None) => {
                     let uptime = proc.started_at.elapsed().as_secs();
-                    (true, proc.child.id(), Some(uptime))
+                    (
+                        alive && runtime.phase == RuntimePhase::Ready,
+                        proc.child.id(),
+                        Some(uptime),
+                    )
                 }
                 Err(_) => (false, None, None),
             }
@@ -47,7 +62,8 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> Json<ApiResponse<
         .load(std::sync::atomic::Ordering::Relaxed);
     let warning = state.config_warning.lock().await.clone();
     let config_source = state.config_source.lock().await.clone();
-    let mode = state.config.read().await.mode;
+    let config = state.config.read().await.clone();
+    let mode = config.mode;
 
     success(
         if running { "running" } else { "stopped" },
@@ -55,6 +71,8 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> Json<ApiResponse<
             running,
             initializing,
             mode,
+            tun: config.tun,
+            runtime,
             pid,
             uptime_secs,
             warning,
@@ -64,16 +82,31 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> Json<ApiResponse<
 }
 
 pub async fn start_service(State(state): State<Arc<AppState>>) -> HandlerResult {
+    if sing_box_is_running(&state).await {
+        return Err(status_error(
+            StatusCode::BAD_REQUEST,
+            "sing-box is already running",
+        ));
+    }
+    let epoch = routing::supersede(&state);
+    let mode = state.config.read().await.mode;
+    if let Err(error) = routing::prepare_host(&state, mode, epoch).await {
+        if routing::is_current(&state, epoch) {
+            routing::status(&state, RuntimePhase::Failed, None, Some(error.to_string()));
+        }
+        return Err(status_error(StatusCode::SERVICE_UNAVAILABLE, error));
+    }
     // 与其它会重新生成配置的 handler 共用同一把锁：start 也可能走到 gen_config，
     // 不持锁会和并发的配置变更互相覆盖生成产物与端口分配账本。
     state
         .startup_cancelled
         .store(true, std::sync::atomic::Ordering::SeqCst);
     let _config_update = state.config_update.lock().await;
+    routing::check_current(&state, epoch).map_err(|e| status_error(StatusCode::CONFLICT, e))?;
     let config_path = get_sing_box_home().join("config.json");
     if !config_path.exists() {
         let config = state.config.read().await.clone();
-        match restore_config_from_cache(&config).await {
+        match restore_config_from_cache(&config, &state).await {
             Ok(_) => {
                 *state.config_source.lock().await = Some("cache".to_string());
                 *state.config_warning.lock().await =
@@ -94,6 +127,14 @@ pub async fn start_service(State(state): State<Arc<AppState>>) -> HandlerResult 
                         }
                     }
                     Err(generate_err) => {
+                        if routing::is_current(&state, epoch) {
+                            routing::status(
+                                &state,
+                                RuntimePhase::Failed,
+                                None,
+                                Some(generate_err.to_string()),
+                            );
+                        }
                         return Err(status_error(
                             StatusCode::INTERNAL_SERVER_ERROR,
                             format!(
@@ -106,9 +147,18 @@ pub async fn start_service(State(state): State<Arc<AppState>>) -> HandlerResult 
             }
         }
     }
+    let config = state.config.read().await.clone();
+    if let Err(error) = routing::prepare_existing(&config, &state).await {
+        if routing::is_current(&state, epoch) {
+            routing::status(&state, RuntimePhase::Failed, None, Some(error.to_string()));
+        }
+        return Err(status_error(StatusCode::INTERNAL_SERVER_ERROR, error));
+    }
 
     match start_sing_internal(&state).await {
         Ok(_) => {
+            routing::check_current(&state, epoch)
+                .map_err(|e| status_error(StatusCode::CONFLICT, e))?;
             if let Err(e) = save_running_state(true).await {
                 return Err(status_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -118,29 +168,51 @@ pub async fn start_service(State(state): State<Arc<AppState>>) -> HandlerResult 
             // Restore under the configuration lock so a delayed task cannot
             // overwrite a newer CLI or web node selection.
             restore_last_proxy(&state).await;
+            save_config_cache(&config).await;
             Ok(success_no_data("sing-box started successfully"))
         }
         Err(AppError::AlreadyRunning) => Err(status_error(
             StatusCode::BAD_REQUEST,
             "sing-box is already running",
         )),
-        Err(e) => Err(status_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to start: {}", e),
-        )),
+        Err(e) => {
+            if routing::is_current(&state, epoch) {
+                routing::status(&state, RuntimePhase::Failed, None, Some(e.to_string()));
+            }
+            Err(status_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to start: {}", e),
+            ))
+        }
     }
 }
 
 pub async fn stop_service(State(state): State<Arc<AppState>>) -> HandlerResult {
+    let epoch = routing::supersede(&state);
+    // Cancellation and process termination do not queue behind subscription/package I/O.
+    stop_sing_internal(&state).await;
     state
         .startup_cancelled
         .store(true, std::sync::atomic::Ordering::SeqCst);
     let _config_update = state.config_update.lock().await;
-    stop_sing_internal(&state).await;
+    routing::check_current(&state, epoch).map_err(|e| status_error(StatusCode::CONFLICT, e))?;
     if let Err(e) = save_running_state(false).await {
         return Err(status_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Failed to save runtime state: {}", e),
+        ));
+    }
+    let runtime = state
+        .runtime_status
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    if runtime.phase == RuntimePhase::Failed {
+        return Err(status_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            runtime
+                .error
+                .unwrap_or_else(|| "Network cleanup failed".into()),
         ));
     }
     Ok(success_no_data("sing-box stopped"))
@@ -150,10 +222,20 @@ pub async fn set_mode(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ModeRequest>,
 ) -> HandlerResult {
+    if state.config.read().await.mode == req.mode {
+        return Ok(success_no_data("Proxy mode unchanged"));
+    }
+    let epoch = routing::supersede(&state);
+    if sing_box_is_running(&state).await {
+        routing::prepare_host(&state, req.mode, epoch)
+            .await
+            .map_err(|e| status_error(StatusCode::SERVICE_UNAVAILABLE, e))?;
+    }
     state
         .startup_cancelled
         .store(true, std::sync::atomic::Ordering::SeqCst);
     let _config_update = state.config_update.lock().await;
+    routing::check_current(&state, epoch).map_err(|e| status_error(StatusCode::CONFLICT, e))?;
     let was_running = sing_box_is_running(&state).await;
     let old_config = state.config.read().await.clone();
 

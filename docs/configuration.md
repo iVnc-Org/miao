@@ -55,6 +55,8 @@ sudo ./miao --socks-listen 0.0.0.0 --socks-port 1080
 
 `mode` 默认是 `global`：除私网直连规则外，其余流量使用当前代理节点。`process` 按进程名单决定代理或直连，不做国内外分流。`pool` 不创建 TUN 入站，只保留本地 SOCKS5 入站和每个节点的独立 SOCKS5 端口。
 
+全局和进程模式默认使用 `tun.routing: auto`，按内核能力选择增强接管或兼容策略路由。可以在状态卡切换，或配置 `nftables` / `policy_route`。fw3 的可信 LAN、自定义接口、进程直连后备与诊断见 [OpenWrt 接管与排障](openwrt.md)。
+
 ## 进程代理
 
 进程代理基于 sing-box TUN route rule，支持两种名单类型：

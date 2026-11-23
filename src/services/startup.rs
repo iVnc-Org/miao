@@ -59,9 +59,8 @@ pub async fn run(
     let mut candidate = state.config.read().await.clone();
     normalize_mode(&mut candidate, mode)?;
     // Do local prerequisite work before changing any remote service.
-    if mode != ProxyMode::Pool {
-        super::openwrt::check_and_install_openwrt_dependencies().await?;
-    }
+    let epoch = state.runtime_epoch.load(Ordering::SeqCst);
+    super::routing::prepare_host(&state, mode, epoch).await?;
     allowed(&state)?;
     if let Some(request) = request {
         // Keep a previously running proxy available during a potentially long
@@ -121,7 +120,7 @@ async fn resume_baseline(state: &Arc<AppState>) -> AppResult<()> {
     }
     eprintln!("[代理] 正在从本地缓存恢复原代理，部署期间保持可用……");
     let restored: AppResult<()> = async {
-        if super::config::restore_config_from_cache(&config)
+        if super::config::restore_config_from_cache(&config, state)
             .await
             .is_err()
         {
@@ -437,6 +436,7 @@ async fn verify_main(config: &Config) -> AppResult<()> {
 }
 
 async fn activate(state: &Arc<AppState>, mode: ProxyMode, tag: Option<&str>) -> AppResult<()> {
+    let epoch = state.runtime_epoch.load(Ordering::SeqCst);
     let _lock = state.config_update.lock().await;
     allowed(state)?;
     let old = state.config.read().await.clone();
@@ -514,6 +514,8 @@ async fn activate(state: &Arc<AppState>, mode: ProxyMode, tag: Option<&str>) -> 
                 Ok(_)
                     if (runtime_changed || !old_running)
                         && (old_running || old_intent.running)
+                        && super::routing::is_current(state, epoch)
+                        && allowed(state).is_ok()
                         && !state.shutting_down.load(Ordering::SeqCst) =>
                 {
                     match start_sing_internal(state).await {

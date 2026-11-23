@@ -348,6 +348,30 @@ html[data-embed-mode='true'] .workspace {
     color: var(--text-muted);
     font-size: 12px;
 }
+.routing-control {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+.routing-control select {
+    color: var(--text);
+    background: var(--surface-soft);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 2px 5px;
+    font: inherit;
+}
+.routing-note, .routing-error {
+    max-width: 42rem;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+.routing-error { color: var(--danger); }
 .status-card-spacer {
     flex: 1;
 }
