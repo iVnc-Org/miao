@@ -1013,7 +1013,13 @@ async fn upgrade_binary(state: &Arc<AppState>, run: &UpgradeRun) -> AppResult<St
     );
 
     stage(state, "Stopping sing-box")?;
-    stop_sing_internal(state).await;
+    if let Err(error) = stop_sing_internal(state).await {
+        let _ = fs::rename(&backup_path, &current_exe);
+        return Err(AppError::context(
+            "Failed to restore DNS before upgrade; previous binary retained",
+            error,
+        ));
+    }
     if let Err(e) = stage(state, "Restarting") {
         let _ = fs::rename(&backup_path, &current_exe);
         let _ = start_sing_internal(state).await;

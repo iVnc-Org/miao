@@ -19,6 +19,11 @@ pub fn remember_nft_rules(available: bool) {
     NFT_RULES_UNAVAILABLE.store(!available, Ordering::SeqCst);
 }
 
+/// An explicit Start re-probes capabilities after packages or kernel modules change.
+pub fn retry_nft_rules() {
+    NFT_RULES_UNAVAILABLE.store(false, Ordering::SeqCst);
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EffectiveRouting {
@@ -54,6 +59,7 @@ pub struct RuntimeStatus {
     pub phase: RuntimePhase,
     pub routing: Option<RoutingPlan>,
     pub error: Option<String>,
+    pub dns: Option<super::openwrt_dns::DnsStatus>,
 }
 
 pub fn supersede(state: &AppState) -> u64 {
@@ -172,27 +178,26 @@ pub fn resolve_with(
     if config.mode == ProxyMode::Pool {
         return Ok(plan);
     }
-    match tun.routing {
-        TunRouting::PolicyRoute => plan.effective = EffectiveRouting::PolicyRoute,
-        TunRouting::Nftables if disable_nftables => return Err(AppError::message("ROUTING_CONFLICT: remove DISABLE_NFTABLES or select policy_route")),
-        TunRouting::Auto if disable_nftables => {
+    if disable_nftables {
+        plan.effective = EffectiveRouting::PolicyRoute;
+        plan.reason = Some("诊断环境变量 DISABLE_NFTABLES 已启用，使用策略路由".into());
+        return Ok(plan);
+    }
+    match capability {
+        NftCapability::Available => plan.effective = EffectiveRouting::Nftables,
+        NftCapability::Unsupported(code) => {
             plan.effective = EffectiveRouting::PolicyRoute;
-            plan.reason = Some("DISABLE_NFTABLES 已映射为兼容策略路由".into());
+            plan.reason = Some(format!(
+                "当前内核不支持所需 nftables 操作（errno {code}），已自动适配为策略路由"
+            ));
         }
-        _ => match capability {
-            NftCapability::Available => plan.effective = EffectiveRouting::Nftables,
-            NftCapability::Unsupported(code) if tun.routing == TunRouting::Auto => {
-                plan.effective = EffectiveRouting::PolicyRoute;
-                plan.reason = Some(format!("当前内核不支持所需 nftables 操作（errno {code}），使用兼容策略路由"));
-            }
-            // Editing a stopped config may be unprivileged. Active starts check CAP_NET_ADMIN first.
-            NftCapability::PermissionDenied if tun.routing == TunRouting::Auto => {
-                plan.effective = EffectiveRouting::PolicyRoute;
-                plan.reason = Some("当前进程无法访问 nftables；启动 TUN 仍需要 CAP_NET_ADMIN".into());
-            }
-            NftCapability::PermissionDenied => return Err(AppError::message("NFT_PERMISSION_DENIED: nftables requires CAP_NET_ADMIN")),
-            NftCapability::Unsupported(code) => return Err(AppError::message(format!("NFT_UNAVAILABLE: kernel rejected nftables query (errno {code}); select auto or policy_route"))),
-            NftCapability::Unknown(error) => return Err(AppError::message(format!("NFT_PROBE_FAILED: {error}"))),
+        // Editing a stopped config may be unprivileged. Active starts check CAP_NET_ADMIN first.
+        NftCapability::PermissionDenied => {
+            plan.effective = EffectiveRouting::PolicyRoute;
+            plan.reason = Some("当前进程无法访问 nftables；启动代理仍需要 CAP_NET_ADMIN".into());
+        }
+        NftCapability::Unknown(error) => {
+            return Err(AppError::message(format!("NFT_PROBE_FAILED: {error}")))
         }
     }
     Ok(plan)
@@ -201,19 +206,14 @@ pub fn resolve_with(
 pub async fn resolve(config: &Config) -> AppResult<RoutingPlan> {
     let disabled = std::env::var("DISABLE_NFTABLES")
         .is_ok_and(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "True"));
-    if config.mode != ProxyMode::Pool
-        && config.tun.routing == TunRouting::Auto
-        && !disabled
-        && NFT_RULES_UNAVAILABLE.load(Ordering::SeqCst)
-    {
+    if config.mode != ProxyMode::Pool && !disabled && NFT_RULES_UNAVAILABLE.load(Ordering::SeqCst) {
         let mut plan = resolve_with(config, NftCapability::Unsupported(libc::EOPNOTSUPP), false)?;
-        plan.reason = Some("本次运行已确认 nftables 规则不受支持，继续使用兼容策略路由；重启或显式选择增强模式可重新检测".into());
+        plan.reason = Some(
+            "本次运行已确认 nftables 规则不受支持，继续使用策略路由；下次启动服务时重新检测".into(),
+        );
         return Ok(plan);
     }
-    let capability = if config.mode == ProxyMode::Pool
-        || config.tun.routing == TunRouting::PolicyRoute
-        || disabled
-    {
+    let capability = if config.mode == ProxyMode::Pool || disabled {
         NftCapability::Unsupported(0)
     } else {
         tokio::task::spawn_blocking(probe_nftables)
@@ -241,6 +241,27 @@ pub fn apply(config: &mut Value, plan: &RoutingPlan) -> AppResult<()> {
         return Err(AppError::message(
             "ROUTING_CONFIG_MISMATCH: TUN presence does not match selected mode",
         ));
+    }
+    // Native auto-redirect marks every core socket to bypass interception. Let
+    // the kernel route those sockets: binding them to the default NIC breaks
+    // endpoints reached through policy routes (e.g. Tailscale) and other NICs.
+    // Without auto-redirect, retain default-interface binding to prevent loops.
+    // Explicit outbound bindings and detours remain authoritative in both modes.
+    config["route"]["auto_detect_interface"] =
+        (plan.effective == EffectiveRouting::PolicyRoute).into();
+    if let Some(servers) = config["dns"]["servers"].as_array_mut() {
+        for server in servers
+            .iter_mut()
+            .filter(|server| server["tag"] == "local" || server["tag"] == "miao-magic")
+        {
+            // Native auto-redirect supplies its own mark and rejects an explicit
+            // routing_mark. The fallback needs the same bypass mark explicitly.
+            if plan.effective == EffectiveRouting::PolicyRoute {
+                server["routing_mark"] = 0x2024.into();
+            } else if let Some(fields) = server.as_object_mut() {
+                fields.remove("routing_mark");
+            }
+        }
     }
     if let Some(rules) = config["route"]["rules"].as_array_mut() {
         for rule in rules {
@@ -327,6 +348,7 @@ pub async fn prepare_existing(config: &Config, state: &AppState) -> AppResult<()
     let mut value: Value = serde_json::from_slice(&tokio::fs::read(path).await?)?;
     let plan = resolve(config).await?;
     super::config::apply_runtime_routing(config, &mut value, &plan)?;
+    super::proxy::pin_saved_selection(&mut value).await;
     check_current(state, epoch)?;
     write_config(&value, &plan, epoch).await
 }
@@ -432,11 +454,17 @@ mod tests {
         );
     }
     #[test]
-    fn forced_nftables_never_silently_falls_back_and_pool_needs_no_tun() {
+    fn legacy_manual_choices_cannot_disable_adaptation_and_pool_needs_no_tun() {
         let mut config = Config::default();
-        config.tun.routing = TunRouting::Nftables;
-        assert!(resolve_with(&config, NftCapability::Unsupported(22), false).is_err());
-        assert!(resolve_with(&config, NftCapability::Available, true).is_err());
+        for legacy in [TunRouting::Nftables, TunRouting::PolicyRoute] {
+            config.tun.routing = legacy;
+            let native = resolve_with(&config, NftCapability::Available, false).unwrap();
+            assert_eq!(native.requested, TunRouting::Auto);
+            assert_eq!(native.effective, EffectiveRouting::Nftables);
+            let compatible = resolve_with(&config, NftCapability::Unsupported(22), false).unwrap();
+            assert_eq!(compatible.requested, TunRouting::Auto);
+            assert_eq!(compatible.effective, EffectiveRouting::PolicyRoute);
+        }
         config.mode = ProxyMode::Pool;
         assert_eq!(
             resolve_with(&config, NftCapability::PermissionDenied, true)
@@ -458,5 +486,30 @@ mod tests {
             config["route"]["rules"][2]["rules"][0]["outbound"],
             "direct"
         );
+    }
+
+    #[test]
+    fn mark_based_routing_uses_kernel_routes_and_fallback_restores_loop_protection() {
+        let outbounds = serde_json::json!([
+            {"type":"socks", "tag":"overlay", "server":"100.64.0.2", "bind_interface":"vpn0"},
+            {"type":"socks", "tag":"chain", "server":"example.test", "detour":"overlay"}
+        ]);
+        let mut value = serde_json::json!({
+            "inbounds":[{"type":"tun"}],
+            "outbounds":outbounds,
+            "route":{"auto_detect_interface":true}
+        });
+        let mut plan = resolve_with(&Config::default(), NftCapability::Available, false).unwrap();
+        apply(&mut value, &plan).unwrap();
+        assert_eq!(value["route"]["auto_detect_interface"], false);
+        assert_eq!(value["outbounds"], outbounds);
+        plan.effective = EffectiveRouting::PolicyRoute;
+        apply(&mut value, &plan).unwrap();
+        assert_eq!(value["route"]["auto_detect_interface"], true);
+        assert_eq!(value["outbounds"], outbounds);
+        plan.effective = EffectiveRouting::None;
+        value["inbounds"] = serde_json::json!([]);
+        apply(&mut value, &plan).unwrap();
+        assert_eq!(value["route"]["auto_detect_interface"], false);
     }
 }

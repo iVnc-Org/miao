@@ -158,12 +158,17 @@ jobs:
           GITHUB_SERVER_URL: ${{ github.server_url }}
         run: cargo zigbuild --release --target ${{ matrix.rust_target }}
 
-      - name: Verify isolated traffic routing and fw3 compatibility
+      - name: Verify isolated traffic routing and fw3/fw4 compatibility
         if: matrix.target == 'amd64'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y iproute2 iptables curl
+          sudo apt-get install -y iproute2 iptables curl dnsmasq-base nftables
           sudo python3 scripts/tests/openwrt_runtime_test.py --simulate-fw3 \
+            --dnsmasq-binary /usr/sbin/dnsmasq \
+            --binary "$GITHUB_WORKSPACE/target/${{ matrix.rust_target }}/release/miao-rust"
+          sudo python3 scripts/tests/openwrt_runtime_test.py --simulate-fw4 \
+            --external-system-dns \
+            --dnsmasq-binary /usr/sbin/dnsmasq \
             --binary "$GITHUB_WORKSPACE/target/${{ matrix.rust_target }}/release/miao-rust"
 
       - name: Prepare release asset

@@ -98,7 +98,9 @@ mod tests {
 
     #[tokio::test]
     async fn routing_preferences_are_readable_and_invalid_interfaces_are_rejected() {
-        let app = crate::test_support::test_app(crate::models::Config::default()).await;
+        let mut config = crate::models::Config::default();
+        config.tun.lan_interfaces = vec!["br-lan".into()];
+        let app = crate::test_support::test_app(config).await;
         let response = app
             .clone()
             .oneshot(crate::test_support::empty_request("GET", "/api/tun"))
@@ -106,6 +108,29 @@ mod tests {
             .unwrap();
         let value = crate::test_support::response_json(response).await;
         assert_eq!(value["data"]["routing"], "auto");
+        for legacy in ["nftables", "policy_route"] {
+            let response = app
+                .clone()
+                .oneshot(crate::test_support::json_request(
+                    "PUT",
+                    "/api/tun",
+                    serde_json::json!({"routing":legacy}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let response = app
+                .clone()
+                .oneshot(crate::test_support::empty_request("GET", "/api/tun"))
+                .await
+                .unwrap();
+            let value = crate::test_support::response_json(response).await;
+            assert_eq!(value["data"]["routing"], "auto");
+            assert_eq!(
+                value["data"]["lan_interfaces"],
+                serde_json::json!(["br-lan"])
+            );
+        }
         let response = app
             .oneshot(crate::test_support::json_request(
                 "PUT",

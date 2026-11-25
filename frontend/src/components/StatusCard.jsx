@@ -16,7 +16,6 @@ export function StatusCard({
   loadingAction,
   onToggleService,
   onSetMode,
-  onSetTunRouting,
   onOpenConnections
 }) {
   const { t } = useI18n()
@@ -65,21 +64,21 @@ export function StatusCard({
                 ? t('status.preparing')
                 : t('status.waitStart')}
           </div>
-          {status.mode !== 'pool' && onSetTunRouting && (
-            <label className="routing-control">
-              <span>{t('routing.label')}</span>
-              <select aria-label={t('routing.label')} value={status.tun?.routing || 'auto'}
-                disabled={modeControlDisabled || Boolean(loadingAction)} onChange={(event) => onSetTunRouting(event.target.value)}>
-                <option value="auto">{t('routing.auto')}</option>
-                <option value="nftables">{t('routing.nftables')}</option>
-                <option value="policy_route">{t('routing.policy_route')}</option>
-              </select>
-              {status.runtime?.routing?.effective && status.runtime.routing.effective !== 'none' && (
-                <span>{t('routing.effective', { mode: t(`routing.${status.runtime.routing.effective}`) })}</span>
+          {status.mode !== 'pool' && (
+            <>
+              <div className="routing-note" role="status">
+                {t(starting || status.initializing ? 'routing.detecting' : status.running ? 'routing.ready' : 'routing.onStart')}
+              </div>
+              {status.running && status.runtime?.routing?.effective && status.runtime.routing.effective !== 'none' && (
+                <details className="routing-diagnostics">
+                  <summary>{t('routing.diagnostics')}</summary>
+                  <div>{t('routing.effective', { mode: t(`routing.${status.runtime.routing.effective}`) })}</div>
+                  {status.runtime.routing.reason && <div>{status.runtime.routing.reason}</div>}
+                  {status.runtime.dns?.message && <div>{t('routing.dns', { message: status.runtime.dns.message })}</div>}
+                </details>
               )}
-            </label>
+            </>
           )}
-          {status.runtime?.routing?.reason && <div className="routing-note" role="status">{status.runtime.routing.reason}</div>}
           {status.runtime?.error && <div className="routing-error" role="alert">{status.runtime.error}</div>}
         </div>
       </div>

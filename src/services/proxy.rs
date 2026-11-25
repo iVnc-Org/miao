@@ -46,6 +46,14 @@ pub async fn load_last_proxy() -> Option<LastProxy> {
     None
 }
 
+/// DNS readiness must use the selected node from the first outbound request.
+pub async fn pin_saved_selection(config: &mut serde_json::Value) {
+    if let Some(proxy) = load_last_proxy().await.filter(|p| p.group == "proxy") {
+        // Removed historical nodes fall back to the generated selector order.
+        let _ = super::startup::pin_selector(config, &proxy.name);
+    }
+}
+
 pub async fn restore_last_proxy(state: &Arc<AppState>) {
     let proxy = match load_last_proxy().await {
         Some(p) => p,

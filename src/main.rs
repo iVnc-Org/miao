@@ -423,6 +423,19 @@ async fn main() -> AppResult<()> {
         )
         .init();
 
+    // Recovery is a separate procd-supervised process, without panel/auth/data
+    // initialization and without the core's parent-death signal.
+    let internal: Vec<_> = std::env::args().collect();
+    if internal.get(1).map(String::as_str) == Some("--internal-dns-guard") {
+        if !Uid::effective().is_root() || internal.len() != 4 {
+            return Err(AppError::message(
+                "DNS_GUARD_INVALID: invalid recovery invocation",
+            ));
+        }
+        return services::openwrt_dns::run_guard(internal[2].clone().into(), internal[3].clone())
+            .await;
+    }
+
     let cli_options = parse_cli_args(std::env::args())?;
 
     if cli_options.show_integration_version {
@@ -446,6 +459,9 @@ async fn main() -> AppResult<()> {
     }
 
     embedding::validate()?;
+    if !cli_options.password_command {
+        services::openwrt_dns::recover_stale(&services::singbox::get_sing_box_home()).await?;
+    }
     if cli_options.password_command || cli_options.password.is_some() {
         let password = match &cli_options.password {
             Some(value) => value.clone(),
@@ -792,7 +808,9 @@ async fn shutdown_signal(state: Arc<AppState>) {
     state
         .shutting_down
         .store(true, std::sync::atomic::Ordering::SeqCst);
-    stop_sing_internal(&state).await;
+    if let Err(error) = stop_sing_internal(&state).await {
+        error!(%error, "Shutdown cleanup failed; independent DNS guard remains responsible for recovery");
+    }
     services::openwrt::finish_preparation().await;
     if let Ok(jobs) = services::vps::jobs(&state).await {
         for job in jobs.iter().filter(|job| job.active) {
@@ -801,7 +819,9 @@ async fn shutdown_signal(state: Arc<AppState>) {
     }
     let _config_update = state.config_update.lock().await;
     info!("Shutting down, stopping sing-box...");
-    stop_sing_internal(&state).await;
+    if let Err(error) = stop_sing_internal(&state).await {
+        error!(%error, "Final shutdown cleanup failed");
+    }
 }
 
 #[cfg(test)]

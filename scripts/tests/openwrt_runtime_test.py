@@ -12,6 +12,7 @@ import http.client
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import select
@@ -25,12 +26,23 @@ import threading
 import time
 import traceback
 import unittest
+from openwrt_dns_fixture import DNSFixture, query as dns_query, answer_ip
 
 BINARY = os.environ.get("MIAO_TEST_BINARY")
 SIMULATE_FW3 = False
+SIMULATE_FW4 = False
+DNSMASQ_BINARY = None
+EXTERNAL_SYSTEM_DNS = False
+PRIVATE_SUBSCRIPTION = None
 IP = shutil.which("ip")
 TARGET = "203.0.113.10"
+DNS_TARGET = "8.8.4.4"
 LIBC = ctypes.CDLL(None, use_errno=True)
+
+
+def legacy_fw3():
+    fw3, fw4 = shutil.which("fw3"), shutil.which("fw4")
+    return bool(fw3 and (not fw4 or not os.path.samefile(fw3, fw4)))
 
 
 def run(*args):
@@ -65,9 +77,17 @@ def tap(name):
     return descriptor
 
 
-def dns_answer(query):
+def dns_answer(query, target=DNS_TARGET):
     # Preserve the full question and return one A record, without public DNS.
-    return query[:2] + struct.pack("!HHHHH", 0x8180, 1, 1, 0, 0) + query[12:] + b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 60, 4) + socket.inet_aton(TARGET)
+    end = 12
+    while query[end]:
+        end += 1 + query[end]
+    # Discard EDNS OPT records from the query's additional section.
+    question = query[12:end + 5]
+    if question[-4:-2] == b'\x00\x1c':
+        ipv6 = '2001::1' if target == '69.171.235.22' else 'fd7a:115c:a1e0::77' if target == '100.64.0.77' else '2606:4700:4700::1111'
+        return query[:2] + struct.pack('!HHHHH', 0x8180, 1, 1, 0, 0) + question + b'\xc0\x0c' + struct.pack('!HHIH', 28, 1, 60, 16) + socket.inet_pton(socket.AF_INET6, ipv6)
+    return query[:2] + struct.pack("!HHHHH", 0x8180, 1, 1, 0, 0) + question + b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 60, 4) + socket.inet_aton(target)
 
 
 def http_reply(sock, body):
@@ -92,7 +112,7 @@ class UDPServer(socketserver.ThreadingUDPServer):
     daemon_threads = True
 
 
-def serve_wan(ready, slow_flag):
+def serve_wan(ready, slow_flag, server_address):
     class Socks(socketserver.BaseRequestHandler):
         def handle(self):
             sock = self.request
@@ -109,7 +129,7 @@ def serve_wan(ready, slow_flag):
             else:
                 receive(sock, 16)
             port = struct.unpack("!H", receive(sock, 2))[0]
-            sock.sendall(b"\x05\x00\x00\x01" + socket.inet_aton("192.0.2.2") + struct.pack("!H", 19091 if command == 3 else 0))
+            sock.sendall(b"\x05\x00\x00\x01" + socket.inet_aton(server_address) + struct.pack("!H", 19091 if command == 3 else 0))
             if command == 3:
                 try:
                     while sock.recv(1024):
@@ -118,6 +138,12 @@ def serve_wan(ready, slow_flag):
                     pass
             elif port == 53:
                 query = receive(sock, struct.unpack("!H", receive(sock, 2))[0])
+                change = slow_flag.parent / 'dns-fixture/policy-change'
+                if change.exists():
+                    directive = change.read_text()
+                    change.unlink()
+                    with (change.parent / 'dnsmasq.conf').open('a') as output:
+                        output.write(directive)
                 answer = dns_answer(query)
                 sock.sendall(struct.pack("!H", len(answer)) + answer)
             else:
@@ -151,15 +177,31 @@ def serve_wan(ready, slow_flag):
             payload, sock = self.request
             sock.sendto(dns_answer(payload), self.client_address)
 
+    class DirtyDNS(socketserver.BaseRequestHandler):
+        def handle(self):
+            payload, sock = self.request
+            with (slow_flag.parent / 'dns-fixture/dirty.log').open('ab') as output:
+                output.write(b'query\n')
+            sock.sendto(dns_answer(payload, '69.171.235.22'), self.client_address)
+
+    class MagicDNS(socketserver.BaseRequestHandler):
+        def handle(self):
+            payload, sock = self.request
+            sock.sendto(dns_answer(payload, '100.64.0.77'), self.client_address)
+
     class Slow(socketserver.BaseRequestHandler):
         def handle(self):
             self.request.recv(4096)
             slow_flag.touch()
             time.sleep(25)
 
-    servers = [TCPServer(("192.0.2.2", 19090), Socks), UDPServer(("192.0.2.2", 19091), SocksUDP),
+    servers = [TCPServer((server_address, 19090), Socks), UDPServer((server_address, 19091), SocksUDP),
                TCPServer((TARGET, 18080), Direct), UDPServer((TARGET, 18081), DirectUDP),
-               UDPServer(("223.5.5.5", 53), DNS), TCPServer(("192.0.2.2", 18090), Slow)]
+               UDPServer(("223.5.5.5", 53), DNS), TCPServer((server_address, 18090), Slow)]
+    if DNSMASQ_BINARY:
+        servers.append(UDPServer((server_address, 53), DirtyDNS))
+        if server_address == '192.0.2.2':
+            servers.append(UDPServer(('100.100.100.100', 53), MagicDNS))
     for server in servers:
         threading.Thread(target=server.serve_forever, daemon=True).start()
     os.write(ready, b"R")
@@ -168,6 +210,10 @@ def serve_wan(ready, slow_flag):
 
 
 def request_payload(operation):
+    if operation == 'dns_frontend':
+        assert answer_ip(dns_query('192.168.77.1')) == DNS_TARGET
+        assert answer_ip(dns_query('192.168.77.1', tcp=True)) == DNS_TARGET
+        return 'frontend-ok'
     if operation == "tcp":
         with socket.create_connection((TARGET, 18080), timeout=5) as sock:
             sock.sendall(b"GET / HTTP/1.0\r\nHost: miao.test\r\n\r\n")
@@ -183,7 +229,7 @@ def request_payload(operation):
         with socket.create_connection(("1.1.1.1", 53), timeout=5) as sock:
             sock.sendall(struct.pack("!H", len(query)) + query)
             response = receive(sock, struct.unpack("!H", receive(sock, 2))[0])
-            assert response[:2] == query[:2] and response[-4:] == socket.inet_aton(TARGET), response
+            assert response[:2] == query[:2] and response[-4:] == socket.inet_aton(DNS_TARGET), response
             return "dns-tcp-ok"
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.settimeout(5)
@@ -192,7 +238,7 @@ def request_payload(operation):
             # Public DNS from both router and LAN traverses the TUN DNS hijack path.
             sock.sendto(query, ("1.1.1.1", 53))
             response = sock.recv(4096)
-            assert response[:2] == query[:2] and response[-4:] == socket.inet_aton(TARGET), response
+            assert response[:2] == query[:2] and response[-4:] == socket.inet_aton(DNS_TARGET), response
             return "dns-ok"
         sock.sendto(b"test", (TARGET, 18081))
         return sock.recv(4096).decode()
@@ -220,9 +266,16 @@ def start_peer(device, address, server, slow_flag=None):
             run(IP, "addr", "add", address, "dev", device)
             run(IP, "link", "set", device, "up")
             if server:
-                for ip in [TARGET, "223.5.5.5"]:
+                if device == "vpn-test":
+                    run(IP, "route", "add", "100.64.0.1/32", "dev", device)
+                if EXTERNAL_SYSTEM_DNS and device == 'srv-test':
+                    run(IP, 'route', 'add', '100.64.0.77/32', 'via', '192.0.2.1', 'dev', device)
+                addresses = [TARGET, "223.5.5.5"]
+                if DNSMASQ_BINARY and device == 'srv-test':
+                    addresses.append('100.100.100.100')
+                for ip in addresses:
                     run(IP, "addr", "add", ip + "/32", "dev", "lo")
-                serve_wan(child_to_parent_w, slow_flag)
+                serve_wan(child_to_parent_w, slow_flag, address.split('/')[0])
             else:
                 run(IP, "route", "add", "default", "via", "192.168.77.1")
                 os.write(child_to_parent_w, b"R")
@@ -258,19 +311,24 @@ class Fixture:
         self.config_path = directory / "config.yaml"
         self.log = directory / "miao.log"
         self.process = None
+        self.disable_nftables = False
         self.cookie, self.csrf = "", ""
+        # Keep fixture listeners below the ephemeral range used by the DNS probes.
         self.config = {"port": 6162, "mode": "global", "socks_port": 19080,
-                       "tun": {"routing": "auto", "lan_interfaces": ["br-test"]},
+                       "share": {"base_port": 20000},
+                       "tun": {"routing": "policy_route", "lan_interfaces": ["br-test"]},
                        "nodes": [json.dumps({"type": "socks", "tag": "fixture", "server": "192.0.2.2", "server_port": 19090})]}
 
-    def start(self, disable_nftables=False):
+    def start(self, disable_nftables=None):
+        if disable_nftables is not None:
+            self.disable_nftables = disable_nftables
         self.config_path.write_text(json.dumps(self.config))
         environment = dict(os.environ)
         environment.update(MIAO_EMBEDDED="ivnc", MIAO_PORT="6162", MIAO_RUNTIME_DIR=str(self.runtime))
         environment.pop("DISABLE_NFTABLES", None)
         for key in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"]:
             environment.pop(key, None)
-        if disable_nftables:
+        if self.disable_nftables:
             environment["DISABLE_NFTABLES"] = "true"
         with self.log.open("ab") as log:
             self.process = subprocess.Popen([self.binary, "--config", str(self.config_path), "--nopasswd"], env=environment,
@@ -309,12 +367,19 @@ class Fixture:
         payload = json.loads(response.read())
         connection.close()
         if success and not payload.get("success"):
+            if PRIVATE_SUBSCRIPTION:
+                code = re.search(r'\b(?:DNS|FW3|ROUTING|ROUTE|NETWORK|NFT|START|READY)_[A-Z_]+\b', str(payload.get('message', '')))
+                raise AssertionError(f"{method} {path}: {code.group() if code else 'failed'}; private diagnostics suppressed")
             raise AssertionError(payload)
         return payload
 
     def set_routing(self, routing):
-        self.api("PUT", "/api/tun", {"routing": routing, "lan_interfaces": ["br-test"]})
-        self.config["tun"]["routing"] = routing
+        # Simulate host capabilities through the diagnostic environment override.
+        # Public configuration no longer asks the user to choose an implementation.
+        self.api("PUT", "/api/tun", {"lan_interfaces": ["br-test"]})
+        self.sync_config()
+        self.close()
+        self.start(disable_nftables=routing == "policy_route")
 
     def sync_config(self):
         # The application persists YAML; use its API rather than adding a PyYAML dependency.
@@ -333,12 +398,18 @@ def isolated_suite(binary):
         mount(root, Path.home(), flags=4096)
         mount("sysfs", "/sys", "sysfs", 2 | 4 | 8)
         os.chdir(directory)  # Isolate the legacy relative data/cache migration too.
-        if SIMULATE_FW3 and not shutil.which("fw3"):
+        if SIMULATE_FW3 or SIMULATE_FW4:
             tools = directory / "tools"
             tools.mkdir()
             fw3 = tools / "fw3"
-            fw3.write_text("#!/bin/sh\nexit 0\n")
-            fw3.chmod(0o755)
+            if SIMULATE_FW4:
+                fw4 = tools / "fw4"
+                fw4.write_text("#!/bin/sh\nexit 0\n")
+                fw4.chmod(0o755)
+                fw3.symlink_to("fw4")
+            else:
+                fw3.write_text("#!/bin/sh\nexit 0\n")
+                fw3.chmod(0o755)
             os.environ["PATH"] = str(tools) + os.pathsep + os.environ["PATH"]
         run(IP, "link", "set", "lo", "up")
         slow_flag = directory / "subscription-requested"
@@ -346,13 +417,19 @@ def isolated_suite(binary):
         wires = {}
         lan_reader = lan_writer = None
         fixture = Fixture(directory, binary)
+        dns = None
         try:
-            for server, parent, child, address in [(True, "wan-test", "srv-test", "192.0.2.2/30"), (False, "br-test", "lan-test", "192.168.77.2/24")]:
+            for server, parent, child, address in [
+                (True, "wan-test", "srv-test", "192.0.2.2/30"),
+                (True, "overlay-test", "vpn-test", "100.64.0.2/32"),
+                (False, "br-test", "lan-test", "192.168.77.2/24"),
+            ]:
                 pid, reader, writer, peer_tap = start_peer(child, address, server, slow_flag)
                 peers.append(pid)
                 parent_tap = tap(parent)
                 wires[parent_tap], wires[peer_tap] = peer_tap, parent_tap
-                run(IP, "addr", "add", "192.0.2.1/30" if server else "192.168.77.1/24", "dev", parent)
+                parent_address = {"wan-test": "192.0.2.1/30", "overlay-test": "100.64.0.1/32", "br-test": "192.168.77.1/24"}[parent]
+                run(IP, "addr", "add", parent_address, "dev", parent)
                 run(IP, "link", "set", parent, "up")
                 os.write(writer, b"G")
                 assert os.read(reader, 1) == b"R"
@@ -372,12 +449,29 @@ def isolated_suite(binary):
                             os.write(wires[descriptor], packet)
             peers.append(bridge)
             run(IP, "route", "add", "default", "via", "192.0.2.2")
+            # Overlay endpoints use a separate policy table, like Tailscale.
+            run(IP, "route", "add", "100.64.0.2/32", "dev", "overlay-test", "table", "52")
+            run(IP, "rule", "add", "priority", "5270", "lookup", "52")
+            if EXTERNAL_SYSTEM_DNS:
+                run(IP, 'tuntap', 'add', 'dev', 'ts-source', 'mode', 'tun')
+                run(IP, 'addr', 'add', '100.64.0.77/32', 'dev', 'ts-source')
+                run(IP, 'link', 'set', 'ts-source', 'up')
+                run(IP, 'route', 'add', '100.100.100.100/32', 'via', '192.0.2.2', 'dev', 'wan-test', 'src', '100.64.0.77', 'table', '52')
             run(IP, "-4", "rule", "add", "priority", "1234", "from", "192.0.2.77", "lookup", "main")
             baseline_rules = run(IP, "-4", "rule", "show")
             baseline_routes = run(IP, "-4", "route", "show", "table", "all")
             Path("/proc/sys/net/ipv4/ip_forward").write_text("1")
-            if shutil.which("fw3"):
+            if legacy_fw3():
                 run("iptables", "-P", "FORWARD", "DROP")
+
+            if DNSMASQ_BINARY:
+                if EXTERNAL_SYSTEM_DNS:
+                    run(IP, '-6', 'addr', 'add', 'fd7a:115c:a1e0::53/128', 'dev', 'lo')
+                dns = DNSFixture(directory, DNSMASQ_BINARY, mount, external_system_dns=EXTERNAL_SYSTEM_DNS)
+                fixture.config['nodes'].insert(0, json.dumps({'type': 'socks', 'tag': 'unavailable-first', 'server': '192.0.2.2', 'server_port': 19999}))
+                data = Path.home() / '.miao'
+                data.mkdir(exist_ok=True)
+                (data / 'last_proxy.json').write_text(json.dumps({'group': 'proxy', 'name': 'fixture'}))
 
             def lan(operation):
                 lan_writer.write(json.dumps({"op": operation}) + "\n")
@@ -394,27 +488,126 @@ def isolated_suite(binary):
                 assert lan("udp") == "via-proxy-udp:test"
                 assert lan("dns") == "dns-ok"
                 assert lan("dns_tcp") == "dns-tcp-ok"
+                if dns:
+                    dns.protected()
+                    assert lan('dns_frontend') == 'frontend-ok'
 
             fixture.start()
             assert not fixture.api("GET", "/api/status")["data"]["running"]
+            if dns:
+                assert answer_ip(dns_query()) == '69.171.235.22'
+                assert socket.inet_pton(socket.AF_INET6, '2001::1') in dns_query(qtype=28)
+                count = dns.log.stat().st_size
+                assert answer_ip(dns_query()) == '69.171.235.22'
+                assert dns.log.stat().st_size == count
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as occupied:
+                    occupied.bind(('127.0.0.1', 6263))
+                    response = fixture.api('POST', '/api/service/start', success=False)
+                    assert not response['success'] and 'DNS_PORT_CONFLICT' in response['message'], response
+                broken = dns.confdir / 'invalid.conf'
+                broken.write_text('invalid-dnsmasq-option\n')
+                response = fixture.api('POST', '/api/service/start', success=False)
+                assert not response['success'] and 'DNS_CONFIG_INVALID' in response['message'], response
+                broken.unlink()
+                if EXTERNAL_SYSTEM_DNS:
+                    table = 'miao_dns_' + hashlib.sha256(str(fixture.runtime).encode()).hexdigest()[:12]
+                    subprocess.run(['nft', '-f', '-'], input=f'table inet {table} {{ comment "fixture-foreign"; }}\n', text=True, check=True, capture_output=True)
+                    response = fixture.api('POST', '/api/service/start', success=False)
+                    assert not response['success'] and 'DNS_OWNERSHIP_CONFLICT' in response['message']
+                    assert 'fixture-foreign' in run('nft', 'list', 'table', 'inet', table)
+                    run('nft', 'delete', 'table', 'inet', table)
+                assert not Path('/sys/class/net/sing-tun').exists()
+                print('PASS cached poisoned DNS, UDP port conflict and dnsmasq syntax preflight', flush=True)
+                original = (dns.directory / 'dnsmasq.conf').read_text()
+                change = dns.directory / 'policy-change'
+                change.write_text('server=192.0.2.2\n')
+                response = fixture.api('POST', '/api/service/start', success=False)
+                assert not response['success'] and 'DNS_POLICY_CONFLICT' in response['message']
+                assert not change.exists(), 'DNS policy race was not exercised'
+                assert not (fixture.runtime / 'dns-ownership.json').exists()
+                assert not list(dns.confdir.glob('miao-*.conf'))
+                (dns.directory / 'dnsmasq.conf').write_text(original)
+                change.write_text('# firmware regenerated configuration\n')
             fixture.api("POST", "/api/service/start")
+            if dns:
+                assert not (dns.directory / 'policy-change').exists()
+                print('PASS configuration regeneration is revalidated; competing upstream remains rejected', flush=True)
             automatic = fixture.api("GET", "/api/status")["data"]["runtime"]["routing"]["effective"]
+            assert fixture.api("GET", "/api/tun")["data"]["routing"] == "auto"
             data_plane()
+            cli_environment = dict(os.environ, MIAO_EMBEDDED='ivnc', MIAO_RUNTIME_DIR=str(fixture.runtime))
+            password_reset = subprocess.run([binary, '--config', str(fixture.config_path), 'password', 'set', 'fixture-reset'], env=cli_environment, capture_output=True, text=True, timeout=5)
+            assert password_reset.returncode == 0, 'local password command was blocked by the running DNS owner'
+            assert fixture.api('GET', '/api/status')['data']['running']
+            if dns:
+                prepared = json.loads((fixture.runtime / 'config.json').read_text())
+                assert prepared['outbounds'][0]['default'] == 'fixture'
+                print('PASS saved node is selected before DNS readiness with an unavailable first node', flush=True)
+            if dns:
+                dns_failure_checks(fixture, dns, data_plane)
             print("PASS first Web start, automatic routing, router/LAN TCP/UDP/DNS:", automatic, flush=True)
             print("PASS remote DNS remains usable when upstream UDP DNS is dropped", flush=True)
+            if SIMULATE_FW4:
+                assert "MIAO_" not in run("iptables-save", "-t", "filter"), "fw4 alias was misidentified as legacy fw3"
+                print("PASS fw3 -> fw4 compatibility alias uses native routing without legacy chains", flush=True)
+            if automatic == "nftables":
+                fixture.api("PUT", "/api/nodes", {
+                    "original_tag": "fixture", "node_type": "socks", "tag": "fixture", "server": "100.64.0.2", "server_port": 19090,
+                })
+                data_plane()
+                fixture.api("POST", "/api/service/stop")
+                # Also exercise migration of existing runtime bytes at Start.
+                stale = json.loads((fixture.runtime / "config.json").read_text())
+                stale["route"]["auto_detect_interface"] = True
+                (fixture.runtime / "config.json").write_text(json.dumps(stale))
+                fixture.api("POST", "/api/service/start")
+                data_plane()
+                fixture.sync_config()
+                fixture.close()
+                fixture.config["nodes"] = [json.dumps({"type": "socks", "tag": "fixture", "server": "100.64.0.2", "server_port": 19090})]
+                fixture.start()
+                assert fixture.api("GET", "/api/status")["data"]["running"]
+                data_plane()
+                fixture.api("PUT", "/api/nodes", {
+                    "original_tag": "fixture", "node_type": "socks", "tag": "fixture", "server": "192.0.2.2", "server_port": 19090,
+                })
+                fixture.config["nodes"] = [json.dumps({"type": "socks", "tag": "fixture", "server": "192.0.2.2", "server_port": 19090})]
+                data_plane()
+                print("PASS overlay upstream policy routes: router/LAN TCP/UDP/DNS, stale Start and manager restart", flush=True)
+            if PRIVATE_SUBSCRIPTION:
+                class PrivateSubscriptionHandler(socketserver.BaseRequestHandler):
+                    def handle(self):
+                        self.request.settimeout(5)
+                        http_reply(self.request, PRIVATE_SUBSCRIPTION.encode())
+                server = TCPServer(("127.0.0.1", 0), PrivateSubscriptionHandler)
+                threading.Thread(target=server.serve_forever, daemon=True).start()
+                url = f"http://127.0.0.1:{server.server_address[1]}/private-subscription"
+                for endpoint, body in [("/api/subs", {"url": url}),
+                                       ("/api/subs/content", {"name": "private acceptance", "content": PRIVATE_SUBSCRIPTION})]:
+                    fixture.api("POST", endpoint, body)
+                    subscriptions = fixture.api("GET", "/api/subs")["data"]
+                    assert len(subscriptions) == 1 and subscriptions[0]["node_count"] > 0
+                    assert fixture.api("GET", "/api/status")["data"]["running"]
+                    data_plane()
+                    count = subscriptions[0]["node_count"]
+                    fixture.api("DELETE", "/api/subs", {"url": subscriptions[0]["url"]})
+                    data_plane()
+                    print("PASS private subscription import/restart:", endpoint, "nodes:", count, flush=True)
+                server.shutdown()
+                server.server_close()
 
             fixture.set_routing("policy_route")
             data_plane()
-            print("PASS explicit policy routing data plane", flush=True)
-            response = fixture.api("PUT", "/api/tun", {"routing": "policy_route", "lan_interfaces": ["missing0"]}, success=not bool(shutil.which("fw3")))
-            if shutil.which("fw3"):
+            print("PASS automatic policy-routing fallback data plane", flush=True)
+            response = fixture.api("PUT", "/api/tun", {"routing": "policy_route", "lan_interfaces": ["missing0"]}, success=not legacy_fw3())
+            if legacy_fw3():
                 assert not response["success"]
                 assert fixture.api("GET", "/api/tun")["data"]["lan_interfaces"] == ["br-test"]
                 data_plane()
                 print("PASS failed firewall activation restores old running configuration", flush=True)
             else:
                 fixture.set_routing("policy_route")
-            if shutil.which("fw3"):
+            if legacy_fw3():
                 chains = [line.split()[0][1:] for line in run("iptables-save", "-t", "filter").splitlines() if line.startswith(":MIAO_")]
                 for chain in chains:
                     run("iptables", "-F", chain)
@@ -442,16 +635,20 @@ def isolated_suite(binary):
             assert not Path("/sys/class/net/sing-tun").exists()
             assert "MIAO_" not in run("iptables-save", "-t", "filter")
             assert request_payload("tcp") == "via-direct"
+            if dns:
+                dns.restored(fixture.runtime)
             fixture.api("POST", "/api/mode", {"mode": "global"})
             data_plane()
             print("PASS proxy pool skips TUN and restores global routing", flush=True)
 
-            response = fixture.api("PUT", "/api/tun", {"routing": "nftables", "lan_interfaces": ["br-test"]}, success=automatic == "nftables")
-            if automatic != "nftables":
-                assert not response["success"]
-            data_plane()
+            fixture.set_routing("auto")
+            for legacy in ["nftables", "policy_route"]:
+                fixture.api("PUT", "/api/tun", {"routing": legacy, "lan_interfaces": ["br-test"]})
+                assert fixture.api("GET", "/api/tun")["data"]["routing"] == "auto"
+                assert fixture.api("GET", "/api/status")["data"]["runtime"]["routing"]["effective"] == automatic
+                data_plane()
             fixture.set_routing("policy_route")
-            print("PASS forced nftables capability handling", flush=True)
+            print("PASS legacy manual choices migrate to automatic routing", flush=True)
 
             fixture.api("POST", "/api/service/stop")
             assert not Path("/sys/class/net/sing-tun").exists()
@@ -487,6 +684,8 @@ def isolated_suite(binary):
                 assert current_rules == baseline_rules, "crash left TUN policy rules or removed an unrelated rule"
                 assert run(IP, "-4", "route", "show", "table", "all") == baseline_routes, "crash left owned routes"
                 assert not (fixture.runtime / "network-ownership.json").exists(), "ownership cleanup did not finish"
+                if dns:
+                    dns.restored(fixture.runtime)
                 fixture.api("POST", "/api/service/start")
                 data_plane()
                 fixture.api("POST", "/api/service/stop")
@@ -501,10 +700,19 @@ def isolated_suite(binary):
                 while Path("/sys/class/net/sing-tun").exists() and time.monotonic() < deadline:
                     time.sleep(.05)
                 assert not Path("/sys/class/net/sing-tun").exists(), "manager exit left an unmanaged core"
+                if dns:
+                    dns.restored(fixture.runtime)
+                    assert run(IP, "-4", "rule", "show") == baseline_rules, "guard left policy rules before manager restart"
+                    assert run(IP, "-4", "route", "show", "table", "all") == baseline_routes, "guard left owned routes before manager restart"
+                    assert "MIAO_" not in run("iptables-save", "-t", "filter"), "guard left fw3 rules before manager restart"
                 fixture.config["mode"] = "pool"
                 fixture.start()
                 status = fixture.api("GET", "/api/status")["data"]
-                assert status["running"] and status["runtime"]["routing"]["effective"] == "none"
+                assert status["running"] and status["runtime"]["routing"]["effective"] == "none", json.dumps({
+                    'running': status['running'], 'phase': status['runtime']['phase'],
+                    'error_code': (status['runtime'].get('error') or '').split(':', 1)[0],
+                    'effective': (status['runtime'].get('routing') or {}).get('effective'),
+                })
                 assert run(IP, "-4", "rule", "show") == baseline_rules
                 assert run(IP, "-4", "route", "show", "table", "all") == baseline_routes
                 assert "MIAO_" not in run("iptables-save", "-t", "filter"), "pool restart left a dead manager's firewall rules"
@@ -515,14 +723,14 @@ def isolated_suite(binary):
             fixture.sync_config()
             fixture.close()
             fixture.start(disable_nftables=True)
-            fixture.set_routing("auto")
+            fixture.api("PUT", "/api/tun", {"routing": "auto", "lan_interfaces": ["br-test"]})
             fixture.api("POST", "/api/service/start")
             data_plane()
             assert fixture.api("GET", "/api/status")["data"]["runtime"]["routing"]["effective"] == "policy_route"
             print("PASS DISABLE_NFTABLES mapping captures traffic", flush=True)
             fixture.sync_config()
             fixture.close()
-            fixture.start()
+            fixture.start(disable_nftables=False)
             assert fixture.api("GET", "/api/status")["data"]["running"]
             data_plane()
             print("PASS running-state restore and cache strategy migration", flush=True)
@@ -562,11 +770,29 @@ def isolated_suite(binary):
             fixture.api("POST", "/api/service/stop")
             print("PASS conflicting existing policy rules are preserved", flush=True)
         except BaseException:
-            if fixture.log.exists():
+            if PRIVATE_SUBSCRIPTION:
+                print("Private fixture failed; runtime logs suppressed", flush=True)
+            elif fixture.log.exists():
+                if dns and (dns.directory / 'trace.log').exists():
+                    print('DNS trace:', (dns.directory / 'trace.log').read_text()[-14000:], flush=True)
+                if dns and (dns.directory / 'ruleset.json').exists():
+                    rules = json.loads((dns.directory / 'ruleset.json').read_text())['nftables']
+                    print('DNS chain priorities:', json.dumps([i['chain'] for i in rules if 'chain' in i]), flush=True)
+                    print('DNS native rules:', json.dumps([i['rule'] for i in rules if 'rule' in i and i['rule']['table'].startswith('miao_dns_')]), flush=True)
+                if EXTERNAL_SYSTEM_DNS and (fixture.runtime / 'dns-ownership.json').exists():
+                    owner = json.loads((fixture.runtime / 'dns-ownership.json').read_text())
+                    table = owner['plan']['system']['table']
+                    snapshot = json.loads(run('nft', '-j', '-a', 'list', 'table', 'inet', table))
+                    comments = [item['rule'].get('comment') for item in snapshot['nftables'] if 'rule' in item]
+                    print('DNS rule identity:', json.dumps({'expected_marker_found': 'miao-dns:' + owner['token'] in comments, 'comment_lengths': [len(comment or '') for comment in comments], 'recorded_handle': owner.get('system_handle'), 'table_handles': [item['table'].get('handle') for item in snapshot['nftables'] if 'table' in item]}), flush=True)
+                if dns and (dns.directory / 'procd-errors.log').exists():
+                    print('procd fixture errors:', (dns.directory / 'procd-errors.log').read_text()[-3000:], flush=True)
                 print("Fixture log tail:\n" + fixture.log.read_text()[-6000:], flush=True)
             raise
         finally:
             fixture.close()
+            if dns:
+                dns.close()
             for pid in peers:
                 try:
                     os.kill(pid, signal.SIGKILL)
@@ -578,6 +804,100 @@ def isolated_suite(binary):
                     stream.close()
             for descriptor in wires:
                 os.close(descriptor)
+
+
+def dns_failure_checks(fixture, dns, data_plane):
+    count = dns.log.stat().st_size
+    dns.protected()
+    assert dns.log.stat().st_size == count, 'protected query raced the WAN resolver'
+    if dns.external_system_dns:
+        core_pid = fixture.api('GET', '/api/status')['data']['pid']
+        run('nft', 'flush', 'chain', 'ip', 'tailscale_fixture4', 'ts-input')
+        subprocess.run(['nft', '-f', '-'], input='add rule ip tailscale_fixture4 ts-input iifname lo ip saddr 100.64.0.0/10 drop\n', text=True, check=True, capture_output=True)
+        deadline = time.monotonic() + 9
+        while True:
+            try:
+                dns.protected()
+                break
+            except (OSError, AssertionError):
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(.1)
+        assert fixture.api('GET', '/api/status')['data']['pid'] == core_pid
+        print('PASS DNS reply exception recovers after Tailscale chain reload', flush=True)
+        table = 'miao_dns_' + hashlib.sha256(str(fixture.runtime).encode()).hexdigest()[:12]
+        snapshot = json.loads(run('nft', '-j', '-a', 'list', 'table', 'inet', table))
+        handle = next(item['table']['handle'] for item in snapshot['nftables'] if 'table' in item)
+        run('nft', 'delete', 'table', 'inet', 'handle', str(handle))
+        subprocess.run(['nft', '-f', '-'], input=f'table inet {table} {{ comment "fixture-foreign-replacement"; }}\n', text=True, check=True, capture_output=True)
+        response = fixture.api('POST', '/api/service/stop', success=False)
+        assert not response['success'] and 'DNS_OWNERSHIP_CONFLICT' in response['message']
+        assert fixture.api('GET', '/api/status')['data']['running']
+        assert 'fixture-foreign-replacement' in run('nft', 'list', 'table', 'inet', table)
+        run('nft', 'delete', 'table', 'inet', table)
+        fixture.api('POST', '/api/service/stop')
+        dns.restored(fixture.runtime)
+        fixture.api('POST', '/api/service/start')
+        data_plane()
+        print('PASS replaced system DNS table is preserved; retained core permits recovery', flush=True)
+    owned = next(dns.confdir.glob('miao-*.conf'))
+    original = owned.read_text()
+    owned.write_text(original + '# administrator change\n')
+    response = fixture.api('POST', '/api/service/stop', success=False)
+    assert not response['success'] and 'DNS_OWNERSHIP_CONFLICT' in response['message']
+    assert fixture.api('GET', '/api/status')['data']['running']
+    assert owned.read_text() == original + '# administrator change\n'
+    owned.write_text(original)
+    fixture.api('POST', '/api/service/stop')
+    dns.restored(fixture.runtime)
+    fixture.api('POST', '/api/service/start')
+    failure = dns.directory / 'restart-fail'
+    failure.touch()
+    response = fixture.api('POST', '/api/service/stop', success=False)
+    assert not response['success'] and 'DNS_SERVICE_FAILED' in response['message']
+    assert fixture.api('GET', '/api/status')['data']['running'], 'DNS restore failure killed the live core'
+    assert answer_ip(dns_query()) == DNS_TARGET
+    failure.unlink()
+    fixture.api('POST', '/api/service/stop')
+    dns.restored(fixture.runtime)
+    failure.touch()
+    response = fixture.api('POST', '/api/service/start', success=False)
+    assert not response['success'] and 'DNS_SERVICE_FAILED' in response['message']
+    retained = fixture.api('GET', '/api/status')['data']
+    assert retained['running'] and retained['runtime']['phase'] == 'ready', 'startup rollback failure hid the retained core'
+    failure.unlink()
+    os.kill(retained['pid'], signal.SIGKILL)
+    dns.restored(fixture.runtime)
+    fixture.api('POST', '/api/service/stop')
+    (dns.directory / 'restart-delay').touch()
+    (dns.directory / 'restarting').unlink(missing_ok=True)
+    responses = []
+    worker = threading.Thread(target=lambda: responses.append(fixture.api('POST', '/api/service/start', success=False)))
+    worker.start()
+    deadline = time.monotonic() + 5
+    while not (dns.directory / 'restarting').exists() and time.monotonic() < deadline:
+        time.sleep(.02)
+    assert (dns.directory / 'restarting').exists()
+    fixture.api('POST', '/api/service/stop')
+    worker.join(6)
+    assert responses and not responses[0]['success'] and not worker.is_alive()
+    (dns.directory / 'restart-delay').unlink()
+    dns.restored(fixture.runtime)
+    fixture.api('POST', '/api/service/start')
+    data_plane()
+    # WAN updates made while Miao is active must be used on restoration, rather
+    # than restoring an obsolete snapshot of resolv-file.
+    (dns.directory / 'wan-resolv').write_text('nameserver 223.5.5.5\n')
+    fixture.api('POST', '/api/service/stop')
+    dns.wait_dns(DNS_TARGET)
+    assert not list(dns.confdir.glob('miao-*.conf'))
+    (dns.directory / 'wan-resolv').write_text('nameserver 192.0.2.2\n')
+    run('/etc/init.d/dnsmasq', 'restart', 'fixture')
+    dns.restored(fixture.runtime)
+    fixture.api('POST', '/api/service/start')
+    data_plane()
+    print('PASS DNS restoration follows updated WAN resolv-file', flush=True)
+    print('PASS protected Google DNS, DHCP names, ownership conflict, failed restoration and cancellation', flush=True)
 
 
 def host_snapshot():
@@ -607,10 +927,19 @@ class RuntimeAcceptance(unittest.TestCase):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", required=True)
-    parser.add_argument("--simulate-fw3", action="store_true")
+    firewall = parser.add_mutually_exclusive_group()
+    firewall.add_argument("--simulate-fw3", action="store_true")
+    firewall.add_argument("--simulate-fw4", action="store_true")
+    parser.add_argument("--subscription-file")
+    parser.add_argument("--dnsmasq-binary", help="Enable real dnsmasq lifecycle acceptance")
+    parser.add_argument('--external-system-dns', action='store_true', help='Verify IPv4/IPv6 system resolvers cannot bypass protected DNS')
     options = parser.parse_args()
     BINARY = options.binary
     SIMULATE_FW3 = options.simulate_fw3
+    SIMULATE_FW4 = options.simulate_fw4
+    DNSMASQ_BINARY = str(Path(options.dnsmasq_binary).resolve()) if options.dnsmasq_binary else None
+    EXTERNAL_SYSTEM_DNS = options.external_system_dns
+    PRIVATE_SUBSCRIPTION = Path(options.subscription_file).read_text() if options.subscription_file else None
     # The decorator was evaluated before parsing the CLI argument.
     RuntimeAcceptance.__unittest_skip__ = False
     unittest.main(argv=[sys.argv[0]], verbosity=2)

@@ -4,8 +4,7 @@ use super::{
     proxy::{load_last_proxy, save_last_proxy},
     runtime::{load_runtime_state, save_running_state},
     singbox::{
-        get_sing_box_home, sing_box_is_running, start_sing_internal, stop_sing_internal,
-        validate_sing_box_config,
+        sing_box_is_running, start_sing_internal, stop_sing_internal, validate_sing_box_config,
     },
     vps::{self, Connection, Job},
 };
@@ -354,8 +353,7 @@ async fn prepare(
     };
     gen_config(config, state, policy).await?;
     if let Some(tag) = tag {
-        let path = get_sing_box_home().join("config.json");
-        let mut value: Value = serde_json::from_slice(&tokio::fs::read(&path).await?)?;
+        let (mut value, plan, epoch) = super::routing::read_plan().await?;
         // Missing historical selections can be ignored; an explicit VPS target cannot.
         if required
             || value["outbounds"][0]["outbounds"]
@@ -364,12 +362,7 @@ async fn prepare(
         {
             pin_selector(&mut value, tag)?;
         }
-        super::write_file_atomic(
-            &path,
-            &serde_json::to_string(&value)?,
-            "selected proxy config",
-        )
-        .await?;
+        super::routing::write_config(&value, &plan, epoch).await?;
     }
     validate_sing_box_config().await
 }
@@ -463,7 +456,7 @@ async fn activate(state: &Arc<AppState>, mode: ProxyMode, tag: Option<&str>) -> 
         allowed(state)?;
         runtime_changed = true;
         if old_running {
-            stop_sing_internal(state).await;
+            stop_sing_internal(state).await?;
         }
         start_sing_internal(state).await?;
         if let Some(tag) = tag {
@@ -488,13 +481,15 @@ async fn activate(state: &Arc<AppState>, mode: ProxyMode, tag: Option<&str>) -> 
     }
     .await;
     if let Err(error) = result {
+        let mut rollback_errors = Vec::new();
         // Never leave a partially enabled new global route after a failed CLI start.
         if runtime_changed {
-            stop_sing_internal(state).await;
+            if let Err(e) = stop_sing_internal(state).await {
+                rollback_errors.push(format!("runtime cleanup: {e}"));
+            }
         }
         *state.config.write().await = old.clone();
         // Persistence failures must not prevent an independent runtime rollback.
-        let mut rollback_errors = Vec::new();
         if let Err(error) = save_config_to(&state.config_path, &old).await {
             rollback_errors.push(format!("configuration: {error}"));
         }
@@ -516,6 +511,7 @@ async fn activate(state: &Arc<AppState>, mode: ProxyMode, tag: Option<&str>) -> 
                         && (old_running || old_intent.running)
                         && super::routing::is_current(state, epoch)
                         && allowed(state).is_ok()
+                        && !super::singbox::sing_box_is_running(state).await
                         && !state.shutting_down.load(Ordering::SeqCst) =>
                 {
                     match start_sing_internal(state).await {

@@ -85,6 +85,7 @@ pub fn reserved_system_ports(web_port: Option<u16>, socks_port: Option<u16>) -> 
     reserved.insert(web_port.unwrap_or(DEFAULT_PORT));
     reserved.insert(socks_port.unwrap_or(DEFAULT_SOCKS_PORT));
     reserved.insert(CLASH_API_PORT);
+    reserved.insert(super::openwrt_dns::DNS_PORT);
     reserved
 }
 
@@ -142,9 +143,7 @@ pub fn allocate_share_ports(
         let Some(block) = updated.subscription_blocks.get(&group.source).copied() else {
             continue;
         };
-        if block == 0
-            || port_block_bounds(base_port, block).is_none()
-            || !used_blocks.insert(block)
+        if block == 0 || port_block_bounds(base_port, block).is_none() || !used_blocks.insert(block)
         {
             invalid_sources.push(group.source.clone());
         }
@@ -452,16 +451,15 @@ mod tests {
         assert_eq!(map.ports.get("beta"), Some(&12001));
 
         // 订阅恢复后 beta 拿回原来的端口。
-        let restored =
-            allocate_share_ports(
-                &mut map,
-                &tags(&["alpha", "beta"]),
-                &[],
-                12000,
-                &reserved,
-                false,
-            )
-            .unwrap();
+        let restored = allocate_share_ports(
+            &mut map,
+            &tags(&["alpha", "beta"]),
+            &[],
+            12000,
+            &reserved,
+            false,
+        )
+        .unwrap();
         assert_eq!(
             restored,
             vec![("alpha".into(), 12000), ("beta".into(), 12001)]
@@ -531,15 +529,7 @@ mod tests {
     fn rejects_zero_base_port() {
         let mut map = SharePortMap::default();
         assert!(
-            allocate_share_ports(
-                &mut map,
-                &tags(&["a"]),
-                &[],
-                0,
-                &BTreeSet::new(),
-                true,
-            )
-            .is_err()
+            allocate_share_ports(&mut map, &tags(&["a"]), &[], 0, &BTreeSet::new(), true,).is_err()
         );
     }
 
@@ -643,19 +633,15 @@ mod tests {
             .map(|index| format!("node-{index}"))
             .collect();
 
-        let err = allocate_share_ports(
-            &mut map,
-            &manual_tags,
-            &[],
-            10000,
-            &BTreeSet::new(),
-            true,
-        )
-        .unwrap_err()
-        .to_string();
+        let err = allocate_share_ports(&mut map, &manual_tags, &[], 10000, &BTreeSet::new(), true)
+            .unwrap_err()
+            .to_string();
 
         assert!(err.contains("10000-10999"), "unexpected error: {err}");
-        assert!(map.ports.is_empty(), "failed allocation must be transactional");
+        assert!(
+            map.ports.is_empty(),
+            "failed allocation must be transactional"
+        );
     }
 
     #[test]
@@ -672,7 +658,10 @@ mod tests {
         .unwrap_err()
         .to_string();
 
-        assert!(err.contains("no port block available"), "unexpected error: {err}");
+        assert!(
+            err.contains("no port block available"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

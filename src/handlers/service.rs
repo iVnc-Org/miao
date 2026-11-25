@@ -33,6 +33,9 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> Json<ApiResponse<
         let mut lock = state.sing_process.lock().await;
 
         if let Some(ref mut proc) = *lock {
+            if let Some(dns) = &proc.dns {
+                runtime.dns = Some(dns.diagnostic().await);
+            }
             if let Some(error) = proc
                 .firewall
                 .as_ref()
@@ -88,6 +91,7 @@ pub async fn start_service(State(state): State<Arc<AppState>>) -> HandlerResult 
             "sing-box is already running",
         ));
     }
+    routing::retry_nft_rules();
     let epoch = routing::supersede(&state);
     let mode = state.config.read().await.mode;
     if let Err(error) = routing::prepare_host(&state, mode, epoch).await {
@@ -177,7 +181,12 @@ pub async fn start_service(State(state): State<Arc<AppState>>) -> HandlerResult 
         )),
         Err(e) => {
             if routing::is_current(&state, epoch) {
-                routing::status(&state, RuntimePhase::Failed, None, Some(e.to_string()));
+                let phase = if sing_box_is_running(&state).await {
+                    RuntimePhase::Ready
+                } else {
+                    RuntimePhase::Failed
+                };
+                routing::status(&state, phase, None, Some(e.to_string()));
             }
             Err(status_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -190,7 +199,9 @@ pub async fn start_service(State(state): State<Arc<AppState>>) -> HandlerResult 
 pub async fn stop_service(State(state): State<Arc<AppState>>) -> HandlerResult {
     let epoch = routing::supersede(&state);
     // Cancellation and process termination do not queue behind subscription/package I/O.
-    stop_sing_internal(&state).await;
+    stop_sing_internal(&state)
+        .await
+        .map_err(|e| status_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     state
         .startup_cancelled
         .store(true, std::sync::atomic::Ordering::SeqCst);

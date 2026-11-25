@@ -96,6 +96,7 @@ pub struct SingBoxProcess {
     pub started_at: Instant,
     pub firewall: Option<Arc<crate::services::firewall::Fw3Rules>>,
     pub routes: Option<Arc<crate::services::route_cleanup::RouteOwnership>>,
+    pub dns: Option<crate::services::openwrt_dns::DnsLease>,
     pub output: Arc<crate::services::singbox::ChildOutput>,
 }
 

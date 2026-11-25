@@ -298,17 +298,6 @@ export default function App() {
     t,
   ])
 
-  const handleSetTunRouting = useCallback(async (routing) => {
-    try {
-      await apiCall('tun', { method: 'PUT', body: JSON.stringify({ ...status.tun, routing }) }, 'tunRouting')
-      await Promise.all([fetchStatus(), refreshProxyViews()])
-      showToast(t('routing.saved'), 'success')
-    } catch (error) {
-      showToast(error.message, 'error')
-      await fetchStatus()
-    }
-  }, [apiCall, status.tun, fetchStatus, refreshProxyViews, showToast, t])
-
   const applyProxyMode = useCallback(async (nextMode) => {
     try {
       const response = await apiCall(
@@ -802,7 +791,6 @@ export default function App() {
           loadingAction={loadingAction} 
           onToggleService={handleToggleService} 
           onSetMode={handleSetMode}
-          onSetTunRouting={handleSetTunRouting}
           onOpenConnections={handleOpenConnections}
         />
 

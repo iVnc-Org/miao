@@ -13,6 +13,7 @@ pub enum ProxyMode {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+// Legacy manifest values remain readable; new routing plans always request Auto.
 pub enum TunRouting {
     #[default]
     Auto,
@@ -22,7 +23,8 @@ pub enum TunRouting {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TunConfig {
-    #[serde(default)]
+    /// Read-only compatibility field for old clients. Legacy choices migrate to auto.
+    #[serde(default, skip_deserializing)]
     pub routing: TunRouting,
     /// Trusted LAN devices for the fw3 forwarding rules. Empty discovers the LAN zone.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -50,7 +52,7 @@ impl TunConfig {
             interfaces.insert(interface.to_string());
         }
         Ok(Self {
-            routing: self.routing,
+            routing: TunRouting::Auto,
             lan_interfaces: interfaces.into_iter().collect(),
         })
     }
@@ -320,7 +322,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.tun.normalized().unwrap().lan_interfaces, ["br-lan"]);
-        assert!(serde_yaml::from_str::<Config>("tun:\n  routing: invalid\n").is_err());
+        for legacy in ["auto", "nftables", "policy_route", "invalid"] {
+            let config: Config = serde_yaml::from_str(&format!(
+                "tun:\n  routing: {legacy}\n  lan_interfaces: [br-lan]\n"
+            ))
+            .unwrap();
+            assert_eq!(config.tun.routing, super::TunRouting::Auto);
+            assert_eq!(config.tun.lan_interfaces, ["br-lan"]);
+            assert!(!serde_yaml::to_string(&config)
+                .unwrap()
+                .contains("routing: policy_route"));
+        }
         for invalid in ["-i", "a;cmd", "../lan", "", "interface-name-too-long"] {
             assert!(super::TunConfig {
                 lan_interfaces: vec![invalid.into()],

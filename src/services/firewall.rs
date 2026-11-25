@@ -11,6 +11,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -19,6 +20,22 @@ use std::{
     time::Duration,
 };
 use tokio::sync::Mutex;
+
+/// ImmortalWrt provides `fw3 -> fw4` for command compatibility. Only the
+/// distinct legacy program needs iptables rules; a compat alias uses native nftables.
+fn legacy_fw3_in(dirs: &[PathBuf]) -> bool {
+    let Some(fw3) = find_command(dirs, "fw3") else {
+        return false;
+    };
+    if let Some(fw4) = find_command(dirs, "fw4") {
+        if let (Ok(legacy), Ok(native)) = (std::fs::metadata(&fw3), std::fs::metadata(&fw4)) {
+            if legacy.dev() == native.dev() && legacy.ino() == native.ino() {
+                return false;
+            }
+        }
+    }
+    true
+}
 
 pub struct Fw3Rules {
     iptables: PathBuf,
@@ -33,7 +50,7 @@ pub struct Fw3Rules {
     last_error: std::sync::Mutex<Option<String>>,
 }
 
-async fn discover_lan() -> AppResult<Vec<String>> {
+pub(crate) async fn discover_lan() -> AppResult<Vec<String>> {
     let dirs = command_search_dirs();
     let uci = find_command(&dirs, "uci")
         .ok_or_else(|| AppError::message("FW3_LAN_UNDETECTED: configure tun.lan_interfaces"))?;
@@ -117,7 +134,7 @@ impl Fw3Rules {
     /// The caller must first confirm that its previous core no longer owns the network.
     pub async fn cleanup_stale() -> AppResult<()> {
         let dirs = command_search_dirs();
-        if find_command(&dirs, "fw3").is_none() {
+        if !legacy_fw3_in(&dirs) {
             return Ok(());
         }
         if let Some(iptables) = find_command(&dirs, "iptables") {
@@ -126,10 +143,21 @@ impl Fw3Rules {
         Ok(())
     }
 
-    pub async fn install(plan: &RoutingPlan, tun: &str) -> AppResult<Option<Arc<Self>>> {
-        if plan.effective == EffectiveRouting::None
-            || find_command(&command_search_dirs(), "fw3").is_none()
+    pub async fn preflight(plan: &RoutingPlan) -> AppResult<()> {
+        let dirs = command_search_dirs();
+        if plan.effective != EffectiveRouting::None
+            && legacy_fw3_in(&dirs)
+            && find_command(&dirs, "iptables").is_none()
         {
+            return Err(AppError::message(
+                "FW3_IPTABLES_MISSING: legacy fw3 requires its userspace iptables tool",
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn install(plan: &RoutingPlan, tun: &str) -> AppResult<Option<Arc<Self>>> {
+        if plan.effective == EffectiveRouting::None || !legacy_fw3_in(&command_search_dirs()) {
             return Ok(None);
         }
         let lan = if plan.lan_interfaces.is_empty() {
@@ -401,4 +429,37 @@ fn normalized_rule(line: &str) -> String {
         }
     }
     words.join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{os::unix::fs::symlink, sync::atomic::AtomicU64};
+
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn fw4_compat_alias_does_not_require_missing_iptables() {
+        let path = std::env::temp_dir().join(format!(
+            "miao-fw4-alias-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&path).unwrap();
+        let dirs = vec![path.clone()];
+        assert!(!legacy_fw3_in(&dirs));
+        std::fs::write(path.join("fw4"), b"native fw4").unwrap();
+        symlink("fw4", path.join("fw3")).unwrap();
+        assert!(find_command(&dirs, "iptables").is_none());
+        assert!(!legacy_fw3_in(&dirs));
+        std::fs::remove_file(path.join("fw3")).unwrap();
+        std::fs::hard_link(path.join("fw4"), path.join("fw3")).unwrap();
+        assert!(!legacy_fw3_in(&dirs));
+        std::fs::remove_file(path.join("fw3")).unwrap();
+        std::fs::write(path.join("fw3"), b"legacy fw3").unwrap();
+        assert!(legacy_fw3_in(&dirs));
+        std::fs::remove_file(path.join("fw4")).unwrap();
+        assert!(legacy_fw3_in(&dirs));
+        std::fs::remove_dir_all(path).unwrap();
+    }
 }

@@ -36,7 +36,7 @@ use crate::state::AppState;
 
 const CONFIG_CACHE_FILE: &str = "config.json";
 const CONFIG_CACHE_META_FILE: &str = "config.meta.json";
-const CONFIG_CACHE_SCHEMA_VERSION: u32 = 10;
+const CONFIG_CACHE_SCHEMA_VERSION: u32 = 13;
 const MAX_CONCURRENT_SUBS: usize = 5;
 
 #[derive(Serialize, Deserialize)]
@@ -207,7 +207,23 @@ async fn apply_no_node_config(
     }
 
     if stop_runtime {
-        stop_sing_internal(state).await;
+        if let Err(stop_error) = stop_sing_internal(state).await {
+            let mut failures = Vec::new();
+            if let Err(e) = save_config_to(&state.config_path, old_config).await {
+                failures.push(e.to_string());
+            }
+            if let Err(e) = restore_subscription_nodes(previous_sub_nodes).await {
+                failures.push(e.to_string());
+            }
+            return Err(AppError::message(format!(
+                "Failed to stop previous runtime: {stop_error}; configuration rollback: {}",
+                if failures.is_empty() {
+                    "restored".into()
+                } else {
+                    failures.join("; ")
+                }
+            )));
+        }
     }
     restore_no_node_runtime_state(state).await;
     *state.config.write().await = new_config;
@@ -249,6 +265,7 @@ pub async fn restore_config_from_cache(config: &Config, state: &Arc<AppState>) -
         .map_err(|e| AppError::context("Failed to parse cached config", e))?;
     let mut cached_config = normalize_cached_sing_box_config(cached_config);
     apply_runtime_routing(config, &mut cached_config, &plan)?;
+    super::proxy::pin_saved_selection(&mut cached_config).await;
     super::routing::check_current(state, epoch)?;
     super::routing::write_config(&cached_config, &plan, epoch).await?;
     validate_sing_box_config()
@@ -282,7 +299,14 @@ pub async fn regenerate_and_restart_runtime(
         .await
         .map_err(|e| AppError::context("Config validation failed, not restarting", e))?;
 
-    stop_sing_internal(state).await;
+    let (_, plan, _) = super::routing::read_plan().await?;
+    super::routing::cancellable(state, epoch, super::firewall::Fw3Rules::preflight(&plan))
+        .await
+        .map_err(|e| AppError::context("Firewall preparation failed, not restarting", e))?;
+
+    super::routing::cancellable(state, epoch, super::openwrt_dns::preflight(config)).await?;
+
+    stop_sing_internal(state).await?;
 
     start_sing_internal(state)
         .await
@@ -581,7 +605,7 @@ async fn restore_previous_running_config(
     state: &Arc<AppState>,
 ) -> AppResult<()> {
     if config_has_no_nodes(old_config) {
-        stop_sing_internal(state).await;
+        stop_sing_internal(state).await?;
         restore_no_node_runtime_state(state).await;
         return Ok(());
     }
@@ -608,7 +632,7 @@ async fn restore_previous_running_config(
 }
 
 async fn restart_with_previous_config(old_config: &Config, state: &Arc<AppState>) -> AppResult<()> {
-    stop_sing_internal(state).await;
+    stop_sing_internal(state).await?;
 
     if config_has_no_nodes(old_config) {
         restore_no_node_runtime_state(state).await;
@@ -1074,6 +1098,7 @@ pub async fn gen_config(
     )?;
 
     super::routing::apply(&mut sing_box_config, &routing_plan)?;
+    super::proxy::pin_saved_selection(&mut sing_box_config).await;
     super::routing::check_current(state, epoch)?;
     super::routing::write_config(&sing_box_config, &routing_plan, epoch).await?;
 
@@ -1245,6 +1270,7 @@ fn build_sing_box_config(
         ));
     }
 
+    super::openwrt_dns::validate_ports(config)?;
     let socks_port = config.socks_port.unwrap_or(DEFAULT_SOCKS_PORT);
     if socks_port == 0 {
         return Err(AppError::message(
@@ -1606,7 +1632,50 @@ pub fn apply_runtime_routing(
     )?)?;
     value["route"]["final"] = route_final(config.mode, &process).into();
     normalize_runtime_dns(value);
+    apply_local_dns(config.mode, value)?;
     super::routing::apply(value, plan)
+}
+
+fn apply_local_dns(mode: ProxyMode, value: &mut serde_json::Value) -> AppResult<()> {
+    let inbounds = value["inbounds"]
+        .as_array_mut()
+        .ok_or_else(|| AppError::message("DNS_CONFIG_INVALID: missing runtime inbounds"))?;
+    inbounds.retain(|inbound| inbound["tag"] != "dns-in");
+    if mode != ProxyMode::Global {
+        return Ok(());
+    }
+    inbounds.push(serde_json::json!({
+        "type":"direct", "tag":"dns-in", "listen":"127.0.0.1",
+        "listen_port":super::openwrt_dns::DNS_PORT, "network":["tcp","udp"]
+    }));
+    value["route"]["rules"]
+        .as_array_mut()
+        .ok_or_else(|| AppError::message("DNS_CONFIG_INVALID: missing runtime route rules"))?
+        .insert(
+            0,
+            serde_json::json!({"inbound":["dns-in"],"action":"hijack-dns"}),
+        );
+    // Client queries follow the global proxy. The node's own bootstrap resolver
+    // remains explicitly selected by route.default_domain_resolver.
+    value["dns"]["rules"] = serde_json::json!([]);
+    let domains = super::openwrt_dns::magic_domains();
+    let servers = value["dns"]["servers"]
+        .as_array_mut()
+        .ok_or_else(|| AppError::message("DNS_CONFIG_INVALID: missing DNS servers"))?;
+    servers.retain(|server| server["tag"] != "miao-magic");
+    if !domains.is_empty() {
+        // A DNS query to MagicDNS may itself be intercepted by the TUN. Keep
+        // private names on the direct resolver even on hosts without an earlier
+        // Tailscale routing rule; never send these names to the public resolver.
+        let mut magic =
+            serde_json::json!({"type":"udp","tag":"miao-magic","server":"100.100.100.100"});
+        if std::path::Path::new("/sys/class/net/tailscale0").exists() {
+            magic["bind_interface"] = "tailscale0".into();
+        }
+        servers.push(magic);
+        value["dns"]["rules"] = serde_json::json!([{"domain_suffix":domains,"server":"miao-magic","strategy":"prefer_ipv4"}]);
+    }
+    Ok(())
 }
 
 fn get_config_template(
@@ -1635,7 +1704,7 @@ fn get_config_template(
         })]
     };
 
-    Ok(serde_json::json!({
+    let mut value = serde_json::json!({
         "log": {"disabled": false, "timestamp": true, "level": "info"},
         "experimental": {"clash_api": {"external_controller": "127.0.0.1:6262"}},
         "dns": {
@@ -1655,7 +1724,7 @@ fn get_config_template(
         ],
         "route": {
             "final": route_final,
-            "auto_detect_interface": true,
+            "auto_detect_interface": false,
             "default_domain_resolver": default_domain_resolver,
             "rules": route_rules,
             "rule_set": [
@@ -1663,7 +1732,9 @@ fn get_config_template(
                 {"type": "local", "tag": "chinaip", "format": "binary", "path": "./chinaip.srs"}
             ]
         }
-    }))
+    });
+    apply_local_dns(mode, &mut value)?;
+    Ok(value)
 }
 
 #[cfg(test)]
@@ -1683,11 +1754,10 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn cache_fingerprint_includes_routing_and_lan_scope() {
+    fn cache_fingerprint_migrates_legacy_routing_and_includes_lan_scope() {
         let original = Config::default();
-        let mut changed = original.clone();
-        changed.tun.routing = crate::models::TunRouting::PolicyRoute;
-        assert_ne!(
+        let mut changed: Config = serde_yaml::from_str("tun:\n  routing: policy_route\n").unwrap();
+        assert_eq!(
             config_cache_fingerprint(&original).unwrap(),
             config_cache_fingerprint(&changed).unwrap()
         );
@@ -2123,12 +2193,21 @@ mod tests {
         assert_eq!(selector[1], "sub-a");
 
         let inbounds = built["inbounds"].as_array().unwrap();
-        assert_eq!(inbounds.len(), 2);
+        assert_eq!(inbounds.len(), 3);
         assert_eq!(inbounds[0]["type"], "tun");
         assert_eq!(inbounds[0]["dns_mode"], "disabled");
-        assert_eq!(inbounds[1]["type"], "socks");
-        assert_eq!(inbounds[1]["listen"], "127.0.0.1");
-        assert_eq!(inbounds[1]["listen_port"], 1080);
+        assert_eq!(
+            inbounds.iter().find(|i| i["tag"] == "socks-in").unwrap()["type"],
+            "socks"
+        );
+        assert_eq!(
+            inbounds.iter().find(|i| i["tag"] == "socks-in").unwrap()["listen"],
+            "127.0.0.1"
+        );
+        assert_eq!(
+            inbounds.iter().find(|i| i["tag"] == "socks-in").unwrap()["listen_port"],
+            1080
+        );
 
         let all_outbounds = built["outbounds"].as_array().unwrap();
         assert_eq!(all_outbounds.len(), 4);
@@ -2136,6 +2215,11 @@ mod tests {
         assert_eq!(all_outbounds[3]["tag"], "sub-a");
 
         let rules = built["route"]["rules"].as_array().unwrap();
+        assert_eq!(
+            rules[0],
+            json!({"inbound":["dns-in"], "action":"hijack-dns"})
+        );
+        let rules = &rules[1..];
         assert_eq!(rules.len(), 5);
         assert_eq!(rules[0]["action"], "sniff");
         assert_eq!(rules[1]["inbound"], json!(["socks-in"]));
@@ -2324,6 +2408,11 @@ mod tests {
         .unwrap();
 
         let rules = built["route"]["rules"].as_array().unwrap();
+        assert_eq!(
+            rules[0],
+            json!({"inbound":["dns-in"], "action":"hijack-dns"})
+        );
+        let rules = &rules[1..];
         assert_eq!(rules.len(), 5);
         assert_eq!(rules[0]["action"], "sniff");
         assert_eq!(rules[1]["inbound"], json!(["socks-in"]));
@@ -2335,7 +2424,16 @@ mod tests {
         assert!(!rules.iter().any(|rule| rule.get("rule_set").is_some()));
 
         let dns_rules = built["dns"]["rules"].as_array().unwrap();
-        assert_eq!(dns_rules.len(), 1);
+        assert!(dns_rules.iter().all(|rule| {
+            rule["server"] == "miao-magic"
+                && rule["domain_suffix"].as_array().is_some_and(|domains| {
+                    domains.iter().all(|domain| {
+                        domain
+                            .as_str()
+                            .is_some_and(|name| name.ends_with(".ts.net"))
+                    })
+                })
+        }));
         assert_eq!(built["route"]["final"], "proxy");
     }
 
@@ -2512,9 +2610,10 @@ mod tests {
         .unwrap();
 
         let inbounds = built["inbounds"].as_array().unwrap();
-        assert_eq!(inbounds[1]["type"], "socks");
-        assert_eq!(inbounds[1]["listen"], "0.0.0.0");
-        assert_eq!(inbounds[1]["listen_port"], 2080);
+        let socks = inbounds.iter().find(|i| i["tag"] == "socks-in").unwrap();
+        assert_eq!(socks["type"], "socks");
+        assert_eq!(socks["listen"], "0.0.0.0");
+        assert_eq!(socks["listen_port"], 2080);
     }
 
     #[test]
@@ -2537,17 +2636,38 @@ mod tests {
         .unwrap();
 
         let inbounds = built["inbounds"].as_array().unwrap();
-        assert_eq!(inbounds.len(), 2);
-        assert_eq!(inbounds[1]["type"], "socks");
-        assert_eq!(inbounds[1]["listen"], "127.0.0.1");
-        assert_eq!(inbounds[1]["listen_port"], 1080);
+        assert_eq!(inbounds.len(), 3);
+        assert_eq!(
+            inbounds.iter().find(|i| i["tag"] == "socks-in").unwrap()["type"],
+            "socks"
+        );
+        assert_eq!(
+            inbounds.iter().find(|i| i["tag"] == "socks-in").unwrap()["listen"],
+            "127.0.0.1"
+        );
+        assert_eq!(
+            inbounds.iter().find(|i| i["tag"] == "socks-in").unwrap()["listen_port"],
+            1080
+        );
 
         let dns_rules = built["dns"]["rules"].as_array().unwrap();
-        assert_eq!(dns_rules.len(), 1);
-        assert_eq!(dns_rules[0]["rule_set"][0], "chinasite");
-        assert_eq!(dns_rules[0]["server"], "local");
+        assert!(dns_rules.iter().all(|rule| {
+            rule["server"] == "miao-magic"
+                && rule["domain_suffix"].as_array().is_some_and(|domains| {
+                    domains.iter().all(|domain| {
+                        domain
+                            .as_str()
+                            .is_some_and(|name| name.ends_with(".ts.net"))
+                    })
+                })
+        }));
 
         let route_rules = built["route"]["rules"].as_array().unwrap();
+        assert_eq!(
+            route_rules[0],
+            json!({"inbound":["dns-in"], "action":"hijack-dns"})
+        );
+        let route_rules = &route_rules[1..];
         assert_eq!(route_rules.len(), 4);
         assert_eq!(route_rules[0]["action"], "sniff");
         assert_eq!(route_rules[1]["inbound"], json!(["socks-in"]));
@@ -2581,10 +2701,23 @@ mod tests {
         .unwrap();
 
         let dns_rules = built["dns"]["rules"].as_array().unwrap();
-        assert_eq!(dns_rules.len(), 1);
-        assert_eq!(dns_rules[0]["server"], "local");
+        assert!(dns_rules.iter().all(|rule| {
+            rule["server"] == "miao-magic"
+                && rule["domain_suffix"].as_array().is_some_and(|domains| {
+                    domains.iter().all(|domain| {
+                        domain
+                            .as_str()
+                            .is_some_and(|name| name.ends_with(".ts.net"))
+                    })
+                })
+        }));
 
         let route_rules = built["route"]["rules"].as_array().unwrap();
+        assert_eq!(
+            route_rules[0],
+            json!({"inbound":["dns-in"], "action":"hijack-dns"})
+        );
+        let route_rules = &route_rules[1..];
         assert_eq!(route_rules.len(), 4);
         assert_eq!(route_rules[1]["inbound"], json!(["socks-in"]));
         assert_eq!(route_rules[1]["outbound"], "proxy");
@@ -2757,6 +2890,11 @@ mod tests {
         .unwrap();
 
         let rules = built["route"]["rules"].as_array().unwrap();
+        assert_eq!(
+            rules[0],
+            json!({"inbound":["dns-in"], "action":"hijack-dns"})
+        );
+        let rules = &rules[1..];
         // Tunnel mode defaults to sniff + explicit SOCKS proxy + hijack-dns + private direct.
         assert_eq!(rules.len(), 4);
         assert_eq!(rules[1]["inbound"], json!(["socks-in"]));
@@ -2817,6 +2955,11 @@ mod tests {
         .unwrap();
 
         let rules = built["route"]["rules"].as_array().unwrap();
+        assert_eq!(
+            rules[0],
+            json!({"inbound":["dns-in"], "action":"hijack-dns"})
+        );
+        let rules = &rules[1..];
         // Tunnel mode defaults to sniff + explicit SOCKS proxy + hijack-dns + private direct.
         assert_eq!(rules.len(), 4);
         assert_eq!(rules[1]["inbound"], json!(["socks-in"]));

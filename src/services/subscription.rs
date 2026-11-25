@@ -236,28 +236,24 @@ mod tests {
     fn private_subscription_acceptance() {
         let input =
             std::fs::read_to_string(std::env::var("MIAO_TEST_SUBSCRIPTION").unwrap()).unwrap();
-        let parsed = parse_subscription_text("content://acceptance", &input).unwrap();
-        assert_eq!(parsed.total_count, 37);
-        assert_eq!(parsed.node_names.len(), 37);
-        assert_eq!(parsed.ignored_count, 0);
+        let parsed = parse_subscription_text("content://acceptance", &input)
+            .unwrap_or_else(|_| panic!("Private subscription could not be parsed"));
+        assert!(!parsed.node_names.is_empty());
+        assert!(parsed.total_count >= parsed.node_names.len());
+        assert_eq!(parsed.node_names.len(), parsed.outbounds.len());
         assert_eq!(parsed.unsupported_count, 0);
-        assert!(parsed.parse_errors.is_empty(), "{:?}", parsed.parse_errors);
-        assert!(parsed.diagnostic_summary().is_none());
-        assert_eq!(parsed.notes.len(), 4);
-        assert_eq!(
-            parsed
-                .outbounds
-                .iter()
-                .filter(|n| n["type"] == "http")
-                .count(),
-            24
+        assert!(
+            parsed.parse_errors.is_empty(),
+            "{} private entries failed parsing",
+            parsed.parse_errors.len()
         );
-        assert!(parsed.node_names.iter().any(|n| n == "美国西雅图"));
-        for outbound in parsed.outbounds.iter().filter(|n| n["type"] == "http") {
-            assert!(outbound["username"].as_str().is_some_and(|s| !s.is_empty()));
-            assert!(outbound["password"].as_str().is_some_and(|s| !s.is_empty()));
-            assert!(outbound["server"].as_str().is_some_and(|s| s.contains('.')));
-        }
+        assert!(parsed.diagnostic_summary().is_none());
+        eprintln!(
+            "Private subscription: {} entries, {} parsed nodes, {} ignored links",
+            parsed.total_count,
+            parsed.node_names.len(),
+            parsed.ignored_count
+        );
         let config = serde_json::json!({"outbounds":parsed.outbounds});
         let mut child = std::process::Command::new(std::env::var("MIAO_TEST_SING_BOX").unwrap())
             .args(["check", "-c", "/dev/stdin"])

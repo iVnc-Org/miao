@@ -238,6 +238,19 @@ pub async fn start_sing_internal(state: &Arc<AppState>) -> AppResult<()> {
     }
     let (mut config, mut plan, epoch) = routing::read_plan().await?;
     routing::check_current(state, epoch)?;
+    super::openwrt_dns::recover_stale(&get_sing_box_home()).await?;
+    let dns_intent = crate::models::Config {
+        mode: if config["inbounds"]
+            .as_array()
+            .is_some_and(|inbounds| inbounds.iter().any(|i| i["tag"] == "dns-in"))
+        {
+            crate::models::ProxyMode::Global
+        } else {
+            crate::models::ProxyMode::Pool
+        },
+        ..Default::default()
+    };
+    let dns_plan = super::openwrt_dns::preflight(&dns_intent).await?;
     if plan.effective != EffectiveRouting::None {
         super::openwrt::check_net_admin()?;
         if !super::openwrt::tun_available()? {
@@ -310,12 +323,26 @@ pub async fn start_sing_internal(state: &Arc<AppState>) -> AppResult<()> {
                 started_at: Instant::now(),
                 firewall: firewall.clone(),
                 routes: routes.clone(),
+                dns: None,
                 output: output.clone(),
             });
+            // Also monitor a core retained after a DNS rollback failure.
+            watch_child(state, epoch, pid);
             match wait_for_ready(state, &config, &plan, epoch, pid, &output).await {
                 Ok(()) => {
                     if let Some(routes) = &routes {
                         routes.capture(pid).await?;
+                    }
+                    if let Some(dns_plan) = dns_plan.clone() {
+                        let lease = super::openwrt_dns::DnsLease::prepare(dns_plan, pid).await?;
+                        if let Some(process) = state.sing_process.lock().await.as_mut() {
+                            process.dns = Some(lease.clone());
+                        }
+                        routing::check_current(state, epoch)?;
+                        lease.activate(state, epoch).await?;
+                        state.runtime_status.lock().unwrap_or_else(|e| e.into_inner()).dns = Some(super::openwrt_dns::DnsStatus {
+                            phase: "active", message: "dnsmasq 公网查询已自动接入代理 DNS".into(),
+                        });
                     }
                     routing::check_current(state, epoch)?;
                     if plan.effective == EffectiveRouting::Nftables {
@@ -325,14 +352,16 @@ pub async fn start_sing_internal(state: &Arc<AppState>) -> AppResult<()> {
                         firewall.watch();
                     }
                     routing::status(state, RuntimePhase::Ready, Some(plan.clone()), None);
-                    watch_child(state, epoch, pid);
                     return Ok(());
                 }
                 Err(error) => {
-                    let _ = stop_locked(state).await;
+                    if let Some(cleanup_error) = stop_locked(state).await {
+                        return Err(AppError::message(format!(
+                            "ROUTE_CLEANUP_FAILED: unable to clean failed activation: {cleanup_error}"
+                        )));
+                    }
                     let details = output.text();
                     if attempt == 0
-                        && plan.requested == crate::models::TunRouting::Auto
                         && plan.effective == EffectiveRouting::Nftables
                         && known_nft_failure(&details)
                         && routing::is_current(state, epoch)
@@ -340,7 +369,7 @@ pub async fn start_sing_internal(state: &Arc<AppState>) -> AppResult<()> {
                         routing::remember_nft_rules(false);
                         plan.effective = EffectiveRouting::PolicyRoute;
                         plan.reason = Some(
-                            "nftables 基础查询成功，但内核不支持启动所需规则；已回退到兼容策略路由"
+                            "内核不支持启动所需 nftables 规则，已自动适配为策略路由"
                                 .into(),
                         );
                         routing::apply(&mut config, &plan)?;
@@ -357,13 +386,20 @@ pub async fn start_sing_internal(state: &Arc<AppState>) -> AppResult<()> {
     }
     .await;
     if let Err(error) = &result {
-        let _ = stop_locked(state).await;
+        let cleanup = stop_locked(state).await;
         if routing::is_current(state, epoch) {
             routing::status(
                 state,
-                RuntimePhase::Failed,
+                if sing_box_is_running(state).await {
+                    RuntimePhase::Ready
+                } else {
+                    RuntimePhase::Failed
+                },
                 Some(plan),
-                Some(error.to_string()),
+                Some(match cleanup {
+                    Some(cleanup) => format!("{error}; cleanup failed: {cleanup}"),
+                    None => error.to_string(),
+                }),
             );
         }
     }
@@ -516,6 +552,31 @@ fn watch_child(state: &Arc<AppState>, _epoch: u64, pid: u32) {
                 let process = slot.take().unwrap();
                 drop(slot);
                 let mut cleanup_errors = Vec::new();
+                if let Some(dns) = process.dns {
+                    match dns.restore().await {
+                        Ok(()) => {
+                            state
+                                .runtime_status
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .dns = Some(super::openwrt_dns::DnsStatus {
+                                phase: "restored",
+                                message: "核心退出，已恢复系统 DNS".into(),
+                            })
+                        }
+                        Err(error) => {
+                            state
+                                .runtime_status
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .dns = Some(super::openwrt_dns::DnsStatus {
+                                phase: "failed",
+                                message: error.to_string(),
+                            });
+                            cleanup_errors.push(error.to_string());
+                        }
+                    }
+                }
                 if let Some(firewall) = process.firewall {
                     if let Err(error) = firewall.cleanup().await {
                         cleanup_errors.push(error.to_string());
@@ -557,10 +618,16 @@ fn watch_child(state: &Arc<AppState>, _epoch: u64, pid: u32) {
     });
 }
 
-pub async fn stop_sing_internal(state: &Arc<AppState>) {
+pub async fn stop_sing_internal(state: &Arc<AppState>) -> AppResult<()> {
     let epoch = state.runtime_epoch.load(Ordering::SeqCst);
     let _lifecycle = state.sing_lifecycle.lock().await;
     let mut error = stop_locked(state).await;
+    if error.is_none() {
+        error = super::openwrt_dns::recover_stale(&get_sing_box_home())
+            .await
+            .err()
+            .map(|e| e.to_string());
+    }
     if error.is_none() {
         error = super::route_cleanup::RouteOwnership::recover()
             .await
@@ -576,19 +643,52 @@ pub async fn stop_sing_internal(state: &Arc<AppState>) {
     if routing::is_current(state, epoch) {
         routing::status(
             state,
-            if error.is_some() {
+            if error.is_some() && sing_box_is_running(state).await {
+                RuntimePhase::Ready
+            } else if error.is_some() {
                 RuntimePhase::Failed
             } else {
                 RuntimePhase::Stopped
             },
             None,
-            error,
+            error.clone(),
         );
+    }
+    match error {
+        Some(e) => Err(AppError::message(e)),
+        None => Ok(()),
     }
 }
 
 async fn stop_locked(state: &Arc<AppState>) -> Option<String> {
     let mut failure = None;
+    let dns = state
+        .sing_process
+        .lock()
+        .await
+        .as_ref()
+        .and_then(|process| process.dns.clone());
+    if let Some(dns) = dns {
+        if let Err(e) = dns.restore().await {
+            state
+                .runtime_status
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .dns = Some(super::openwrt_dns::DnsStatus {
+                phase: "failed",
+                message: e.to_string(),
+            });
+            return Some(e.to_string());
+        }
+        state
+            .runtime_status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .dns = Some(super::openwrt_dns::DnsStatus {
+            phase: "restored",
+            message: "已恢复系统 DNS".into(),
+        });
+    }
     let process = state.sing_process.lock().await.take();
     if let Some(mut process) = process {
         if process.child.try_wait().ok().flatten().is_none() {

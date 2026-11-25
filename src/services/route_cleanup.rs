@@ -21,6 +21,8 @@ struct Journal {
     start_ticks: u64,
     tun: String,
     rules: BTreeSet<Vec<String>>,
+    #[serde(default)]
+    native_rules: Option<BTreeSet<Vec<u8>>>,
     nft_handle: Option<u64>,
     first_priority: u64,
     fallback_priority: u64,
@@ -58,6 +60,8 @@ pub struct RouteOwnership {
     ip: Option<PathBuf>,
     before: BTreeSet<Vec<String>>,
     added: Mutex<Option<BTreeSet<Vec<String>>>>,
+    native_before: BTreeSet<Vec<u8>>,
+    native_added: Mutex<Option<BTreeSet<Vec<u8>>>>,
     first_priority: u64,
     fallback_priority: u64,
     table: String,
@@ -87,6 +91,8 @@ impl RouteOwnership {
             ip,
             before: BTreeSet::new(),
             added: Mutex::new(None),
+            native_before: BTreeSet::new(),
+            native_added: Mutex::new(None),
             first_priority: tun["iproute2_rule_index"].as_u64().unwrap_or(9000),
             fallback_priority: tun["iproute2_auto_redirect_fallback_rule_index"]
                 .as_u64()
@@ -103,6 +109,7 @@ impl RouteOwnership {
         owner.before = owner.snapshot().await.ok_or_else(|| {
             AppError::message("ROUTING_INSPECTION_FAILED: a working ip -4 rule show is required to establish network ownership")
         })?;
+        owner.native_before = native_rules().await?;
         if owner
             .before
             .iter()
@@ -164,6 +171,14 @@ impl RouteOwnership {
         let after = self.snapshot().await.ok_or_else(|| {
             AppError::message("ROUTING_INSPECTION_FAILED: unable to record the core's policy rules")
         })?;
+        let current = native_rules().await?;
+        *self.native_added.lock().unwrap_or_else(|e| e.into_inner()) = Some(
+            current
+                .difference(&self.native_before)
+                .filter(|rule| self.selected_native(rule))
+                .cloned()
+                .collect(),
+        );
         *self.added.lock().unwrap_or_else(|e| e.into_inner()) =
             Some(after.difference(&self.before).cloned().collect());
         if self.nft_required {
@@ -193,6 +208,11 @@ impl RouteOwnership {
                 .clone()
                 .unwrap_or_default(),
             nft_handle: *self.nft_handle.lock().unwrap_or_else(|e| e.into_inner()),
+            native_rules: self
+                .native_added
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
             first_priority: self.first_priority,
             fallback_priority: self.fallback_priority,
             table: self.table.clone(),
@@ -224,44 +244,11 @@ impl RouteOwnership {
         // sing-tun also installs priority-1 rules pointing to a random table with
         // local 127.0.0.1 routes. Those routes reference physical devices, so the
         // kernel does not remove them when the TUN fd closes after SIGKILL.
-        for table in self.redirect_tables() {
-            let ip = self
-                .ip
-                .as_ref()
-                .ok_or_else(|| AppError::message("ROUTE_CLEANUP_FAILED: iproute2 missing"))?;
-            let output = command_output(
-                ip,
-                &["-4", "route", "show", "table", &table],
-                Duration::from_secs(2),
-            )
-            .await?;
-            if !output.status.success()
-                && !String::from_utf8_lossy(&output.stderr).contains("does not exist")
-            {
-                return Err(AppError::message(
-                    "ROUTE_CLEANUP_FAILED: unable to inspect owned redirect table",
-                ));
-            }
-            let routes = String::from_utf8_lossy(&output.stdout);
-            for line in routes.lines() {
-                let fields: Vec<&str> = line.split_whitespace().collect();
-                if fields.first() != Some(&"local")
-                    || !matches!(fields.get(1), Some(&"127.0.0.1" | &"127.0.0.1/32"))
-                    || !fields.windows(2).any(|pair| pair == ["scope", "host"])
-                {
-                    continue;
-                }
-                let mut arguments = vec!["-4", "route", "del", "table", &table];
-                arguments.extend(fields);
-                let deleted = command_output(ip, &arguments, Duration::from_secs(2)).await?;
-                if !deleted.status.success() {
-                    return Err(AppError::message(format!(
-                        "ROUTE_CLEANUP_FAILED: {}",
-                        String::from_utf8_lossy(&deleted.stderr)
-                    )));
-                }
-            }
-        }
+        let tables = self.redirect_tables()?;
+        tokio::task::spawn_blocking(move || super::route_netlink::cleanup_redirect_routes(&tables))
+            .await
+            .map_err(|e| AppError::message(format!("ROUTE_CLEANUP_FAILED: {e}")))?
+            .map_err(|e| AppError::context("ROUTE_CLEANUP_FAILED", e))?;
         let owned = self
             .added
             .lock()
@@ -277,26 +264,49 @@ impl RouteOwnership {
                 ))
             }
         };
-        for rule in owned.intersection(&present) {
-            let mut arguments = vec!["-4", "rule", "del"];
-            arguments.extend(rule.iter().map(String::as_str));
-            match command_output(
-                self.ip
-                    .as_ref()
-                    .ok_or_else(|| AppError::message("ROUTE_CLEANUP_FAILED: iproute2 missing"))?,
-                &arguments,
-                Duration::from_secs(2),
-            )
-            .await
-            {
-                Ok(output) if output.status.success() => {}
-                result => {
-                    return Err(AppError::message(format!(
-                        "ROUTE_CLEANUP_FAILED: {result:?}"
-                    )))
+        let current = native_rules().await?;
+        let recorded = self
+            .native_added
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let delete: BTreeSet<Vec<u8>> = if let Some(recorded) = recorded {
+            current.intersection(&recorded).cloned().collect()
+        } else {
+            // Migrate old journals only when the exact displayed owned rule maps
+            // unambiguously to a single kernel rule; never delete by priority alone.
+            let mut delete = BTreeSet::new();
+            for rule in owned.intersection(&present) {
+                let key = legacy_rule_key(rule).ok_or_else(|| {
+                    AppError::message("ROUTE_CLEANUP_FAILED: invalid legacy ownership record")
+                })?;
+                let candidates: Vec<_> = current
+                    .iter()
+                    .filter(|raw| {
+                        (
+                            super::route_netlink::priority(raw),
+                            super::route_netlink::table(raw),
+                        ) == key
+                    })
+                    .collect();
+                if candidates.len() != 1 {
+                    return Err(AppError::message(
+                        "ROUTE_CLEANUP_FAILED: legacy policy rule ownership is ambiguous",
+                    ));
                 }
+                delete.insert(candidates[0].clone());
             }
-        }
+            delete
+        };
+        tokio::task::spawn_blocking(move || {
+            for rule in delete {
+                super::route_netlink::delete_rule(&rule)?;
+            }
+            Ok::<_, std::io::Error>(())
+        })
+        .await
+        .map_err(|e| AppError::message(format!("ROUTE_CLEANUP_FAILED: {e}")))?
+        .map_err(|e| AppError::context("ROUTE_CLEANUP_FAILED", e))?;
         let identity = *self.identity.lock().unwrap_or_else(|e| e.into_inner());
         if let Ok(bytes) = tokio::fs::read(journal_path()).await {
             if let Ok(journal) = serde_json::from_slice::<Journal>(&bytes) {
@@ -308,7 +318,19 @@ impl RouteOwnership {
         Ok(())
     }
 
-    fn redirect_tables(&self) -> BTreeSet<String> {
+    fn redirect_tables(&self) -> AppResult<BTreeSet<u32>> {
+        if let Some(rules) = self
+            .native_added
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            return Ok(rules
+                .iter()
+                .filter(|rule| super::route_netlink::priority(rule) == 1)
+                .map(|rule| super::route_netlink::table(rule))
+                .collect());
+        }
         self.added
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -320,7 +342,22 @@ impl RouteOwnership {
                     .find(|pair| pair[0] == "lookup")
                     .map(|pair| pair[1].clone())
             })
+            .map(|table| {
+                table.parse::<u32>().map_err(|_| {
+                    AppError::message(
+                        "ROUTE_CLEANUP_FAILED: legacy ownership record has no numeric table ID",
+                    )
+                })
+            })
             .collect()
+    }
+
+    fn selected_native(&self, rule: &[u8]) -> bool {
+        let priority = super::route_netlink::priority(rule) as u64;
+        (self.nft_required && priority == 1)
+            || (self.first_priority..=self.first_priority.saturating_add(10)).contains(&priority)
+            || (priority == self.fallback_priority
+                && super::route_netlink::table(rule).to_string() == self.table)
     }
 
     pub async fn recover() -> AppResult<()> {
@@ -359,6 +396,8 @@ impl RouteOwnership {
             ip: find_command(&command_search_dirs(), "ip"),
             before: BTreeSet::new(),
             added: Mutex::new(Some(journal.rules)),
+            native_before: BTreeSet::new(),
+            native_added: Mutex::new(journal.native_rules),
             first_priority: journal.first_priority,
             fallback_priority: journal.fallback_priority,
             table: journal.table,
@@ -371,6 +410,30 @@ impl RouteOwnership {
     }
 }
 
+async fn native_rules() -> AppResult<BTreeSet<Vec<u8>>> {
+    tokio::task::spawn_blocking(super::route_netlink::rules)
+        .await
+        .map_err(|e| AppError::message(format!("ROUTING_INSPECTION_FAILED: {e}")))?
+        .map_err(|e| AppError::context("ROUTING_INSPECTION_FAILED", e))
+}
+
+fn legacy_rule_key(rule: &[String]) -> Option<(u32, u32)> {
+    let priority = rule.get(1)?.parse().ok()?;
+    let table = rule
+        .windows(2)
+        .find(|pair| pair[0] == "lookup")
+        .map(|pair| pair[1].as_str())
+        .unwrap_or("unspec");
+    let table = match table {
+        "unspec" | "[none]" => 0,
+        "default" => 253,
+        "main" => 254,
+        "local" => 255,
+        table => table.parse().ok()?,
+    };
+    Some((priority, table))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,6 +443,8 @@ mod tests {
             ip: Some("ip".into()),
             before: BTreeSet::new(),
             added: Mutex::new(None),
+            native_before: BTreeSet::new(),
+            native_added: Mutex::new(None),
             first_priority: 9000,
             fallback_priority: 32768,
             table: "2022".into(),
@@ -412,5 +477,25 @@ mod tests {
         assert!(owner
             .selected_rule("32768: not from all fwmark 0x2024 lookup 2022")
             .is_some());
+    }
+
+    #[test]
+    fn native_table_ids_do_not_depend_on_busybox_display_names() {
+        let owner = owner();
+        let id = 0xf1234567u32;
+        let mut rule = vec![2, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0];
+        for (kind, value) in [(6u16, 1u32), (15, id)] {
+            rule.extend_from_slice(&8u16.to_ne_bytes());
+            rule.extend_from_slice(&kind.to_ne_bytes());
+            rule.extend_from_slice(&value.to_ne_bytes());
+        }
+        *owner.added.lock().unwrap() = Some(BTreeSet::from([vec![
+            "priority", "1", "from", "all", "lookup", "unknown",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect()]));
+        *owner.native_added.lock().unwrap() = Some(BTreeSet::from([rule]));
+        assert_eq!(owner.redirect_tables().unwrap(), BTreeSet::from([id]));
     }
 }

@@ -24,4 +24,5 @@
 - [CLI 启动 review](cli-startup-review.md)
 - [面板认证 review](panel-auth-review.md)
 - [OpenWrt 修复 review](openwrt-review.md)
+- [OpenWrt DNS 修复与验收](openwrt-dns-fix-plan.md)
 - [VPS 部署 review](vps-review.md)
