@@ -3,6 +3,7 @@
 Only private copies are mounted. No host directories are mounted beneath a
 TemporaryDirectory: recursive deletion must never reach original host files.
 """
+from contextlib import contextmanager
 import fcntl
 import json
 import os
@@ -59,15 +60,37 @@ def terminate(pid):
         pass
 
 
+@contextmanager
+def service_registry(directory):
+    # Dispatch and teardown share one lock, including registry reads.
+    with (directory / 'services.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        database = directory / 'services.json'
+        try:
+            services = json.loads(database.read_text())
+        except FileNotFoundError:
+            services = {}
+        yield database, services
+
+
+def save_services(database, services):
+    # A killed writer must leave the previous snapshot readable.
+    temporary = database.with_suffix('.json.tmp')
+    try:
+        temporary.write_text(json.dumps(services))
+        temporary.replace(database)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def dispatch():
     """Small, file-locked procd substitute. Its daemons outlive API processes."""
     directory = Path(os.environ['MIAO_DNS_FIXTURE_DIR'])
-    database = directory / 'services.json'
-    with (directory / 'services.lock').open('w') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        services = json.loads(database.read_text()) if database.exists() else {}
+    with service_registry(directory) as (database, services):
         if sys.argv[1] == 'restart':
             assert sys.argv[2:] == ['fixture']
+            if (directory / 'services.closed').exists():
+                sys.exit(1)
             if (directory / 'restart-fail').exists():
                 sys.exit(1)
             if (directory / 'restart-delay').exists():
@@ -83,12 +106,14 @@ def dispatch():
             with (directory / 'dnsmasq.log').open('ab') as output:
                 proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=output, stderr=output, start_new_session=True)
             services['dnsmasq'] = {'instances': {'fixture': {'command': command, 'pid': proc.pid, 'running': True}}}
-            database.write_text(json.dumps(services))
+            save_services(database, services)
             sys.exit(0)
         assert sys.argv[1:3] == ['call', 'service']
         method, request = sys.argv[3], json.loads(sys.argv[4])
         name = request.get('name')
         if method == 'set':
+            if (directory / 'services.closed').exists():
+                sys.exit(1)
             instances = request['instances']
             for entry in instances.values():
                 assert entry['respawn'] == ['3600', '1', '5'], 'procd respawn parameters are strings'
@@ -96,11 +121,11 @@ def dispatch():
                     proc = subprocess.Popen(entry['command'], env=dict(os.environ, **entry.get('env', {})), stdin=subprocess.DEVNULL, stdout=output, stderr=output, start_new_session=True)
                 entry.update(pid=proc.pid, running=True)
             services[name] = {'instances': instances}
-            database.write_text(json.dumps(services))
+            save_services(database, services)
             print('{}')
         elif method == 'delete':
             service = services.pop(name, {})
-            database.write_text(json.dumps(services))
+            save_services(database, services)
             for entry in service.get('instances', {}).values():
                 if alive(entry['pid']):
                     terminate(entry['pid'])
@@ -255,12 +280,15 @@ meta nfproto ipv6 meta l4proto udp ct state invalid counter comment "ct-invalid"
         if self.trace_process:
             self.trace_process.terminate()
             self.trace_process.wait()
-        database = self.directory / 'services.json'
-        if database.exists():
-            for service in json.loads(database.read_text()).values():
-                for entry in service['instances'].values():
-                    if alive(entry['pid']):
-                        terminate(entry['pid'])
+        with service_registry(self.directory) as (_, services):
+            # Queued recovery commands must not create daemons after this
+            # snapshot. Release the lock before signalling existing processes.
+            (self.directory / 'services.closed').touch()
+            pids = {entry['pid'] for service in services.values()
+                    for entry in service['instances'].values()}
+        for pid in pids:
+            if alive(pid):
+                terminate(pid)
 
 
 if __name__ == '__main__':
